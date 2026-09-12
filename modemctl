@@ -201,10 +201,13 @@ cmd_status() {
     head_ "what the stack says"
     local q
     q=$(mmcli -m any 2>/dev/null | sed -n 's/.*signal quality: *//p')
+    # "cached" before 0%, not after. ModemManager reports 0% (cached) for the
+    # first seconds after every restart, before the first poll lands - calling
+    # that a failure made a healthy package install look broken.
     case "$q" in
         "")        warn "signal quality unreadable - is ModemManager running?" ;;
+        *cached*)  warn "signal quality $q - no reading yet, give it 15 s" ;;
         0%*)       bad "signal quality $q - the bar is blind again"; bad_count=$((bad_count+1)) ;;
-        *cached*)  warn "signal quality $q - no fresh reading yet, give it 30 s" ;;
         *)         ok "signal quality $q" ;;
     esac
 

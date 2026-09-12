@@ -234,6 +234,12 @@ matches what the same radio shows under Android.
 `modemctl signal` runs that comparison for you and fails loudly when the two
 disagree by more than 6 dB.
 
+One more thing the fix needs: oFono's netmon is on-demand only, so ofono2mm
+polls it every 30 seconds (every 3 seconds during startup, at most 20 times,
+because the interface is exported long before the SIM is readable). Without
+the fast start the bar sits empty for half a minute after every boot; with it,
+measured 15 seconds from `systemctl restart ModemManager` to a filled bar.
+
 ---
 
 ## Traps that cost time
@@ -262,6 +268,20 @@ the kernel calls it `ccmni0` or `ccmni1` depending on the context. Check
 **`+CESQ` returns indices, not dBm**, and this modem appends three
 MTK-specific fields after the six standard ones. Read by position from the
 left.
+
+**`DPkg::Post-Invoke-Success` does not exist.** apt parses it without a
+complaint and lists it in `apt-config dump`, so the hook looks installed. Only
+`APT::Update` has a `-Success` variant; for DPkg, apt runs `DPkg::Post-Invoke`
+and nothing else. Found by reinstalling ofono2mm and discovering every patch
+gone afterwards - while the running daemon still had the patched code in
+memory and everything therefore looked fine. That gap between what is on disk
+and what is running is the reason to test this by actually reinstalling the
+package rather than by reading the hook.
+
+**A `mktemp -d` staging directory travels into the .deb as the mode of `./`.**
+mktemp makes it 0700, and nothing of ours should be telling dpkg anything
+about the root directory's permissions. `chmod 755` on the staging directory
+before building.
 
 **Stale `__pycache__` outlives a patch.** Python will run bytecode from before
 the change if its timestamp still looks newer. `modemctl apply` removes it.

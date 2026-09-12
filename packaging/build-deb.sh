@@ -19,6 +19,10 @@ VERSION="0.1.0+git$COUNT.$DATE.$HASH"
 
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
+# mktemp makes it 0700, and that mode travels into the package as the mode of
+# "./". Nothing should be able to learn the root directory's permissions from
+# a package of ours.
+chmod 755 "$STAGE"
 echo "package $PKG $VERSION (all)"
 
 install -Dm755 modemctl                  "$STAGE/usr/bin/modemctl"
