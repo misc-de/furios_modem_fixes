@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=Keep the FuriOS modem fixes applied
+Documentation=file:/usr/share/doc/furios-modem-fixes/README.md
+# Before, not After: the patched files have to be on disk before ofono2mm
+# imports them, otherwise the first boot after a package update comes up with
+# a blind signal bar and a flapping data connection, and only the NEXT boot is
+# healthy. ofono is listed too because radioInterface is read at its start.
+Before=ofono.service ModemManager.service
+# Not Requires: if the modem stack is not being started at all, there is
+# nothing to fix and this should stay out of the way.
+Wants=ofono.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# --no-restart because systemd is starting those services right after this
+# anyway. Restarting them from inside a unit they are ordered against is how
+# you build a deadlock, and we have built that one before.
+ExecStart=/usr/bin/modemctl apply --quiet --no-restart
+# A modem that cannot be fixed must not keep the boot from finishing.
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=multi-user.target

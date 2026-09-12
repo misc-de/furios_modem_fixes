@@ -1,0 +1,14 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+// SPDX-License-Identifier: MIT
+//
+// An ofono2mm update overwrites the patched files. Without this the phone
+// keeps running the old code until the next reboot, and then comes up fixed
+// again - a difference that is very hard to explain to yourself later.
+//
+// Post-Invoke-Success, not Post-Invoke: a failed apt run may have left the
+// package half-unpacked, and patching that is worse than waiting for the boot
+// unit. Quiet unless something goes wrong, and never fatal - apt must not fail
+// because of us.
+DPkg::Post-Invoke-Success {
+    "if [ -x /usr/bin/modemctl ] && [ -d /usr/lib/ofono2mm/ofono2mm ]; then /usr/bin/modemctl apply --quiet || true; fi";
+};

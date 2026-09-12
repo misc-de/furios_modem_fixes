@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+"""
+What the radio really receives.
+
+Neither the signal icon nor `mmcli --signal-get` could be believed before the
+fix, so this reads oFono directly and, where the modem allows it, checks the
+answer against a second, independent source (AT+CESQ).
+
+The conversions are NOT reimplemented here. They are imported from the patched
+mm_modem_signal.py, so this tool measures the code that is actually running
+rather than a copy of it that could drift. If the import fails, the fix is not
+installed - and saying that is more useful than printing numbers from a
+private copy.
+"""
+import sys
+
+OFONO2MM = "/usr/lib/ofono2mm"
+if OFONO2MM not in sys.path:
+    sys.path.insert(0, OFONO2MM)
+
+try:
+    from ofono2mm.mm_modem_signal import (
+        _asu_to_rssi, _quality_percent, _signed_level,
+        RSRP_QUALITY_POINTS, RSRP_RANGE, RSRQ_RANGE, RSSI_QUALITY_POINTS,
+    )
+except ImportError as e:
+    sys.exit(f"the signal fix is not installed in {OFONO2MM}: {e}\n"
+             f"run: sudo modemctl apply")
+
+try:
+    from dbus import SystemBus, Interface
+except ImportError:
+    sys.exit("python3-dbus is missing (apt install python3-dbus)")
+
+MODEM = "/ril_0"
+
+
+class _V:
+    """The helpers take dbus_fast Variants; python-dbus hands out plain values."""
+    def __init__(self, value):
+        self.value = value
+
+
+def cell_info(bus):
+    netmon = Interface(bus.get_object("org.ofono", MODEM), "org.ofono.NetworkMonitor")
+    return dict(netmon.GetServingCellInformation())
+
+
+def cesq(bus):
+    """
+    +CESQ: <rxlev>,<ber>,<rscp>,<ecno>,<rsrq>,<rsrp>[,...]
+
+    Indices, not dBm: RSRP = -140 + index, RSRQ = -19.5 + index/2. This modem
+    appends three more MTK-specific fields, so read by position from the left
+    and ignore the tail.
+    """
+    try:
+        at = Interface(bus.get_object("org.ofono", MODEM), "org.ofono.FuriLabs.AT")
+        reply = str(at.SendCommand("AT+CESQ"))
+    except Exception:
+        return None
+
+    for line in reply.splitlines():
+        line = line.strip()
+        if not line.startswith("+CESQ:"):
+            continue
+        fields = [f.strip() for f in line.split(":", 1)[1].split(",")]
+        if len(fields) < 6:
+            return None
+        try:
+            rsrq_i, rsrp_i = int(fields[4]), int(fields[5])
+        except ValueError:
+            return None
+        # 255 is the "unknown" marker for these two.
+        rsrq = -19.5 + rsrq_i * 0.5 if 0 <= rsrq_i <= 34 else None
+        rsrp = -140.0 + rsrp_i if 0 <= rsrp_i <= 97 else None
+        return rsrp, rsrq
+    return None
+
+
+def fmt(value, unit):
+    return "n/a" if value is None else f"{value:.0f} {unit}"
+
+
+def main():
+    bus = SystemBus()
+    try:
+        info = cell_info(bus)
+    except Exception as e:
+        sys.exit(f"cannot read oFono's NetworkMonitor: {e}")
+
+    tech = str(info.get("Technology", ""))
+    if not tech:
+        sys.exit("no serving cell - is the modem registered?")
+
+    rssi = _asu_to_rssi(_V(info.get("Strength")))
+    rsrp = rsrq = None
+    if tech in ("lte", "nr"):
+        # Read crosswise: oFono's cellinfo netmon plugin files the HAL's rsrp
+        # under the RSRQ name and the other way round.
+        rsrp = _signed_level(_V(info.get("ReferenceSignalReceivedQuality")), RSRP_RANGE)
+        rsrq = _signed_level(_V(info.get("ReferenceSignalReceivedPower")), RSRQ_RANGE)
+        quality = _quality_percent(rsrp, RSRP_QUALITY_POINTS)
+        if quality is None:
+            quality = _quality_percent(rssi, RSSI_QUALITY_POINTS)
+    else:
+        quality = _quality_percent(rssi, RSSI_QUALITY_POINTS)
+
+    print(f"technology     {tech}")
+    if "EARFCN" in info:
+        print(f"EARFCN         {int(info['EARFCN'])}")
+    if "CellId" in info:
+        print(f"cell           {int(info['CellId'])}")
+    print(f"RSRP           {fmt(rsrp, 'dBm')}")
+    print(f"RSRQ           {fmt(rsrq, 'dB')}")
+    asu = f"   (ASU {int(info['Strength'])})" if "Strength" in info else ""
+    print(f"RSSI           {fmt(rssi, 'dBm')}{asu}")
+    print(f"bar            {'n/a' if quality is None else str(quality) + ' %'}")
+
+    ref = cesq(bus)
+    print()
+    if ref is None:
+        print("AT+CESQ        not available - no independent cross-check")
+        return
+    ref_rsrp, ref_rsrq = ref
+    print(f"AT+CESQ        RSRP {fmt(ref_rsrp, 'dBm')}, RSRQ {fmt(ref_rsrq, 'dB')}")
+
+    # The two sources are sampled a moment apart, so they will not match to the
+    # decimal. They must agree on the order of magnitude - a swap or a dropped
+    # sign shows up as tens of dB, never as two.
+    if rsrp is not None and ref_rsrp is not None:
+        delta = abs(rsrp - ref_rsrp)
+        if delta <= 6:
+            print(f"               agrees within {delta:.0f} dB")
+        else:
+            print(f"               DISAGREES by {delta:.0f} dB - suspect the conversion")
+            sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

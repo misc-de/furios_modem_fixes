@@ -1,0 +1,4 @@
+mmsd4ofono  1.6.0+git20260118002621.d86954e.forky.production
+ofono  1.29+git8-11+git20260315165210.1e25a69.forky.production
+ofono-binder-plugin:arm64  1.1.22-6+git20260213021407.122c437.forky.production
+ofono2mm  1.8.0+git20260520152015.3b02630.forky.production

@@ -1,0 +1,29 @@
+Licence notice for furios_modem
+===============================
+
+The tooling in this repository is MIT (see LICENSE): modemctl, the signal
+readout, the installer, the tests, the packaging. Every file we wrote carries
+an SPDX header saying so.
+
+The patches are not ours alone. They are modifications to files that belong to
+the ofono2mm package, and a modification carries the licence of what it
+modifies. ofono2mm's own copyright file splits them:
+
+    BSD-3-Clause    utils.py  mm_bearer.py  mm_modem.py  mm_modem_simple.py
+                    Copyright 2023 Erik Inkinen, 2025 Bardia Moshiri
+
+    GPL-2.0         mm_modem_signal.py
+                    Copyright 2025 Bardia Moshiri, 2025 Jesus Higueras
+
+So patches/ofono2mm-mm_modem_signal.patch and patched-files/mm_modem_signal.py
+are GPL-2.0, and the .deb from packaging/build-deb.sh - which ships both - is
+GPL-2.0 as a whole, with a Debian copyright file that says so per file.
+
+(utils.py is not listed individually in ofono2mm's copyright file. We treat the
+package's own GPL-2.0 as governing there, which is the conservative reading.)
+
+Anyone taking only the MIT files from here - modemctl, tools/, tests/ - takes
+on none of that.
+
+The reasoning behind each patch, and the upstream reports, are in FINDINGS.md
+and upstream/.

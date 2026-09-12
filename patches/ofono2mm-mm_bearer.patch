@@ -1,0 +1,63 @@
+--- a/ofono2mm/mm_bearer.py
++++ b/ofono2mm/mm_bearer.py
+@@ -6,7 +6,7 @@
+ from dbus_fast.constants import PropertyAccess
+ from dbus_fast import Variant
+ 
+-from ofono2mm.utils import async_retryable, save_setting, read_setting
++from ofono2mm.utils import async_retryable, save_setting, read_setting, netmask_to_prefix
+ from ofono2mm.logging import ofono2mm_print
+ 
+ class MMBearerInterface(ServiceInterface):
+@@ -133,6 +133,12 @@
+ 
+             new_properties = dict(self.props['Properties'].value)
+             new_properties['apn'] = Variant('s', chosen_apn)
++
++            # Report the family we actually bring the context up with rather
++            # than always claiming IPv4v6. MM_BEARER_IP_FAMILY_IPV4 = 1,
++            # IPV6 = 2, IPV4V6 = 4.
++            protocol = read_setting("protocol", "ip").strip()
++            new_properties['ip-type'] = Variant('u', {'ip': 1, 'ipv6': 2, 'dual': 4}.get(protocol, 1))
+             new_properties['user'] = Variant('s', chosen_username)
+             new_properties['password'] = Variant('s', chosen_password)
+ 
+@@ -177,7 +183,9 @@
+         self.active_connect += 1
+         await self.doConnect()
+ 
+-    @async_retryable()
++    # Bounded: an unbounded retry here never returns while the context keeps
++    # failing, so the caller's in-flight marker would never be cleared.
++    @async_retryable(6)
+     async def doConnect(self):
+         ofono2mm_print(f"Connecting the bearer at path {self.own_object_path} with ofono context {self.ofono_ctx}", self.verbose)
+         try:
+@@ -276,6 +284,14 @@
+             if 'Address' in value.value:
+                 self.props['Ip4Config'].value['address'] = value.value['Address']
+ 
++            # oFono reports the netmask as a dotted quad, MM wants a prefix
++            # length. Without this NM sees no prefix and configures a /0.
++            if 'Netmask' in value.value:
++                self.props['Ip4Config'].value['prefix'] = \
++                    Variant('u', netmask_to_prefix(value.value['Netmask'].value))
++            elif 'Address' in value.value and value.value['Address'].value:
++                self.props['Ip4Config'].value.setdefault('prefix', Variant('u', 32))
++
+             if 'DomainNameServers' in value.value:
+                 ipv4_dns = []
+                 for dns in value.value['DomainNameServers'].value:
+@@ -300,6 +316,12 @@
+                     self.props['Ip6Config'].value['method'] = Variant('u', 2) # static MM_BEARER_IP_METHOD_STATIC
+                 if value.value['Method'].value == 'dhcp':
+                     self.props['Ip6Config'].value['method'] = Variant('u', 3) # dhcp MM_BEARER_IP_METHOD_DHCP
++            else:
++                # No method from oFono, but we did get IPv6.Settings, so the
++                # bearer has IPv6. Router advertisements are how 3GPP hands out
++                # IPv6, so tell MM/NM to autoconfigure instead of leaving the
++                # method at unknown, which NM rejects outright.
++                self.props['Ip6Config'].value['method'] = Variant('u', 3) # dhcp MM_BEARER_IP_METHOD_DHCP
+ 
+             if 'Address' in value.value and value.value['Address'].value:
+                 self.props['Ip6Config'].value['address'] = value.value['Address']

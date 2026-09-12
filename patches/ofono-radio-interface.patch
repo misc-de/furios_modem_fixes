@@ -1,0 +1,8 @@
+--- a/radio-interface-binder.conf
++++ b/radio-interface-binder.conf
+@@ -10,4 +10,4 @@
+ [slot1]
+ path = /ril_0
+ slot = 0
+-radioInterface = 1.4
++radioInterface = 1.6

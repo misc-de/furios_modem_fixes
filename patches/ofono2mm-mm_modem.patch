@@ -1,0 +1,167 @@
+--- a/ofono2mm/mm_modem.py
++++ b/ofono2mm/mm_modem.py
+@@ -25,7 +25,7 @@
+ from ofono2mm.mm_modem_voice import MMModemVoiceInterface
+ from ofono2mm.mm_modem_cell_broadcast import MMModemCellBroadcastInterface
+ from ofono2mm.logging import ofono2mm_print
+-from ofono2mm.utils import read_setting, save_setting
++from ofono2mm.utils import read_setting, save_setting, netmask_to_prefix
+ from ofono2mm.dbus_interface_properties import DBusInterfaceProperties
+ from ofono2mm.types import _BANDS
+ 
+@@ -61,6 +61,8 @@
+         self.mm_modem_voice_interface = None
+         self.mm_modem_messaging_interface = None
+         self.mm_modem_cell_broadcast_interface = None
++        self.signal_quality = None
++        self.signal_poll_task = None
+         self.mm_interface_objects = [f'/org/freedesktop/ModemManager1/Modem/{self.index}']
+         self.mm_bearer_interfaces = []
+         self.selected_current_mode = []
+@@ -355,10 +357,15 @@
+     async def init_mm_signal_interface(self):
+         ofono2mm_print("Initialize Signal interface", self.verbose)
+ 
+-        self.mm_modem_signal_interface = MMModemSignalInterface(self.modem_name, self.ofono_interfaces, self.ofono_interface_props, self.verbose)
++        self.mm_modem_signal_interface = MMModemSignalInterface(self.modem_name, self.ofono_interfaces, self.ofono_interface_props, self.verbose, self)
+         self.bus.export(f'/org/freedesktop/ModemManager1/Modem/{self.index}', self.mm_modem_signal_interface)
+         await self.mm_modem_signal_interface.set_props()
+ 
++        if self.signal_poll_task:
++            self.signal_poll_task.cancel()
++
++        self.signal_poll_task = self.loop.create_task(self.mm_modem_signal_interface.poll_signal())
++
+     async def init_mm_location_interface(self):
+         ofono2mm_print("Initialize Location interface", self.verbose)
+ 
+@@ -390,6 +397,11 @@
+         self.loop.create_task(self.init_cell_broadcast())
+ 
+     def unexport_mm_interface_objects(self):
++        if self.signal_poll_task:
++            self.signal_poll_task.cancel()
++            self.signal_poll_task = None
++
++        self.signal_quality = None
+         self.mm_sim_interface = None
+         self.mm_modem3gpp_interface = None
+         self.mm_modem3gpp_ussd_interface = None
+@@ -471,6 +483,7 @@
+ 
+                 ipv4_method = 0
+                 ipv4_address = ''
++                ipv4_prefix = 32
+                 ipv4_dns = []
+                 ipv4_gateway = ''
+ 
+@@ -485,6 +498,9 @@
+                     if 'Address' in settings:
+                         ipv4_address = settings['Address'].value
+ 
++                    if 'Netmask' in settings:
++                        ipv4_prefix = netmask_to_prefix(settings['Netmask'].value)
++
+                     if 'DomainNameServers' in settings:
+                         for dns in settings['DomainNameServers'].value:
+                             ipv4_dns.append(dns)
+@@ -500,6 +516,8 @@
+                 if 'IPv6.Settings' in ctx[1] and ctx[1]['IPv6.Settings'].value:
+                     ipv6_settings = ctx[1]['IPv6.Settings'].value
+ 
++                    ipv6_method = 3  # dhcp MM_BEARER_IP_METHOD_DHCP
++
+                     if 'Address' in ipv6_settings and ipv6_settings['Address'].value:
+                         ipv6_method = 2  # static
+                         ipv6_address = ipv6_settings['Address'].value
+@@ -517,6 +535,7 @@
+                     "Ip4Config": Variant('a{sv}', {
+                         "method": Variant('u', ipv4_method),
+                         "address": Variant('s', ipv4_address),
++                        "prefix": Variant('u', ipv4_prefix),
+                         "dns1": Variant('s', ipv4_dns[0] if len(ipv4_dns) > 0 else ''),
+                         "dns2": Variant('s', ipv4_dns[1] if len(ipv4_dns) > 1 else ''),
+                         "dns3": Variant('s', ipv4_dns[2] if len(ipv4_dns) > 2 else ''),
+@@ -574,6 +593,7 @@
+ 
+             ipv4_method = 0
+             ipv4_address = ''
++            ipv4_prefix = 32
+             ipv4_dns = []
+             ipv4_gateway = ''
+ 
+@@ -588,6 +608,9 @@
+                 if 'Address' in settings:
+                     ipv4_address = settings['Address'].value
+ 
++                if 'Netmask' in settings:
++                    ipv4_prefix = netmask_to_prefix(settings['Netmask'].value)
++
+                 if 'DomainNameServers' in settings:
+                     for dns in settings['DomainNameServers'].value:
+                         ipv4_dns.append(dns)
+@@ -603,6 +626,8 @@
+             if 'IPv6.Settings' in properties and properties['IPv6.Settings'].value:
+                 ipv6_settings = properties['IPv6.Settings'].value
+ 
++                ipv6_method = 3  # dhcp MM_BEARER_IP_METHOD_DHCP
++
+                 if 'Address' in ipv6_settings and ipv6_settings['Address'].value:
+                     ipv6_method = 2  # static
+                     ipv6_address = ipv6_settings['Address'].value
+@@ -620,6 +645,7 @@
+                 "Ip4Config": Variant('a{sv}', {
+                     "method": Variant('u', ipv4_method),
+                     "address": Variant('s', ipv4_address),
++                    "prefix": Variant('u', ipv4_prefix),
+                     "dns1": Variant('s', ipv4_dns[0] if len(ipv4_dns) > 0 else ''),
+                     "dns2": Variant('s', ipv4_dns[1] if len(ipv4_dns) > 1 else ''),
+                     "dns3": Variant('s', ipv4_dns[2] if len(ipv4_dns) > 2 else ''),
+@@ -727,6 +753,15 @@
+                                         self.props['State'] = Variant('i', 8) # modem is registered MM_MODEM_STATE_REGISTERED
+                                         if 'Strength' in self.ofono_interface_props['org.ofono.NetworkRegistration'].props:
+                                             self.props['SignalQuality'] = Variant('(ub)', [self.ofono_interface_props['org.ofono.NetworkRegistration']['Strength'].value, True])
++                                        elif self.signal_quality is not None:
++                                            # Some drivers never report a signal
++                                            # strength to oFono at all, so
++                                            # NetworkRegistration has no Strength
++                                            # property to read and the bar would
++                                            # stay at 0% for good. Use what the
++                                            # Signal interface worked out from
++                                            # the serving cell measurements.
++                                            self.props['SignalQuality'] = Variant('(ub)', [self.signal_quality, True])
+                                     elif self.ofono_interface_props['org.ofono.NetworkRegistration']['Status'].value == 'searching':
+                                         self.props['State'] = Variant('i', 7) # modem is searching MM_MODEM_STATE_SEARCHING
+                                     else:
+@@ -973,6 +1008,31 @@
+         if changed_props:
+             self.emit_properties_changed(changed_props)
+ 
++    def update_signal_quality(self, quality):
++        """
++        Called by the Signal interface whenever it has fresh serving cell
++        measurements, as the fallback source for SignalQuality on modems whose
++        driver reports no signal strength to oFono.
++        """
++        ofono2mm_print(f"Signal quality from cell measurements is {quality}%", self.verbose)
++        self.signal_quality = quality
++
++        # Anything below registered has no meaningful bar, and set_props()
++        # clears SignalQuality for those states anyway.
++        if self.props['State'].value < 8:
++            return
++
++        # If the driver does publish a strength, that one wins; this is only a
++        # stand-in for the drivers that never do.
++        if 'org.ofono.NetworkRegistration' in self.ofono_interface_props and \
++                'Strength' in self.ofono_interface_props['org.ofono.NetworkRegistration'].props:
++            return
++
++        new_value = [quality, True]
++        if self.props['SignalQuality'].value != new_value:
++            self.props['SignalQuality'] = Variant('(ub)', new_value)
++            self.emit_properties_changed({'SignalQuality': self.props['SignalQuality'].value})
++
+     @method()
+     async def Enable(self, enable: 'b'):
+         ofono2mm_print(f"Enable with state {enable}", self.verbose)

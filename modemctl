@@ -1,0 +1,316 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+#
+# Keeps five fixes to the FuriOS modem stack applied, and tells you honestly
+# whether they are working.
+#
+# The fixes live in files that belong to the ofono2mm package, so every update
+# of that package wipes them. That is the whole reason this exists: apply is
+# idempotent and safe to run from a boot unit and from an apt hook, and it
+# refuses to touch a file whose patch no longer fits rather than mangling it.
+set -u
+
+VERSION=0.1.0
+TARGET=${MODEMCTL_TARGET:-/usr/lib/ofono2mm/ofono2mm}
+RADIO_CONF=${MODEMCTL_RADIO_CONF:-/etc/ofono/binder.d/radio-interface-binder.conf}
+FILES="utils mm_bearer mm_modem mm_modem_simple mm_modem_signal"
+
+# Where the patches are: next to this script when run from the work tree,
+# otherwise where the package put them.
+if [ -d "$(dirname "$(readlink -f "$0")")/patches" ]; then
+    SHARE=$(dirname "$(readlink -f "$0")")
+else
+    SHARE=${MODEMCTL_SHARE:-/usr/share/furios-modem}
+fi
+PATCHES=${MODEMCTL_PATCHES:-$SHARE/patches}
+
+QUIET=0
+NO_RESTART=0
+
+# Colour only when someone is watching. A boot unit's journal should not be
+# full of escape codes.
+if [ -t 1 ]; then
+    C_OK=$'\033[32m'; C_BAD=$'\033[31m'; C_WARN=$'\033[33m'; C_B=$'\033[1m'; C_0=$'\033[0m'
+else
+    C_OK=; C_BAD=; C_WARN=; C_B=; C_0=
+fi
+
+say()  { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
+ok()   { [ "$QUIET" -eq 1 ] || printf '  %sok%s    %s\n' "$C_OK" "$C_0" "$*"; }
+skip() { [ "$QUIET" -eq 1 ] || printf '  --    %s\n' "$*"; }
+warn() { printf '  %swarn%s  %s\n' "$C_WARN" "$C_0" "$*" >&2; }
+bad()  { printf '  %sFAIL%s  %s\n' "$C_BAD" "$C_0" "$*" >&2; }
+head_() { [ "$QUIET" -eq 1 ] || printf '\n%s== %s%s\n' "$C_B" "$*" "$C_0"; }
+
+need_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "needs root: sudo $0 $*" >&2
+        exit 1
+    fi
+}
+
+# --- patch state ------------------------------------------------------------
+#
+# Three answers, not two. "Does not apply" is not the same as "already there",
+# and treating them alike is how a half-patched file gets made worse.
+#   applied / missing / stale
+patch_state() {
+    local f=$1 p="$PATCHES/ofono2mm-$1.patch"
+    [ -f "$p" ] || { echo stale; return; }
+    [ -f "$TARGET/$f.py" ] || { echo absent; return; }
+    if patch -R -s -f --dry-run -p1 -d "$TARGET/.." < "$p" >/dev/null 2>&1; then
+        echo applied
+    elif patch -s -f --dry-run -p1 -d "$TARGET/.." < "$p" >/dev/null 2>&1; then
+        echo missing
+    else
+        echo stale
+    fi
+}
+
+radio_state() {
+    [ -f "$RADIO_CONF" ] || { echo absent; return; }
+    grep -q '^radioInterface *= *1\.6' "$RADIO_CONF" && echo applied || echo missing
+}
+
+# --- commands ---------------------------------------------------------------
+
+cmd_apply() {
+    need_root apply
+    local ts changed=0 failed=0
+    ts=$(date +%Y%m%d-%H%M%S)
+
+    head_ "ofono2mm"
+    for f in $FILES; do
+        case "$(patch_state "$f")" in
+            applied) skip "$f.py already patched" ;;
+            absent)  bad "$f.py not found - is ofono2mm installed?"; failed=1 ;;
+            stale)
+                bad "$f.py: patch does not fit (upstream moved)"
+                warn "     ready-made file in $SHARE/patched-files/$f.py - check by hand"
+                failed=1 ;;
+            missing)
+                cp -a "$TARGET/$f.py" "$TARGET/$f.py.bak.$ts"
+                if patch -s -f -p1 -d "$TARGET/.." < "$PATCHES/ofono2mm-$f.patch"; then
+                    ok "$f.py patched (backup: $f.py.bak.$ts)"
+                    changed=1
+                else
+                    bad "$f.py: patch failed"
+                    failed=1
+                fi ;;
+        esac
+    done
+
+    head_ "ofono radioInterface"
+    case "$(radio_state)" in
+        applied) skip "radioInterface already 1.6" ;;
+        absent)  bad "$RADIO_CONF not found"; failed=1 ;;
+        missing)
+            cp -a "$RADIO_CONF" "$RADIO_CONF.bak.$ts"
+            sed -i 's/^radioInterface *= *1\.[0-9]$/radioInterface = 1.6/' "$RADIO_CONF"
+            if [ "$(radio_state)" = applied ]; then
+                ok "radioInterface set to 1.6 (backup: $RADIO_CONF.bak.$ts)"
+                changed=1
+            else
+                bad "could not set radioInterface - check by hand"
+                failed=1
+            fi ;;
+    esac
+
+    # Stale bytecode is not cosmetic: Python will happily run a .pyc from
+    # before the patch if its timestamp still looks newer.
+    [ "$changed" -eq 1 ] && rm -rf "$TARGET/__pycache__"
+
+    if [ "$changed" -eq 1 ] && [ "$NO_RESTART" -eq 0 ]; then
+        head_ "restart"
+        # ModemManager.service is ofono2mm here (drop-in 10-ofono2mm.conf);
+        # there is no ofono2mm.service. ofono itself is deliberately NOT
+        # restarted - that leaves the modem offline.
+        if systemctl restart ModemManager; then
+            ok "ModemManager restarted (that is ofono2mm)"
+        else
+            bad "could not restart ModemManager"
+            failed=1
+        fi
+    elif [ "$changed" -eq 1 ]; then
+        say ""
+        say "Changed but not restarted. Apply with: systemctl restart ModemManager"
+    else
+        say ""
+        say "Nothing to do - everything is already in place."
+    fi
+
+    return $failed
+}
+
+cmd_revert() {
+    need_root revert
+    local failed=0
+    head_ "ofono2mm"
+    for f in $FILES; do
+        case "$(patch_state "$f")" in
+            applied)
+                if patch -R -s -f -p1 -d "$TARGET/.." < "$PATCHES/ofono2mm-$f.patch"; then
+                    ok "$f.py back to the shipped version"
+                else
+                    bad "$f.py: could not revert"; failed=1
+                fi ;;
+            *) skip "$f.py is not ours to revert" ;;
+        esac
+    done
+    rm -rf "$TARGET/__pycache__"
+
+    head_ "ofono radioInterface"
+    if [ "$(radio_state)" = applied ]; then
+        sed -i 's/^radioInterface *= *1\.6$/radioInterface = 1.4/' "$RADIO_CONF"
+        ok "radioInterface back to 1.4"
+        warn "1.4 is what brought back the Error-44 loop and the flapping data"
+        warn "connection. That is the shipped state, not a good state."
+    else
+        skip "radioInterface is not at 1.6"
+    fi
+
+    say ""
+    say "Shipped state restored. Takes effect after:"
+    say "    systemctl restart ModemManager"
+    return $failed
+}
+
+cmd_status() {
+    local bad_count=0
+    head_ "patches"
+    for f in $FILES; do
+        case "$(patch_state "$f")" in
+            applied) ok "$f.py" ;;
+            missing) bad "$f.py NOT patched"; bad_count=$((bad_count+1)) ;;
+            stale)   bad "$f.py patch no longer fits"; bad_count=$((bad_count+1)) ;;
+            absent)  bad "$f.py missing"; bad_count=$((bad_count+1)) ;;
+        esac
+    done
+    case "$(radio_state)" in
+        applied) ok "radioInterface = 1.6" ;;
+        *)       bad "radioInterface not 1.6"; bad_count=$((bad_count+1)) ;;
+    esac
+
+    head_ "what the stack says"
+    local q
+    q=$(mmcli -m any 2>/dev/null | sed -n 's/.*signal quality: *//p')
+    case "$q" in
+        "")        warn "signal quality unreadable - is ModemManager running?" ;;
+        0%*)       bad "signal quality $q - the bar is blind again"; bad_count=$((bad_count+1)) ;;
+        *cached*)  warn "signal quality $q - no fresh reading yet, give it 30 s" ;;
+        *)         ok "signal quality $q" ;;
+    esac
+
+    # Settings that live outside any package, so no update can undo them -
+    # but they were part of the same repair and are worth seeing.
+    local apn ipv6m
+    apn=$(dbus-send --system --print-reply --dest=org.ofono /ril_0/context2 \
+        org.ofono.ConnectionContext.GetProperties 2>/dev/null \
+        | grep -A2 '"AccessPointName"' | grep -o 'string "[^"]*"' | tail -1 | cut -d'"' -f2)
+    case "$apn" in
+        "")    warn "MMS APN unreadable - is ofono running?" ;;
+        mms)   bad "MMS APN is the placeholder 'mms' again - the mmsd loop is back"; bad_count=$((bad_count+1)) ;;
+        *)     ok "MMS APN: $apn" ;;
+    esac
+    # The cellular profile by type, NOT the first one listed - that is the
+    # Wi-Fi connection on any phone that has ever joined a network, and
+    # checking its ipv6.method would say nothing about the modem.
+    local gsmconn
+    gsmconn=$(nmcli -t -f NAME,TYPE connection show 2>/dev/null | sed -n 's/:gsm$//p' | head -1)
+    ipv6m=$(nmcli -t connection show "$gsmconn" 2>/dev/null | sed -n 's/^ipv6\.method://p')
+    case "$ipv6m" in
+        "")        skip "no cellular NetworkManager profile found" ;;
+        disabled)  ok "NetworkManager ipv6.method: disabled" ;;
+        *)         warn "NetworkManager ipv6.method is '$ipv6m', expected 'disabled'" ;;
+    esac
+
+    say ""
+    if [ "$bad_count" -eq 0 ]; then
+        say "${C_OK}everything in place${C_0}"
+    else
+        say "${C_BAD}$bad_count problem(s)${C_0} - fix with: sudo modemctl apply"
+    fi
+    return $([ "$bad_count" -eq 0 ] && echo 0 || echo 1)
+}
+
+cmd_signal() {
+    exec "$SHARE/tools/furios-modem-signal" "$@" 2>/dev/null \
+      || exec /usr/bin/furios-modem-signal "$@"
+}
+
+cmd_check() {
+    local failed=0
+    cmd_status || failed=1
+
+    head_ "loops in the last 10 minutes"
+    # These are the two runaway loops the other fixes killed. Journald prints
+    # every ofono line twice, hence the dedup.
+    local n
+    n=$(journalctl -u ofono --since "-10min" --no-pager 2>/dev/null \
+        | grep -cE "Error 44|Unexpected data call|Activating context" || true)
+    if [ "${n:-0}" -gt 20 ]; then
+        bad "$n loop lines in 10 min - something is retrying hard again"
+        failed=1
+    else
+        ok "${n:-0} loop lines (a handful is normal)"
+    fi
+
+    head_ "is the signal actually being polled"
+    if [ "$(id -u)" -ne 0 ]; then
+        skip "needs root - dbus-monitor cannot eavesdrop as a normal user"
+        skip "and it fails SILENTLY, so an empty run proves nothing"
+    else
+        local calls
+        calls=$(timeout 70 dbus-monitor --system \
+            "type='method_call',interface='org.ofono.NetworkMonitor'" 2>/dev/null \
+            | grep -c GetServingCellInformation || true)
+        if [ "${calls:-0}" -ge 2 ]; then
+            ok "${calls} cell info polls in 70 s (expected 2, every 30 s)"
+        else
+            bad "only ${calls:-0} polls in 70 s - the bar will not move"
+            failed=1
+        fi
+    fi
+    return $failed
+}
+
+usage() {
+    cat <<USAGE
+modemctl $VERSION - keeps the FuriOS modem fixes applied
+
+  modemctl status          what is in place, and what the stack says
+  modemctl apply           apply everything that is missing (idempotent)
+  modemctl revert          back to the shipped state
+  modemctl check           status plus runtime checks (polling, loops)
+  modemctl signal          what the radio really receives, cross-checked
+
+Options
+  -q, --quiet              only errors (for boot units and apt hooks)
+      --no-restart         change files, leave the services alone
+
+The fixes live in files owned by the ofono2mm package, so an update of that
+package removes them. A boot unit and an apt hook run "apply" for you; both
+do nothing when there is nothing to do.
+USAGE
+}
+
+CMD=${1:-status}
+shift 2>/dev/null || true
+for a in "$@"; do
+    case "$a" in
+        -q|--quiet)   QUIET=1 ;;
+        --no-restart) NO_RESTART=1 ;;
+    esac
+done
+
+case "$CMD" in
+    status)       cmd_status ;;
+    apply)        cmd_apply ;;
+    revert)       cmd_revert ;;
+    check)        cmd_check ;;
+    signal)       cmd_signal ;;
+    version|-V|--version) echo "modemctl $VERSION" ;;
+    help|-h|--help) usage ;;
+    *) echo "unknown command: $CMD" >&2; usage >&2; exit 2 ;;
+esac

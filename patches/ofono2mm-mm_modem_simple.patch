@@ -1,0 +1,66 @@
+--- a/ofono2mm/mm_modem_simple.py
++++ b/ofono2mm/mm_modem_simple.py
+@@ -7,6 +7,7 @@
+ from dbus_fast import Variant
+ 
+ from ofono2mm.logging import ofono2mm_print
++from ofono2mm.utils import read_setting
+ 
+ from dbus import SystemBus, Interface
+ from dbus.mainloop.glib import DBusGMainLoop
+@@ -66,8 +67,14 @@
+ 
+             if 'Strength' in self.ofono_interface_props['org.ofono.NetworkRegistration'].props:
+                 strength = self.ofono_interface_props['org.ofono.NetworkRegistration']['Strength'].value
+-                if self.props['signal-quality'].value[0] != strength:
+-                    self.props['signal-quality'] = Variant('(ub)', [strength, True])
++            else:
++                # Some drivers never report a signal strength to oFono, so this
++                # property does not exist and the quality would stay at 0
++                # forever. Same fallback the Modem interface uses.
++                strength = self.mm_modem.signal_quality
++
++            if strength is not None and self.props['signal-quality'].value[0] != strength:
++                self.props['signal-quality'] = Variant('(ub)', [strength, True])
+ 
+             if 'Status' in self.ofono_interface_props['org.ofono.NetworkRegistration'].props:
+                 if self.ofono_interface_props['org.ofono.NetworkRegistration']['Status'].value == 'registered' or self.ofono_interface_props['org.ofono.NetworkRegistration']['Status'].value == 'roaming':
+@@ -161,10 +168,24 @@
+                 self.mm_modem.bearers[b].props['Properties'] = Variant('a{sv}', properties)
+                 if self.mm_modem.bearers[b].active_connect == 0:
+                     self.mm_modem.bearers[b].active_connect += 1
+-                    await self.mm_modem.bearers[b].doConnect()
++                    try:
++                        await self.mm_modem.bearers[b].doConnect()
++                    finally:
++                        # doConnect only decrements the counter on its success
++                        # path. If it gives up or is cancelled the counter would
++                        # stay above zero forever and every later Connect would
++                        # silently skip this bearer, leaving NM stuck in
++                        # "prepare" until the whole stack is restarted.
++                        self.mm_modem.bearers[b].active_connect = 0
+ 
+                     ofono2mm_print(f"Bearer activated at path {b}", self.verbose)
+                     return b
++
++                # A connect is already in flight for this bearer. Hand back the
++                # same bearer rather than falling through and creating a second
++                # one for the very same APN.
++                ofono2mm_print(f"Connect already in progress for bearer {b}", self.verbose)
++                return b
+         try:
+             bearer = await self.mm_modem.doCreateBearer(properties)
+             if self.mm_modem.bearers[bearer].active_connect == 0:
+@@ -285,7 +306,11 @@
+                 'route-metric': 1050
+             },
+             'ipv6': {
+-                'method': 'auto'
++                # The bearer is brought up with whatever protocol doConnect()
++                # asks oFono for. Claiming IPv6 on an IPv4-only context just
++                # makes NM ask for an IPv6 config that will never exist and
++                # log "modem IP method unsupported" on every activation.
++                'method': 'auto' if read_setting("protocol", "ip").strip() in ('ipv6', 'dual') else 'disabled'
+             }
+         }
+ 
