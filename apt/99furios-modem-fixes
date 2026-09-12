@@ -2,13 +2,18 @@
 // SPDX-License-Identifier: MIT
 //
 // An ofono2mm update overwrites the patched files. Without this the phone
-// keeps running the old code until the next reboot, and then comes up fixed
-// again - a difference that is very hard to explain to yourself later.
+// keeps running the old code out of memory while the disk already holds the
+// unpatched version, and only the next boot makes the difference visible -
+// which is very hard to explain to yourself later.
 //
-// Post-Invoke-Success, not Post-Invoke: a failed apt run may have left the
-// package half-unpacked, and patching that is worse than waiting for the boot
-// unit. Quiet unless something goes wrong, and never fatal - apt must not fail
-// because of us.
-DPkg::Post-Invoke-Success {
+// It must be DPkg::Post-Invoke. DPkg::Post-Invoke-Success parses without
+// complaint, shows up in "apt-config dump", and is never run: only
+// APT::Update has a -Success variant. Tested by reinstalling ofono2mm and
+// finding every patch gone afterwards.
+//
+// Post-Invoke also runs after a failed dpkg run, hence the guards: no
+// modemctl, no ofono2mm directory, nothing happens. Never fatal - apt must
+// not fail because of us.
+DPkg::Post-Invoke {
     "if [ -x /usr/bin/modemctl ] && [ -d /usr/lib/ofono2mm/ofono2mm ]; then /usr/bin/modemctl apply --quiet || true; fi";
 };

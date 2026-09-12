@@ -18,10 +18,16 @@ FILES="utils mm_bearer mm_modem mm_modem_simple mm_modem_signal"
 
 # Where the patches are: next to this script when run from the work tree,
 # otherwise where the package put them.
-if [ -d "$(dirname "$(readlink -f "$0")")/patches" ]; then
-    SHARE=$(dirname "$(readlink -f "$0")")
-else
-    SHARE=${MODEMCTL_SHARE:-/usr/share/furios-modem}
+# Next to this script when run straight from the work tree; otherwise
+# wherever it was installed. /usr/local first: install.sh puts it there, the
+# package puts it in /usr, and if both have happened the one installed by hand
+# is the one the person is looking at.
+SHARE=${MODEMCTL_SHARE:-}
+if [ -z "$SHARE" ]; then
+    for d in "$(dirname "$(readlink -f "$0")")" /usr/local/share/furios-modem /usr/share/furios-modem; do
+        [ -d "$d/patches" ] && { SHARE=$d; break; }
+    done
+    SHARE=${SHARE:-/usr/share/furios-modem}
 fi
 PATCHES=${MODEMCTL_PATCHES:-$SHARE/patches}
 

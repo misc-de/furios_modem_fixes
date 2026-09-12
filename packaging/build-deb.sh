@@ -31,6 +31,7 @@ done
 # The rescue path for the day a patch stops fitting: modemctl points at these
 # instead of forcing a patch into a file that has moved underneath it.
 for f in patched-files/*; do
+    [ -f "$f" ] || continue   # a test run can leave a __pycache__ here
     install -Dm644 "$f" "$STAGE/usr/share/furios-modem/$f"
 done
 

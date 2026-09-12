@@ -6,28 +6,36 @@
 set -e
 cd "$(dirname "$0")"
 
-sudo install -Dm755 modemctl                  /usr/bin/modemctl
-sudo install -Dm755 tools/furios-modem-signal /usr/bin/furios-modem-signal
+# /usr/local, not /usr: that is where a hand installation belongs, and it
+# keeps this out of the way of the .deb. Installing both used to leave an
+# "apt remove" behind with a unit in /etc pointing at a binary that was gone.
+BIN=/usr/local/bin
+SHARE=/usr/local/share/furios-modem
 
-sudo mkdir -p /usr/share/furios-modem/patches /usr/share/furios-modem/patched-files
-sudo install -m644 patches/*.patch        /usr/share/furios-modem/patches/
+sudo install -Dm755 modemctl                  "$BIN/modemctl"
+sudo install -Dm755 tools/furios-modem-signal "$BIN/furios-modem-signal"
+sudo install -Dm755 tools/furios-modem-signal "$SHARE/tools/furios-modem-signal"
+
+sudo mkdir -p "$SHARE/patches" "$SHARE/patched-files"
+sudo install -m644 patches/*.patch    "$SHARE/patches/"
 # The ready-made files are the rescue path for the day a patch stops fitting.
-sudo install -m644 patched-files/*.py     /usr/share/furios-modem/patched-files/
-sudo install -m644 patched-files/radio-interface-binder.conf \
-                                          /usr/share/furios-modem/patched-files/
-# modemctl looks for tools/ next to its share directory.
-sudo install -Dm755 tools/furios-modem-signal /usr/share/furios-modem/tools/furios-modem-signal
+# -type f: a stray __pycache__ from a test run must not take the install down.
+find patched-files -maxdepth 1 -type f -exec sudo install -m644 {} "$SHARE/patched-files/" \;
 
-sudo install -Dm644 systemd/furios-modem-fixes.service \
-    /etc/systemd/system/furios-modem-fixes.service
-sudo install -Dm644 apt/99furios-modem-fixes \
-    /etc/apt/apt.conf.d/99furios-modem-fixes
+# The unit ships with the package's path in it; point it at this one.
+sed "s|^ExecStart=/usr/bin/modemctl|ExecStart=$BIN/modemctl|" \
+    systemd/furios-modem-fixes.service | sudo tee \
+    /etc/systemd/system/furios-modem-fixes.service >/dev/null
+sudo chmod 644 /etc/systemd/system/furios-modem-fixes.service
+sed "s|/usr/bin/modemctl|$BIN/modemctl|g" apt/99furios-modem-fixes | sudo tee \
+    /etc/apt/apt.conf.d/99furios-modem-fixes >/dev/null
+sudo chmod 644 /etc/apt/apt.conf.d/99furios-modem-fixes
 
 sudo systemctl daemon-reload
 # enable, not start: applying happens below, with output you can read.
 sudo systemctl enable furios-modem-fixes.service >/dev/null
 
-sudo modemctl apply
+sudo "$BIN/modemctl" apply
 
 echo
 echo "Installed. Check any time with:  modemctl status"

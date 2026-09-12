@@ -7,14 +7,14 @@ cd "$(dirname "$0")"
 
 # Revert first - afterwards modemctl and the patches are gone and the ofono2mm
 # files would stay patched with nothing left to undo them.
-sudo modemctl revert || true
+sudo /usr/local/bin/modemctl revert || true
 
 sudo systemctl disable --now furios-modem-fixes.service 2>/dev/null || true
 sudo rm -f /etc/systemd/system/furios-modem-fixes.service \
            /etc/apt/apt.conf.d/99furios-modem-fixes \
-           /usr/bin/modemctl \
-           /usr/bin/furios-modem-signal
-sudo rm -rf /usr/share/furios-modem
+           /usr/local/bin/modemctl \
+           /usr/local/bin/furios-modem-signal
+sudo rm -rf /usr/local/share/furios-modem
 sudo systemctl daemon-reload
 
 echo "Shipped state restored. Takes effect after: sudo systemctl restart ModemManager"

@@ -23,6 +23,7 @@ run() {
 run "the patches reproduce what we ship" bash "$HERE/test-patches.sh"
 run "modemctl's judgement"               bash "$HERE/test-modemctl.sh"
 run "signal conversions"                 python3 "$HERE/test-signal.py"
+run "what survives a package update"     bash "$HERE/test-persistence.sh"
 
 printf '\n\033[1m== shell scripts parse\033[0m\n'
 for f in "$ROOT"/*.sh "$ROOT"/modemctl "$ROOT"/tests/*.sh "$ROOT"/packaging/*.sh; do

@@ -18,6 +18,10 @@ import os
 import sys
 import types
 
+# No .pyc next to the module under test: patched-files/ is installed verbatim,
+# and a __pycache__ directory appearing in it breaks the installer's glob.
+sys.dont_write_bytecode = True
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
