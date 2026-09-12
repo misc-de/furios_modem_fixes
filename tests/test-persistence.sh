@@ -134,4 +134,57 @@ else
     fail "the hook does not name /usr/bin/modemctl" "install.sh's rewrite would miss it"
 fi
 
+# --- the packaged maintainer scripts ---------------------------------------
+#
+# postinst and prerm run as root in the middle of a dpkg transaction. A syntax
+# error there leaves the package half-configured, which is a worse state than
+# anything this project is trying to fix.
+BUILD="$ROOT/packaging/build-deb.sh"
+for script in postinst prerm; do
+    TESTS_RUN=$((TESTS_RUN + 1))
+    frag=$(sed -n "/^cat > \"\$STAGE\/DEBIAN\/$script\"/,/^POST\$\|^PRE\$/p" "$BUILD" \
+           | sed '1d;$d')
+    if [ -n "$frag" ] && sh -n -c "$frag" 2>/dev/null; then
+        ok "the packaged $script parses"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        fail "the packaged $script does not parse"
+    fi
+done
+
+# prerm must revert while the patches are still on disk to revert with. After
+# dpkg removes them there is nothing left that could put ofono2mm back.
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q 'modemctl revert' "$BUILD"; then
+    ok "prerm puts ofono2mm's own code back"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "prerm does not revert" "removal would leave ofono2mm patched with nothing to undo it"
+fi
+
+# --- the signal tool --------------------------------------------------------
+#
+# It imports its conversions from the patched module rather than keeping a
+# copy. When that module is not there it has to say so in a sentence, not in a
+# traceback - this is what somebody sees when the fix has been wiped.
+TESTS_RUN=$((TESTS_RUN + 1))
+out=$(FURIOS_MODEM_OFONO2MM=/nonexistent python3 "$ROOT/tools/furios-modem-signal" 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "not installed" \
+   && ! printf '%s' "$out" | grep -q "Traceback"; then
+    ok "the signal tool explains a missing fix instead of crashing"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "the signal tool crashed when the fix is absent" "$out"
+fi
+
+# --- not restarting the stack during a call ---------------------------------
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q 'call_in_progress' "$ROOT/modemctl"; then
+    ok "apply checks for a call before restarting the modem stack"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "apply would restart the modem stack during a call"
+fi
+
 summary

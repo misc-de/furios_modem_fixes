@@ -242,6 +242,69 @@ measured 15 seconds from `systemctl restart ModemManager` to a filled bar.
 
 ---
 
+## What it costs, measured
+
+Numbers from the phone, not estimates. The polling is the only thing this adds
+to a running system; everything else happens once at boot or after a package
+operation.
+
+| | measured | how |
+|---|---|---|
+| ofono2mm, polling every 30 s | 30 ms CPU in 600 s = **0.005%** | `/proc/<pid>/stat`, 20 polls |
+| ofonod, same window | 410 ms = **0.068%** | same, and this is an upper bound |
+| `modemctl apply` as a no-op | **41 ms** | what the boot unit and the apt hook run |
+| `modemctl status` | 253 ms | the patch checks are ~40 ms of it; the rest is mmcli, dbus-send and nmcli |
+
+ofonod's share is an upper bound because that process also does everything
+else oFono does - registration, contexts, SMS. Even attributing all of it to
+the poll puts the whole feature under a tenth of a percent of one core.
+
+Two things keep it that low. The poll only runs while there is a SIM to read:
+`set_props` returns at the SimManager check before touching D-Bus, so a phone
+with no SIM pays nothing. And a poll enables RIL cell reporting for about half
+a second and switches it off again, rather than leaving it on.
+
+## Privacy
+
+Nothing here stores or transmits anything. Two things are worth knowing anyway.
+
+`modemctl signal` prints the serving cell id and EARFCN. Those identify the
+tower, which places the phone within roughly a kilometre - they are the one
+part of its output that is about the person rather than the radio. Fine on
+your own screen, worth trimming out of a bug report.
+
+This repository names the carrier (MCC/MNC 262-23, APN `web.vodafone.de`,
+operator name `Willkommen`) because the upstream reports are not reproducible
+without it. It contains no IMEI, no IMSI, no cell id and no phone number, and
+that is worth re-checking before publishing anything new here.
+
+## Privileges
+
+`apply` and `revert` write files under `/usr/lib`, so they need root and there
+is no way around that. Everything else does not, and does not ask:
+
+    modemctl status     reads world-readable files, mmcli, D-Bus - no root
+    modemctl signal     D-Bus only - no root
+    modemctl check      the same, except the dbus-monitor part, which says so
+
+What `apply` actually checks is not `id -u` but whether it can write the files
+it is about to change. That gives a better message when it cannot, and it is
+why the test suite can exercise apply and revert against a tree it owns rather
+than needing root to test the one command that does all the work.
+
+As root, the four `MODEMCTL_*` overrides the tests use are refused outright.
+Without that, anyone able to run `sudo modemctl` - a NOPASSWD line is the usual
+way that happens - could point them anywhere and have root apply an arbitrary
+diff to an arbitrary file. sudo's `env_reset` makes that hard today; one
+`env_keep` line elsewhere would undo it, and nothing about the overrides is
+worth that.
+
+The unprivileged signal tool has an override of its own
+(`FURIOS_MODEM_OFONO2MM`) and does not need the same treatment: it holds no
+privileges, so redirecting it gains nobody anything.
+
+---
+
 ## Traps that cost time
 
 **`dbus-monitor` without `sudo` shows nothing, and says nothing about it.**
@@ -282,6 +345,20 @@ package rather than by reading the hook.
 mktemp makes it 0700, and nothing of ours should be telling dpkg anything
 about the root directory's permissions. `chmod 755` on the staging directory
 before building.
+
+**`exec a || exec b` is not a fallback.** A failed `exec` ends the shell
+outright, so the second one never runs. Pointing the share directory somewhere
+empty produced exit 127 and not one word of explanation. Test for an executable
+first, then exec.
+
+**Backups pile up where nobody looks.** Every `apply` after a package update
+writes another set. After a day of testing there were 28 of them, 1.1 MB, in a
+directory that is supposed to hold a Python package. Three are kept now.
+
+**Do not restart the modem stack during a call.** The apt hook runs after every
+package operation, including an unattended upgrade that lands while the phone
+is being used as a phone. `apply` asks `VoiceCallManager.GetCalls` first and
+leaves the restart for later - the patched files are on disk either way.
 
 **Stale `__pycache__` outlives a patch.** Python will run bytecode from before
 the change if its timestamp still looks newer. `modemctl apply` removes it.

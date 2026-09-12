@@ -117,11 +117,94 @@ else
     TESTS_FAILED=$((TESTS_FAILED + 1)); fail "no ofono2mm: unexpected output" "$out"
 fi
 
+# --- apply and revert, for real ---------------------------------------------
+#
+# Possible at all because apply asks "can I write these files", not "am I
+# root": the test owns a tree, so the command that does all the work can be
+# exercised without handing a test suite root.
+reset_tree original 1.4
+out=$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+      bash "$ROOT/modemctl" apply --no-restart 2>&1)
+rc=$?
+check "apply on a shipped tree succeeds" 0 "$rc"
+for f in $FILES; do
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if diff -q "$TREE/$f.py" "$ROOT/patched-files/$f.py" >/dev/null; then
+        ok "apply produced the shipped patched $f.py"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1)); fail "apply left $f.py wrong"
+    fi
+done
+check "apply sets radioInterface" "radioInterface = 1.6" "$(cat "$RADIO")"
+TESTS_RUN=$((TESTS_RUN + 1))
+if ls "$TREE"/mm_modem.py.bak.* >/dev/null 2>&1; then
+    ok "apply keeps a backup"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "apply kept no backup"
+fi
+
+# Running it again must be a no-op, because a boot unit and an apt hook do
+# exactly that on every boot and every package operation.
+before=$(md5sum "$TREE"/*.py | md5sum)
+out=$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+      bash "$ROOT/modemctl" apply --no-restart 2>&1)
+check "a second apply changes nothing" "$before" "$(md5sum "$TREE"/*.py | md5sum)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out" | grep -q "Nothing to do"; then
+    ok "a second apply says there was nothing to do"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "second apply was not a no-op" "$out"
+fi
+
+# Backups must not grow without bound - they did, to 28 files in one day.
+for i in 1 2 3 4 5; do
+    touch "$TREE/mm_modem.py.bak.2026010${i}-000000"
+done
+MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+    bash "$ROOT/modemctl" revert >/dev/null 2>&1
+MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+    bash "$ROOT/modemctl" apply --no-restart >/dev/null 2>&1
+kept=$(ls -1 "$TREE"/mm_modem.py.bak.* 2>/dev/null | wc -l)
+check "old backups are pruned" 3 "$kept"
+
+# revert has to put back exactly what the package shipped, or the uninstall
+# path leaves ofono2mm in a state neither side knows about.
+reset_tree patched 1.6
+MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+    bash "$ROOT/modemctl" revert >/dev/null 2>&1
+for f in $FILES; do
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if diff -q "$TREE/$f.py" "$ROOT/original-files/$f.py" >/dev/null; then
+        ok "revert restored the shipped $f.py"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1)); fail "revert left $f.py wrong"
+    fi
+done
+check "revert puts radioInterface back" "radioInterface = 1.4" "$(cat "$RADIO")"
+
 # --- refusals ---------------------------------------------------------------
 check_status "an unknown command is an error" 2 bash "$ROOT/modemctl" wat
 if [ "$(id -u)" -ne 0 ]; then
-    check_status "apply without root refuses" 1 \
-        env MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" bash "$ROOT/modemctl" apply
+    # Against the real system tree, which this test user cannot write.
+    check_status "apply on an unwritable tree refuses" 1 \
+        bash "$ROOT/modemctl" apply
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if bash "$ROOT/modemctl" apply 2>&1 | grep -q "try: sudo"; then
+        ok "and says how to do it properly"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1)); fail "no hint about sudo"
+    fi
+fi
+
+# SECURITY: as root the overrides must be refused outright. Anyone who can run
+# "sudo modemctl" would otherwise be able to point them anywhere and have root
+# apply an arbitrary diff to an arbitrary file.
+TESTS_RUN=$((TESTS_RUN + 1))
+guard=$(grep -c 'refusing to honour' "$ROOT/modemctl")
+if [ "$guard" -ge 1 ]; then
+    ok "root refuses the test overrides"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "no guard against overrides as root"
 fi
 
 # --- quiet ------------------------------------------------------------------

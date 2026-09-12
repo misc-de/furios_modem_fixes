@@ -14,9 +14,14 @@ rather than a copy of it that could drift. If the import fails, the fix is not
 installed - and saying that is more useful than printing numbers from a
 private copy.
 """
+import os
 import sys
 
-OFONO2MM = "/usr/lib/ofono2mm"
+# Overridable so the "not installed" path can be tested. This tool holds no
+# privileges of any kind - it reads D-Bus as whoever ran it - so pointing it
+# elsewhere gains nobody anything. modemctl refuses its own overrides as root
+# precisely because that one does hold privileges.
+OFONO2MM = os.environ.get("FURIOS_MODEM_OFONO2MM", "/usr/lib/ofono2mm")
 if OFONO2MM not in sys.path:
     sys.path.insert(0, OFONO2MM)
 

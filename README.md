@@ -56,6 +56,11 @@ It imports its conversions from the patched `mm_modem_signal.py` rather than
 keeping a copy, so it measures the code that is actually running - and says so
 plainly when the fix is not installed.
 
+One thing to know before pasting its output anywhere: `cell` and `EARFCN`
+identify the tower you are on, which places you within a kilometre or so. The
+signal levels do not. Nothing is stored or sent - it prints and exits - but a
+bug report is a public place.
+
 ## The six defects
 
 | # | What | Where | Symptom |
@@ -81,6 +86,18 @@ than no patch:
 
 Two of the six are already fixed or half-fixed upstream, so this is expected to
 happen eventually.
+
+## Root, cost, and what is checked
+
+`apply` and `revert` write under `/usr/lib` and need root. `status`, `signal`
+and most of `check` do not, and do not ask. What `apply` tests is whether it
+can write the files, not `id -u` - a better message when it cannot, and the
+reason the tests can exercise it without root.
+
+Measured on the phone: the 30-second poll costs 0.005% of a core in ofono2mm
+and at most 0.068% in oFono; `apply` as a no-op, which is what the boot unit
+and the apt hook run, takes 41 ms. Numbers and method in
+[FINDINGS.md](FINDINGS.md).
 
 ## Tests
 

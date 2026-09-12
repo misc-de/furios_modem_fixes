@@ -12,12 +12,19 @@
 set -u
 
 VERSION=0.1.0
+if [ "$(id -u)" -eq 0 ]; then
+    for v in MODEMCTL_TARGET MODEMCTL_RADIO_CONF MODEMCTL_SHARE MODEMCTL_PATCHES; do
+        if [ -n "${!v:-}" ]; then
+            echo "refusing to honour $v as root - that would be an arbitrary-file patch" >&2
+            exit 3
+        fi
+    done
+fi
+
 TARGET=${MODEMCTL_TARGET:-/usr/lib/ofono2mm/ofono2mm}
 RADIO_CONF=${MODEMCTL_RADIO_CONF:-/etc/ofono/binder.d/radio-interface-binder.conf}
 FILES="utils mm_bearer mm_modem mm_modem_simple mm_modem_signal"
 
-# Where the patches are: next to this script when run from the work tree,
-# otherwise where the package put them.
 # Next to this script when run straight from the work tree; otherwise
 # wherever it was installed. /usr/local first: install.sh puts it there, the
 # package puts it in /usr, and if both have happened the one installed by hand
@@ -49,11 +56,17 @@ warn() { printf '  %swarn%s  %s\n' "$C_WARN" "$C_0" "$*" >&2; }
 bad()  { printf '  %sFAIL%s  %s\n' "$C_BAD" "$C_0" "$*" >&2; }
 head_() { [ "$QUIET" -eq 1 ] || printf '\n%s== %s%s\n' "$C_B" "$*" "$C_0"; }
 
-need_root() {
-    if [ "$(id -u)" -ne 0 ]; then
-        echo "needs root: sudo $0 $*" >&2
-        exit 1
+need_write() {
+    local what=$1 problem=
+    [ -w "$TARGET" ] || problem="$TARGET"
+    if [ -e "$RADIO_CONF" ] && [ ! -w "$RADIO_CONF" ]; then
+        problem="${problem:+$problem and }$RADIO_CONF"
     fi
+    [ -z "$problem" ] && return 0
+
+    echo "cannot write $problem" >&2
+    [ "$(id -u)" -ne 0 ] && echo "try: sudo $0 $what" >&2
+    exit 1
 }
 
 # --- patch state ------------------------------------------------------------
@@ -79,15 +92,42 @@ radio_state() {
     grep -q '^radioInterface *= *1\.6' "$RADIO_CONF" && echo applied || echo missing
 }
 
+# Every apply after a package update leaves another set of backups behind.
+# They are all copies of the same shipped file, they never get read again once
+# the next one exists, and after a day of testing there were 28 of them. Keep
+# the newest few - enough to walk back from a bad update - and drop the rest.
+# A call in progress is the one moment not to restart the modem stack. The
+# apt hook runs after every package operation, including an unattended upgrade
+# that happens to land while the phone is being used as a phone. The patched
+# files are already on disk by then; the restart can wait for the next boot.
+call_in_progress() {
+    local calls
+    calls=$(timeout 5 dbus-send --system --print-reply --dest=org.ofono /ril_0 \
+        org.ofono.VoiceCallManager.GetCalls 2>/dev/null) || return 1
+    printf '%s' "$calls" | grep -q 'object path'
+}
+
+BACKUPS_KEPT=3
+prune_backups() {
+    local f=$1 old
+    # Runs before the backup is taken, so leave one slot free for it.
+    # Parsing ls is only safe because nothing but root can create a file in
+    # this directory - do not copy this pattern somewhere writable.
+    old=$(ls -1t "$TARGET/$f.py.bak."* 2>/dev/null | tail -n +"$BACKUPS_KEPT")
+    [ -n "$old" ] && printf '%s\n' "$old" | while IFS= read -r b; do rm -f "$b"; done
+    return 0
+}
+
 # --- commands ---------------------------------------------------------------
 
 cmd_apply() {
-    need_root apply
+    need_write apply
     local ts changed=0 failed=0
     ts=$(date +%Y%m%d-%H%M%S)
 
     head_ "ofono2mm"
     for f in $FILES; do
+        prune_backups "$f"
         case "$(patch_state "$f")" in
             applied) skip "$f.py already patched" ;;
             absent)  bad "$f.py not found - is ofono2mm installed?"; failed=1 ;;
@@ -127,7 +167,11 @@ cmd_apply() {
     # before the patch if its timestamp still looks newer.
     [ "$changed" -eq 1 ] && rm -rf "$TARGET/__pycache__"
 
-    if [ "$changed" -eq 1 ] && [ "$NO_RESTART" -eq 0 ]; then
+    if [ "$changed" -eq 1 ] && [ "$NO_RESTART" -eq 0 ] && call_in_progress; then
+        head_ "restart"
+        warn "a call is in progress - not restarting the modem stack now"
+        warn "the patched files are on disk; they take effect at the next restart"
+    elif [ "$changed" -eq 1 ] && [ "$NO_RESTART" -eq 0 ]; then
         head_ "restart"
         # ModemManager.service is ofono2mm here (drop-in 10-ofono2mm.conf);
         # there is no ofono2mm.service. ofono itself is deliberately NOT
@@ -150,7 +194,7 @@ cmd_apply() {
 }
 
 cmd_revert() {
-    need_root revert
+    need_write revert
     local failed=0
     head_ "ofono2mm"
     for f in $FILES; do
@@ -244,8 +288,15 @@ cmd_status() {
 }
 
 cmd_signal() {
-    exec "$SHARE/tools/furios-modem-signal" "$@" 2>/dev/null \
-      || exec /usr/bin/furios-modem-signal "$@"
+    # NOT "exec a || exec b": a failed exec ends the shell outright, so the
+    # fallback never runs. That gave exit 127 and no message at all when the
+    # share directory was wrong.
+    for t in "$SHARE/tools/furios-modem-signal" \
+             /usr/local/bin/furios-modem-signal /usr/bin/furios-modem-signal; do
+        [ -x "$t" ] && exec "$t" "$@"
+    done
+    echo "furios-modem-signal not found - is this installed?" >&2
+    exit 1
 }
 
 cmd_check() {
