@@ -265,4 +265,54 @@ else
     fail "prerm calls an option modemctl does not have"
 fi
 
+# --- what the package has to pull in ----------------------------------------
+#
+# Not the packages the patches belong to - those were never in doubt - but the
+# programs the two services refuse to run without. Both check for theirs by
+# hand and exit on their first line when one is missing, and modemctl asks
+# nmcli for the cellular profile and restarts NetworkManager after a
+# ModemManager restart. A package that installs cleanly and leaves a service
+# dying immediately is worse than one that refuses to install: the failure is
+# a phone with no fallback route, and nothing says so.
+#
+# The command-to-package mapping lives here rather than being derived, because
+# there is nothing to derive it from - the tools name commands, dpkg names
+# packages, and the only honest link between the two is written down once.
+DEPENDS=$(sed -n 's/^Depends: //p' "$ROOT/packaging/build-deb.sh")
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if [ -n "$DEPENDS" ]; then
+    ok "the package declares dependencies"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "no Depends line found in build-deb.sh" "every check below would pass vacuously"
+fi
+
+# command:package, for every command a tool exits over.
+for pair in "dbus-send:dbus-bin" "dbus-monitor:dbus-bin" "ip:iproute2" \
+            "mmcli:modemmanager" "nmcli:network-manager" "patch:patch"; do
+    cmd=${pair%%:*}; pkg=${pair#*:}
+    TESTS_RUN=$((TESTS_RUN + 1))
+    case " $DEPENDS " in
+        *"$pkg"*) ok "Depends covers $cmd ($pkg)" ;;
+        *)
+            TESTS_FAILED=$((TESTS_FAILED + 1))
+            fail "Depends is missing $pkg, which provides $cmd" ;;
+    esac
+done
+
+# Every command the tools refuse to start without has to be in that table, or
+# the table stops covering the tools without anybody noticing.
+for tool in "$ROOT/tools/furios-mobile-context" "$ROOT/tools/furios-mobile-route"; do
+    for cmd in $(sed -n "s/^command -v \([a-z-]*\) .*exit 1.*/\1/p" "$tool"); do
+        TESTS_RUN=$((TESTS_RUN + 1))
+        case "dbus-send dbus-monitor ip mmcli nmcli patch" in
+            *"$cmd"*) ok "$(basename "$tool") needs $cmd, and the table knows it" ;;
+            *)
+                TESTS_FAILED=$((TESTS_FAILED + 1))
+                fail "$(basename "$tool") exits without $cmd, which no check above covers" ;;
+        esac
+    done
+done
+
 summary

@@ -183,4 +183,75 @@ run_tool
 check "every call asks for a reply" 0 \
       "$(count -v -e '--print-reply')"
 
+printf '\n\033[1m== the loop that waits for oFono\033[0m\n'
+
+# Everything above runs one pass with --once. This is the other half: the
+# loop the service actually runs, and the two ways it can go wrong without
+# anybody noticing - by spinning, and by waking for nothing.
+
+# A dbus-monitor that is gone. The bus went away under it, or it never got to
+# attach at all because the bus was not up yet when the unit started. "read"
+# then returns end-of-stream AT ONCE rather than blocking, and a loop that
+# cannot tell that from a timeout does not wait - it spins, at 74 dbus-send
+# calls a second, for as long as the phone has battery. systemd reports the
+# service healthy throughout, because the process is alive.
+cat > "$STUBDIR/dbus-monitor" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+chmod +x "$STUBDIR/dbus-monitor"
+
+scenario true true registered true yes no
+rm -f "$STUBDIR/dbus.args"
+PATH="$STUBDIR:$PATH" timeout 3 bash "$TOOL" --quiet >/dev/null 2>&1
+loop_rc=$?
+check "it stops when dbus-monitor is gone instead of spinning" yes \
+      "$([ "$loop_rc" -ne 124 ] && echo yes || echo "no - still running after 3 s")"
+# 124 is timeout's "I had to kill it". Anything else means the tool decided to
+# leave; it has to leave non-zero, or Restart= has nothing to react to and the
+# phone is left with a supervisor that is not supervising.
+check "and exits non-zero so the service is restarted" yes \
+      "$([ "$loop_rc" -ne 0 ] && [ "$loop_rc" -ne 124 ] && echo yes || echo "no - exit $loop_rc")"
+# One startup pass is expected and costs a handful of calls. A spin makes
+# hundreds; this fails long before it gets near the real number.
+calls=$(count '')
+check "and does not hammer the bus on its way out" yes \
+      "$([ "$calls" -le 20 ] && echo yes || echo "no - $calls calls in 3 s")"
+
+# Which signals wake it. The filter is not tidiness: NetworkRegistration
+# announces Strength, ten or more times a minute on a weak cell, and waking
+# for each one to re-read a number this daemon never looks at measured 0.53 %
+# of a core on an idle phone - more than oFono and ModemManager together.
+rules=$(sed -n '/^WAKE_ON=(/,/^)/p' "$TOOL" | grep "type='signal'")
+
+# First that there is anything to look at. Without this the two checks below
+# pass on a tool that has no WAKE_ON list at all - an empty set of rules
+# contains no broad one and no Strength either, and "nothing found" would read
+# as "nothing wrong", which is how a test quietly stops testing.
+rule_count=$(printf '%s\n' "$rules" | grep -c "type='signal'")
+check "the wake-up filter is where this test looks for it" yes \
+      "$([ "${rule_count:-0}" -ge 5 ] && echo yes || echo "no - found $rule_count match rules")"
+
+narrowed=yes
+while IFS= read -r rule; do
+    [ -n "$rule" ] || continue
+    case "$rule" in
+        *arg0=*|*member=\'Context*) ;;
+        *) narrowed="no - $rule" ;;
+    esac
+done <<EOF
+$rules
+EOF
+check "no rule wakes it for a whole interface" yes "$narrowed"
+check "Strength is not a wake-up" yes \
+      "$(printf '%s\n' "$rules" | grep -q Strength && echo no || echo yes)"
+
+# What it must still hear. Each of these is a state this daemon exists to act
+# on, and a filter that dropped one would be quiet in exactly the wrong way.
+for want in "arg0='Status'" "arg0='Powered'" "arg0='Attached'" \
+            "arg0='Active'" "arg0='Settings'" "member='ContextAdded'"; do
+    check "still woken by $want" yes \
+          "$(printf '%s\n' "$rules" | grep -qF "$want" && echo yes || echo no)"
+done
+
 summary

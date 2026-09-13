@@ -132,6 +132,15 @@ COPY
 chmod 644 "$STAGE/usr/share/doc/$PKG/copyright"
 
 mkdir -p "$STAGE/DEBIAN"
+# Depends carries the programs the services refuse to run without, not just
+# the ones the patches belong to. Both watchers check for theirs by hand and
+# exit on the first line when one is missing - dbus-send and dbus-monitor for
+# the context supervisor, ip and mmcli for the route watcher - and modemctl
+# asks nmcli for the cellular profile and has to restart NetworkManager after
+# a ModemManager restart. A package that installs cleanly and leaves a service
+# dying on its first line is worse than one that refuses to install.
+# "dbus-bin | dbus" because the two dbus tools moved out of the dbus package
+# and an older system still has them there.
 cat > "$STAGE/DEBIAN/control" <<CONTROL
 Package: $PKG
 Version: $VERSION
@@ -139,7 +148,7 @@ Architecture: all
 Maintainer: misc-de <11610690+misc-de@users.noreply.github.com>
 Section: net
 Priority: optional
-Depends: ofono2mm, ofono, patch, python3, python3-dbus, modemmanager
+Depends: ofono2mm, ofono, patch, python3, python3-dbus, modemmanager, dbus-bin | dbus, network-manager, iproute2
 Description: Keeps five fixes to the FuriOS modem stack applied
  Five defects in ofono2mm and one in oFono's binder configuration: a signal
  bar that can never leave zero, LTE RSRP and RSRQ reported swapped and without

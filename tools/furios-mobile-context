@@ -260,7 +260,8 @@ command -v dbus-monitor >/dev/null 2>&1 || { err "furios-mobile-context: dbus-mo
 
 # dbus-monitor is a wake signal, nothing more - its output is never parsed.
 # Anything oFono says about the context, the packet service or registration
-# means "look again", and looking again is one cheap round of dbus-send.
+# that this daemon would act on means "look again", and looking again is one
+# cheap round of dbus-send. Which signals those are is the WAKE_ON list below.
 pass
 # dbus-monitor only attaches when the pipeline below starts, so anything oFono
 # said while this was getting ready is lost - and at boot that is exactly the
@@ -269,15 +270,47 @@ pass
 # has to carry the boot on its own once the old activation unit is switched
 # off.
 [ "$NEXT_WAIT" -gt 10 ] && NEXT_WAIT=10
-dbus-monitor --system \
-    "type='signal',sender='$OF',interface='org.ofono.ConnectionContext'" \
-    "type='signal',sender='$OF',interface='org.ofono.ConnectionManager'" \
-    "type='signal',sender='$OF',interface='org.ofono.NetworkRegistration'" \
-    2>/dev/null | while :; do
-        # Either something happened, or the backoff ran out. Both mean: look.
-        if read -r -t "$NEXT_WAIT" _line; then
+
+# Narrowed to the properties a pass actually reads, and not a whole interface
+# each. NetworkRegistration is not quiet: it announces Strength, which on a
+# weak cell is ten or more signals a minute, and waking for every one of them
+# meant a full pass - a dozen short-lived processes - to re-read a number this
+# daemon never looks at. Measured at 0.53 % of a core on an idle phone, more
+# than oFono and ModemManager together. arg0 of PropertyChanged is the
+# property name, so the bus drops the rest before we are ever woken and the
+# filter costs us nothing.
+#
+# ContextAdded and ContextRemoved carry an object path rather than a property
+# name, so they are matched by member. They are the only announcement a
+# context that did not exist at startup ever makes; without them a new one
+# would wait for the idle timer.
+WAKE_ON=(
+    "type='signal',sender='$OF',interface='org.ofono.NetworkRegistration',member='PropertyChanged',arg0='Status'"
+    "type='signal',sender='$OF',interface='org.ofono.ConnectionManager',member='PropertyChanged',arg0='Powered'"
+    "type='signal',sender='$OF',interface='org.ofono.ConnectionManager',member='PropertyChanged',arg0='Attached'"
+    "type='signal',sender='$OF',interface='org.ofono.ConnectionManager',member='ContextAdded'"
+    "type='signal',sender='$OF',interface='org.ofono.ConnectionManager',member='ContextRemoved'"
+    "type='signal',sender='$OF',interface='org.ofono.ConnectionContext',member='PropertyChanged',arg0='Active'"
+    "type='signal',sender='$OF',interface='org.ofono.ConnectionContext',member='PropertyChanged',arg0='Settings'"
+)
+
+dbus-monitor --system "${WAKE_ON[@]}" 2>/dev/null | while :; do
+        # Three outcomes, and telling them apart is the whole point. A line
+        # read means something happened; a timeout means the backoff ran out;
+        # both mean look. End of stream means dbus-monitor is gone, and there
+        # read returns AT ONCE instead of blocking - so a loop that treats it
+        # like a timeout does not wait, it spins. Measured at 74 dbus-send
+        # calls a second, for ever, with systemd still reporting the service
+        # healthy because the process is alive and nothing restarts it.
+        read -r -t "$NEXT_WAIT" _line
+        rc=$?
+        if [ "$rc" -eq 0 ]; then
             # Swallow the burst that comes with any one state change.
             while read -r -t 1 _more; do :; done
+        elif [ "$rc" -le 128 ]; then
+            # Not a timeout - bash reports that as 128 + SIGALRM. The stream
+            # ended. Leave, and let Restart= put a working one in our place.
+            break
         fi
         pass
     done

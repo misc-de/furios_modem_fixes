@@ -1067,20 +1067,51 @@ nowhere; they stopped being announced.
 
 ## What it costs, measured
 
-Numbers from the phone, not estimates. The polling is the only thing this adds
-to a running system; everything else happens once at boot or after a package
-operation.
+Numbers from the phone, not estimates. Three things here run all the time -
+the 30 s poll and the two watchers; everything else happens once at boot or
+after a package operation.
 
 | | measured | how |
 |---|---|---|
 | ofono2mm, polling every 30 s | 30 ms CPU in 600 s = **0.005%** | `/proc/<pid>/stat`, 20 polls |
 | ofonod, same window | 410 ms = **0.068%** | same, and this is an upper bound |
-| `modemctl apply` as a no-op | **41 ms** | what the boot unit and the apt hook run |
-| `modemctl status` | 253 ms | the patch checks are ~40 ms of it; the rest is mmcli, dbus-send and nmcli |
+| `furios-mobile-context`, idle | **0.53%**, now **nothing** | `CPUUsageNSec` of the unit did not move in 300 s |
+| `furios-mobile-route`, idle | **0.36%** | same |
+| `modemctl apply` as a no-op | **101 ms** | what the boot unit and the apt hook run |
+| `modemctl status` | 424 ms | the patch checks are ~40 ms of it; the rest is mmcli, dbus-send and nmcli |
 
 ofonod's share is an upper bound because that process also does everything
 else oFono does - registration, contexts, SMS. Even attributing all of it to
 the poll puts the whole feature under a tenth of a percent of one core.
+
+The supervisor was the expensive one, and for nothing. It woke on three whole
+oFono interfaces, and `NetworkRegistration` is not quiet: it announces
+`Strength`, eleven times in 75 s on a cell this weak. Each announcement cost a
+full pass - a dozen short-lived processes, 87 ms - to re-read a number this
+daemon never looks at, which put it above oFono and ModemManager together on
+an idle phone. The match rules now name the properties a pass actually reads.
+`arg0` of `PropertyChanged` is the property name, so the bus drops the rest
+before anyone is woken; `ContextAdded` and `ContextRemoved` carry an object
+path instead and are matched by member, because they are the only
+announcement a context that did not exist at startup will ever make. Measured
+again with the new rules: zero oFono wake-ups in 70 s, and a unit whose CPU
+counter does not move at all while the phone sits there.
+
+Worth knowing what that costs in the other direction. The Strength chatter was
+an accidental heartbeat: a state change that matched none of the rules would
+have been picked up within seconds anyway, just because something else woke the
+loop. Now the only fallback is the declared one, `FURIOS_MOBILE_CONTEXT_IDLE`,
+an hour by default. The drop this exists for does announce itself - oFono sets
+`Active` false on the context, which is matched - so this is the design working
+as it was written rather than a new hole. But if a way to lose the data call
+without a matching signal ever turns up, that hour is where it will hide.
+
+The route watcher's share is not polling either - it blocks on netlink, and
+`ip monitor address route link` saw no event at all in a 60 s idle sample. What
+it pays
+for is the ~5 minute cadence at which NetworkManager reinstalls its own
+`via`-the-own-address default route, which this then removes again; each round
+is three `mmcli` calls. Nothing in any journal says who installs it.
 
 Two things keep it that low. The poll only runs while there is a SIM to read:
 `set_props` returns at the SimManager check before touching D-Bus, so a phone
