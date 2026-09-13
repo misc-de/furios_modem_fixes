@@ -13,7 +13,7 @@ ROOT=$(dirname "$HERE")
 
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 STUBDIR="$WORK/bin"; mkdir -p "$STUBDIR"
-FILES="utils mm_bearer mm_modem mm_modem_simple mm_modem_signal"
+FILES="utils mm_bearer mm_modem mm_modem_simple mm_modem_signal main"
 
 # A healthy stack, so the runtime part of "status" does not drown out the part
 # this test is about.
@@ -46,10 +46,19 @@ PATH="$STUBDIR:$PATH"; export PATH
 RADIO="$WORK/radio-interface-binder.conf"
 TREE="$WORK/usr/lib/ofono2mm/ofono2mm"
 
+# main.py lives one level above the module directory, the way the package
+# lays it out; modemctl knows that and so must the tree we hand it.
+tree_path() {
+    case "$1" in
+        main) echo "$TREE/../main.py" ;;
+        *)    echo "$TREE/$1.py" ;;
+    esac
+}
+
 reset_tree() {
     # $1: shipped | patched
     rm -rf "$WORK/usr"; mkdir -p "$TREE"
-    for f in $FILES; do cp "$ROOT/$1-files/$f.py" "$TREE/$f.py"; done
+    for f in $FILES; do cp "$ROOT/$1-files/$f.py" "$(tree_path "$f")"; done
     printf 'radioInterface = %s\n' "$2" > "$RADIO"
 }
 
@@ -175,7 +184,7 @@ rc=$?
 check "apply on a shipped tree succeeds" 0 "$rc"
 for f in $FILES; do
     TESTS_RUN=$((TESTS_RUN + 1))
-    if diff -q "$TREE/$f.py" "$ROOT/patched-files/$f.py" >/dev/null; then
+    if diff -q "$(tree_path "$f")" "$ROOT/patched-files/$f.py" >/dev/null; then
         ok "apply produced the shipped patched $f.py"
     else
         TESTS_FAILED=$((TESTS_FAILED + 1)); fail "apply left $f.py wrong"
@@ -220,7 +229,7 @@ MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
     bash "$ROOT/modemctl" revert >/dev/null 2>&1
 for f in $FILES; do
     TESTS_RUN=$((TESTS_RUN + 1))
-    if diff -q "$TREE/$f.py" "$ROOT/original-files/$f.py" >/dev/null; then
+    if diff -q "$(tree_path "$f")" "$ROOT/original-files/$f.py" >/dev/null; then
         ok "revert restored the shipped $f.py"
     else
         TESTS_FAILED=$((TESTS_FAILED + 1)); fail "revert left $f.py wrong"

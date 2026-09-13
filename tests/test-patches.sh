@@ -10,10 +10,19 @@ ROOT=$(dirname "$HERE")
 . "$HERE/lib.sh"
 
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
-FILES="utils mm_bearer mm_modem mm_modem_simple mm_modem_signal"
+FILES="utils mm_bearer mm_modem mm_modem_simple mm_modem_signal main"
+
+# main.py sits beside the module directory rather than in it, exactly as it
+# does on the phone - the patches carry those paths and have to find them.
+sub_path() {
+    case "$1" in
+        main) echo "main.py" ;;
+        *)    echo "ofono2mm/$1.py" ;;
+    esac
+}
 
 mkdir -p "$WORK/ofono2mm"
-for f in $FILES; do cp "$ROOT/original-files/$f.py" "$WORK/ofono2mm/$f.py"; done
+for f in $FILES; do cp "$ROOT/original-files/$f.py" "$WORK/$(sub_path "$f")"; done
 
 for f in $FILES; do
     if patch -s -f -p1 -d "$WORK" < "$ROOT/patches/ofono2mm-$f.patch" 2>/dev/null; then
@@ -26,7 +35,7 @@ for f in $FILES; do
     fi
     # Not "it applied" but "it produced exactly what we ship". A patch can
     # apply with fuzz and land in the wrong place.
-    if diff -q "$WORK/ofono2mm/$f.py" "$ROOT/patched-files/$f.py" >/dev/null; then
+    if diff -q "$WORK/$(sub_path "$f")" "$ROOT/patched-files/$f.py" >/dev/null; then
         ok "$f.py: result is byte-for-byte the shipped patched file"
     else
         TESTS_FAILED=$((TESTS_FAILED + 1))

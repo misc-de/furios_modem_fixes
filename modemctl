@@ -25,7 +25,7 @@ fi
 
 TARGET=${MODEMCTL_TARGET:-/usr/lib/ofono2mm/ofono2mm}
 RADIO_CONF=${MODEMCTL_RADIO_CONF:-/etc/ofono/binder.d/radio-interface-binder.conf}
-FILES="utils mm_bearer mm_modem mm_modem_simple mm_modem_signal"
+FILES="utils mm_bearer mm_modem mm_modem_simple mm_modem_signal main"
 
 # The DNS half of defect 7. Both halves are needed: the drop-in stops
 # NetworkManager calling the resolvconf that cannot work, and the symlink is
@@ -81,6 +81,15 @@ need_write() {
     exit 1
 }
 
+# Every patched file but one lives in the python module directory. main.py
+# sits one level up, next to it, so ask rather than assume.
+file_path() {
+    case "$1" in
+        main) echo "$TARGET/../main.py" ;;
+        *)    echo "$TARGET/$1.py" ;;
+    esac
+}
+
 # --- patch state ------------------------------------------------------------
 #
 # Three answers, not two. "Does not apply" is not the same as "already there",
@@ -89,7 +98,7 @@ need_write() {
 patch_state() {
     local f=$1 p="$PATCHES/ofono2mm-$1.patch"
     [ -f "$p" ] || { echo stale; return; }
-    [ -f "$TARGET/$f.py" ] || { echo absent; return; }
+    [ -f "$(file_path "$f")" ] || { echo absent; return; }
     if patch -R -s -f --dry-run -p1 -d "$TARGET/.." < "$p" >/dev/null 2>&1; then
         echo applied
     elif patch -s -f --dry-run -p1 -d "$TARGET/.." < "$p" >/dev/null 2>&1; then
@@ -181,7 +190,7 @@ prune_backups() {
     # Runs before the backup is taken, so leave one slot free for it.
     # Parsing ls is only safe because nothing but root can create a file in
     # this directory - do not copy this pattern somewhere writable.
-    old=$(ls -1t "$TARGET/$f.py.bak."* 2>/dev/null | tail -n +"$BACKUPS_KEPT")
+    old=$(ls -1t "$(file_path "$f").bak."* 2>/dev/null | tail -n +"$BACKUPS_KEPT")
     [ -n "$old" ] && printf '%s\n' "$old" | while IFS= read -r b; do rm -f "$b"; done
     return 0
 }
@@ -204,7 +213,7 @@ cmd_apply() {
                 warn "     ready-made file in $SHARE/patched-files/$f.py - check by hand"
                 failed=1 ;;
             missing)
-                cp -a "$TARGET/$f.py" "$TARGET/$f.py.bak.$ts"
+                cp -a "$(file_path "$f")" "$(file_path "$f").bak.$ts"
                 if patch -s -f -p1 -d "$TARGET/.." < "$PATCHES/ofono2mm-$f.patch"; then
                     ok "$f.py patched (backup: $f.py.bak.$ts)"
                     changed=1
@@ -315,7 +324,7 @@ cmd_revert() {
             *) skip "$f.py is not ours to revert" ;;
         esac
     done
-    rm -rf "$TARGET/__pycache__"
+    rm -rf "$TARGET/__pycache__" "$TARGET/../__pycache__"
 
     # An upgrade wants exactly this much and no more: the Python files back to
     # what ofono2mm ships, while the patches that describe them are still the

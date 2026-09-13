@@ -1,0 +1,78 @@
+--- a/main.py
++++ b/main.py
+@@ -18,6 +18,66 @@
+ def get_version():
+     return "1.24.0"
+ 
++MM_ROOT = '/org/freedesktop/ModemManager1'
++MM_MODEM_PREFIX = MM_ROOT + '/Modem/'
++
++class ModemManagerBus(MessageBus):
++    """A bus whose ObjectManager announces modems and nothing else.
++
++    ModemManager puts its SIM and bearer objects on the bus under
++    /org/freedesktop/ModemManager1/SIM/n and /Bearer/n, but it does not
++    hand them out through the ObjectManager at /org/freedesktop/ModemManager1
++    -- that one carries modems only. dbus_fast has no such distinction: it
++    answers GetManagedObjects from every exported sub-path, so ours announces
++    the SIM and every bearer as well.
++
++    libmm-glib wraps each entry in an MMObject, and a client that takes one
++    and asks for its Modem interface gets NULL. phosh takes the first entry
++    of the list ("Modem interface is always present"), remembers it, and
++    never looks at another object -- so when a bearer happens to come first,
++    the phone shows no signal at all until something restarts. Which entry
++    comes first is hash order, which is why it looked intermittent.
++
++    So keep the non-modem paths off the ObjectManager. They stay exported and
++    reachable at their own paths; they are simply not announced, exactly as
++    ModemManager does it.
++    """
++
++    __slots__ = ()
++
++    @staticmethod
++    def _is_announced(path):
++        if not path.startswith(MM_ROOT + '/'):
++            return True
++        return path.startswith(MM_MODEM_PREFIX)
++
++    def _default_get_managed_objects_handler(self, msg, send_reply):
++        if msg.path != MM_ROOT:
++            return super()._default_get_managed_objects_handler(msg, send_reply)
++
++        # The handler reads _path_exports synchronously to pick its nodes and
++        # their interfaces; the property callbacks that finish the reply later
++        # never touch it. Narrowing it for the length of the call is therefore
++        # enough, and it reuses dbus_fast's logic rather than copying it.
++        every = self._path_exports
++        self._path_exports = {
++            path: interfaces
++            for path, interfaces in every.items()
++            if self._is_announced(path)
++        }
++        try:
++            return super()._default_get_managed_objects_handler(msg, send_reply)
++        finally:
++            self._path_exports = every
++
++    def _emit_interface_added(self, path, interface):
++        if self._is_announced(path):
++            super()._emit_interface_added(path, interface)
++
++    def _emit_interface_removed(self, path, removed_interfaces):
++        if self._is_announced(path):
++            super()._emit_interface_removed(path, removed_interfaces)
++
+ class MMInterface(ServiceInterface):
+     def __init__(self, loop, bus, verbose=False):
+         super().__init__('org.freedesktop.ModemManager1')
+@@ -257,7 +317,7 @@
+     else:
+         verbose = args.verbose
+ 
+-    bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
++    bus = await ModemManagerBus(bus_type=BusType.SYSTEM).connect()
+     loop = asyncio.get_running_loop()
+ 
+     mm_manager_interface = MMInterface(loop, bus, verbose=verbose)

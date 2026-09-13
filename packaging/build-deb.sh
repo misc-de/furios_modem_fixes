@@ -60,7 +60,7 @@ install -Dm644 LICENSE     "$STAGE/usr/share/doc/$PKG/LICENSE"
 install -Dm644 NOTICE      "$STAGE/usr/share/doc/$PKG/NOTICE"
 
 # The patches are diffs against ofono2mm's own files, so they carry ofono2mm's
-# licences - BSD-3-Clause for four of them, GPL-2.0 for mm_modem_signal.py.
+# licences - BSD-3-Clause for five of them, GPL-2.0 for mm_modem_signal.py.
 # The package as a whole is therefore GPL-2.0, whatever our own scripts are.
 cat > "$STAGE/usr/share/doc/$PKG/copyright" <<'COPY'
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
@@ -75,10 +75,12 @@ Files: patches/ofono2mm-utils.patch
        patches/ofono2mm-mm_bearer.patch
        patches/ofono2mm-mm_modem.patch
        patches/ofono2mm-mm_modem_simple.patch
+       patches/ofono2mm-main.patch
        patched-files/utils.py
        patched-files/mm_bearer.py
        patched-files/mm_modem.py
        patched-files/mm_modem_simple.py
+       patched-files/main.py
 Copyright: 2023 Erik Inkinen <erik.inkinen@gmail.com>
            2025 Bardia Moshiri <fakeshell@bardia.tech>
            2026 misc-de

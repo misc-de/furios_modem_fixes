@@ -8,15 +8,17 @@ Device: FuriPhone FLX1 (radon), MediaTek modem `MOLY.NR15.R3.MP.V189`, SIM
 262-23, APN `web.vodafone.de`. Package versions in
 [paket-versionen.txt](paket-versionen.txt).
 
-Three symptoms started this, on different days:
+Four symptoms started this, on different days:
 
 - the data connection would only come up reliably after a reboot, and the UI
   said "mobile data unavailable" in between;
 - the signal icon sat at the emptiest bar no matter where the phone was;
 - switching Wi-Fi off left the phone with no network at all, although mobile
-  data was connected and every component called itself healthy.
+  data was connected and every component called itself healthy;
+- and finally the signal icon disappeared altogether, on a boot where every
+  measurable thing about the modem was correct.
 
-None was a radio problem. All eleven causes are in software, and only one of
+None was a radio problem. All twelve causes are in software, and only one of
 them is in code anybody here wrote.
 
 ---
@@ -874,11 +876,148 @@ per interface.
 ### What is NOT claimed
 
 Whether this is what hides the technology label in the shell is **not
-established**. `AccessTechnologies` was correct the whole time, so the label
-should have worked regardless; the phone's screen was off and the status bar
-could not be photographed. What is established is that ModemManager reported no
-capabilities and no modes while oFono had three technologies, and that the fix
-removes that.
+established** - and defect 12 later showed that it is not: `AccessTechnologies`
+was correct the whole time, as suspected here, and the shell was missing a
+modem object entirely for an unrelated reason. What is established for this
+defect is that ModemManager reported no capabilities and no modes while oFono
+had three technologies, and that the fix removes that.
+
+---
+
+## 12. No signal icon, with a modem that is working perfectly
+
+The 2026-09-13 15:25 boot. Every measurement said the stack was healthy:
+
+```
+Status  |  state: registered          packet service state: attached
+        |  access tech: lte           signal quality: 22% (recent)
+Bearer  |  connected: yes             interface: ccmni0
+```
+
+`ping -I ccmni0 1.1.1.1` - 0% loss. Error 44 since boot - none. `modemctl
+status` - everything in place, including defect 11's fix holding across a cold
+start. And the phone showed **no mobile signal icon at all**.
+
+The only trace anywhere:
+
+```
+phosh[3678]: (../libmm-glib/mm-object.c:108):mm_object_get_modem:
+             runtime check failed: (MM_IS_MODEM (modem))
+phosh[3678]: modem_init_modem: assertion 'self->modem' failed
+```
+
+`mmcli` printed the same warning three times per run and was ignored for it -
+it printed all the right values afterwards, so it read as cosmetic. It is not.
+Three times is once per object that is not a modem.
+
+### What the ObjectManager hands out
+
+Asking libmm-glib for what ModemManager announces, the way any GUI does:
+
+```
+Objects in the ObjectManager: 4
+  /org/freedesktop/ModemManager1/Bearer/1   modem-proxy: NULL
+  /org/freedesktop/ModemManager1/Modem/0    modem-proxy: OK    15 interfaces
+  /org/freedesktop/ModemManager1/SIM/0      modem-proxy: NULL
+  /org/freedesktop/ModemManager1/Bearer/0   modem-proxy: NULL
+```
+
+Real ModemManager answers that question with modems and nothing else. It does
+export SIMs and bearers on the bus, at exactly these paths - but it builds its
+ObjectManager from modem skeletons alone, and a client reaches a bearer
+through the modem's `Bearers` property, never by enumeration.
+
+ofono2mm has no ObjectManager of its own. dbus_fast synthesises one from the
+export table:
+
+```python
+nodes = [node for node in self._path_exports
+         if msg.path == "/" or node.startswith(msg.path + "/")]
+```
+
+Every exported sub-path, which is every SIM and every bearer.
+
+### Why that is fatal rather than untidy
+
+phosh, `src/wwan/phosh-wwan-mm.c`:
+
+```c
+modems = g_dbus_object_manager_get_objects (G_DBUS_OBJECT_MANAGER (self->manager));
+if (modems) {
+  /* Cold plug first modem */
+  on_mm_object_added (self, modems->data, self->manager);
+}
+```
+
+and in `on_mm_object_added`:
+
+```c
+if (!self->object) {
+  self->object = g_object_ref (MM_OBJECT (object));
+  /* Modem interface is always present */
+  modem_init_modem (self, MM_OBJECT (object));
+```
+
+`modems->data` is the first entry of the list, and the comment states the
+assumption plainly. Against ModemManager the assumption holds. Against ours it
+is a coin toss.
+
+Worse than a coin toss, because `self->object` is assigned *before*
+`modem_init_modem` asserts. Once phosh has latched onto a bearer, the
+`if (!self->object)` guard is false for every object that arrives afterwards -
+including the modem. It does not retry. There is no icon until something
+restarts phosh or ModemManager.
+
+The order of the list is GLib hash order over the paths, which is why this
+looked intermittent across reboots and why it correlates with nothing
+obvious. The bearers only exist at all if the data call came up before phosh
+started, so a boot that connects slowly hides the bug and a boot that connects
+quickly shows it.
+
+This is also the answer to the question left open under defect 11: the
+technology label was missing for this reason, not for that one.
+`AccessTechnologies` was right all along, as suspected there - phosh simply
+never had a modem to read it from.
+
+### The fix
+
+Announce modems, the way ModemManager does. `main.py` gets a bus that narrows
+the three ObjectManager entry points and changes nothing else:
+
+```python
+class ModemManagerBus(MessageBus):
+    @staticmethod
+    def _is_announced(path):
+        if not path.startswith(MM_ROOT + '/'):
+            return True
+        return path.startswith(MM_MODEM_PREFIX)
+```
+
+`GetManagedObjects` at `/org/freedesktop/ModemManager1` runs against a
+narrowed export table and puts it straight back; `InterfacesAdded` and
+`InterfacesRemoved` are suppressed for the paths that should never have been
+announced. The SIM and the bearers stay exported and stay reachable at their
+own paths - they are simply not enumerable, which is the actual contract.
+
+Restoring `_path_exports` afterwards is not a detail: dbus_fast serves every
+later call from that same table, so leaking the narrowed one would make the
+daemon forget its own SIM. It is restored in a `finally`, and the test proves
+it for the throwing case too.
+
+### Proof
+
+Same query, after the fix, with ModemManager restarted and nothing else
+touched:
+
+```
+Objects in the ObjectManager: 1
+  /org/freedesktop/ModemManager1/Modem/0    modem-proxy: OK    15 interfaces
+```
+
+No warnings from `mmcli` any more, on any invocation. `mmcli -m 0 --sim 0`
+still prints the IMSI, `mmcli -b 0` still reports the bearer connected on
+`ccmni0`, and `ping -I ccmni0` still loses nothing. The SIM and bearers went
+nowhere; they stopped being announced.
 
 ---
 

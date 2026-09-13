@@ -1,11 +1,11 @@
 # furios_modem_fixes
 
-Eleven defects in the FuriOS modem stack, and a way to keep them fixed.
+Twelve defects in the FuriOS modem stack, and a way to keep them fixed.
 
 Out of the box on this phone the data connection often only came up after a
 reboot, the signal icon sat at the emptiest bar regardless of reception, and
 mobile data never carried a single packet of anybody's traffic. None of it was
-a radio problem. Six of the causes are in `ofono2mm`, one is in oFono's binder
+a radio problem. Seven of the causes are in `ofono2mm`, one is in oFono's binder
 configuration, one is in oFono itself, and one is in how FuriOS wires up DNS.
 
 The last two are different in kind from the rest: nothing gets patched. Number
@@ -69,7 +69,7 @@ identify the tower you are on, which places you within a kilometre or so. The
 signal levels do not. Nothing is stored or sent - it prints and exits - but a
 bug report is a public place.
 
-## The eleven defects
+## The twelve defects
 
 | # | What | Where | Symptom |
 |---|---|---|---|
@@ -84,6 +84,7 @@ bug report is a public place.
 | 9 | Nothing brings the data context back after a failed data call | the system as shipped | mobile data stays down until the next reboot |
 | 10 | Interfaces are appended to the modem's port list and never removed | `mm_modem.py`, `mm_bearer.py` | NM binds the resolver to a dead interface; every lookup REFUSED with Wi-Fi off |
 | 11 | An oFono interface asked for before oFono has it is never asked again | `mm_modem.py` | `CurrentCapabilities` pinned to LTE alone and `SupportedModes` **empty**, for the whole uptime |
+| 12 | SIM and bearer objects announced through the ObjectManager, which ModemManager reserves for modems | `main.py` | phosh grabs a bearer, finds no modem on it and shows **no signal icon at all** |
 
 Numbers behind each of these, and why they are what they are, in
 [FINDINGS.md](FINDINGS.md).
@@ -98,6 +99,16 @@ installed, `modemctl apply` fixes the DNS wiring, `furios-mobile-context` puts
 the data call back when it dies, and `modemctl status` calls out any of them
 when it is missing.
 
+Number 12 is the same kind of trap seen from the other side. There the stack
+lied and the phone worked; here the stack is right about everything - modem
+registered, bearer up, packets flowing - and the phone still shows no signal,
+because the one client that draws the icon was handed a bearer where it
+expected a modem. Nothing in `mmcli`, `ip`, or `ping` can see it. Only
+`journalctl | grep phosh` can:
+
+    phosh: mm_object_get_modem: runtime check failed: (MM_IS_MODEM (modem))
+    phosh: modem_init_modem: assertion 'self->modem' failed
+
 ## When a patch stops fitting
 
 An ofono2mm update can move the code a patch anchors on. `modemctl` then says
@@ -107,7 +118,7 @@ than no patch:
     FAIL  mm_modem_signal.py: patch does not fit (upstream moved)
           ready-made file in /usr/share/furios-modem/patched-files/... - check by hand
 
-Two of the eleven are already fixed or half-fixed upstream, so this is expected to
+Two of the twelve are already fixed or half-fixed upstream, so this is expected to
 happen eventually.
 
 The same message used to appear for a much less interesting reason: **a patch
