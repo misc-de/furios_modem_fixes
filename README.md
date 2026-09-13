@@ -1,4 +1,4 @@
-# furios_modem
+# furios_modem_fixes
 
 Six defects in the FuriOS modem stack, and a way to keep them fixed.
 
@@ -19,8 +19,8 @@ cost hours.
 
 ## Install
 
-    git clone https://github.com/misc-de/furios_modem
-    cd furios_modem && ./install.sh
+    git clone https://github.com/misc-de/furios_modem_fixes
+    cd furios_modem_fixes && ./install.sh
 
 or build a package:
 

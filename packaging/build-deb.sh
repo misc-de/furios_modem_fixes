@@ -54,8 +54,8 @@ install -Dm644 NOTICE      "$STAGE/usr/share/doc/$PKG/NOTICE"
 # The package as a whole is therefore GPL-2.0, whatever our own scripts are.
 cat > "$STAGE/usr/share/doc/$PKG/copyright" <<'COPY'
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: furios_modem
-Source: https://github.com/misc-de/furios_modem
+Upstream-Name: furios_modem_fixes
+Source: https://github.com/misc-de/furios_modem_fixes
 
 Files: *
 Copyright: 2026 misc-de
