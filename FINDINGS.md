@@ -411,6 +411,51 @@ the change if its timestamp still looks newer. `modemctl apply` removes it.
 
 ---
 
+## 5G
+
+Not a seventh defect, but the question fault 1 leaves behind: is NR reachable
+once the modem stops rejecting it?
+
+`radioInterface = 1.4` made oFono ask for NR through a call this modem refuses,
+so it retried every two seconds - 42,714 rejections in one day, and never a 5G
+connection. A mobile data toggle then left `TechnologyPreference` on LTE, so
+afterwards nothing asked for 5G at all. Both states look identical from the
+outside: no 5G, ever.
+
+With `radioInterface = 1.6` the modem accepts `TechnologyPreference = nr`.
+Measured after setting it:
+
+| | result |
+|---|---|
+| 12 min steady state, sampled every 30 s | preference `nr`, no `Error 44`, no registration churn, data connected throughout |
+| mobile data off and on again | preference survives - this is the exact event that reset it under 1.4 |
+| persisted to `/var/lib/ofono/<IMSI>/radiosetting` | `TechnologyPreference=8` |
+| ofonod CPU over 600 s | 0.0717% against 0.0683% on LTE the day before - noise |
+
+The phone still registers on LTE here, at roughly -120 dBm on band 1. Whether
+that is coverage, provisioning or the NSA anchor cannot be decided from the
+device; it needs a location with known 5G.
+
+**Not verified: a reboot.** The on-disk value is what oFono applies at start,
+and under 1.4 that was where the rejection loop began. Under 1.6 it does not
+reject, but this has not been watched through an actual boot. `modemctl check`
+reports a returning loop, and one command undoes it:
+
+```bash
+dbus-send --system --print-reply --dest=org.ofono /ril_0 \
+    org.ofono.RadioSettings.SetProperty string:"TechnologyPreference" \
+    variant:string:"lte"
+```
+
+One more thing oFono does not help with: `AvailableTechnologies` lists only
+gsm, umts and lte, and never nr - yet oFono accepts `nr` as the preference
+without complaint. So `mmcli` reports `supported: gsm-umts, lte` and offers no
+5G modes. That inconsistency is in the binder plugin and is still open. The
+display path itself is fine: `mm_modem.py` maps `nr` to
+`MM_MODEM_ACCESS_TECHNOLOGY_5GNR` correctly.
+
+---
+
 ## Diagnosing it by hand
 
 `modemctl status` and `modemctl check` cover the usual questions. These are the

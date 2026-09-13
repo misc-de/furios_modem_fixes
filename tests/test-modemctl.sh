@@ -23,9 +23,15 @@ echo "           |         signal quality: 26% (recent)"
 STUB
 cat > "$STUBDIR/dbus-send" <<'STUB'
 #!/bin/sh
-echo '      dict entry('
-echo '         string "AccessPointName"'
-echo '         variant             string "web.vodafone.de"'
+case "$*" in
+  *RadioSettings*)
+    echo '         string "TechnologyPreference"'
+    echo '         variant             string "nr"' ;;
+  *)
+    echo '      dict entry('
+    echo '         string "AccessPointName"'
+    echo '         variant             string "web.vodafone.de"' ;;
+esac
 STUB
 cat > "$STUBDIR/nmcli" <<'STUB'
 #!/bin/sh
@@ -81,6 +87,46 @@ if echo "$out" | grep -q "everything in place"; then
 else
     TESTS_FAILED=$((TESTS_FAILED + 1)); fail "patched tree: unexpected verdict" "$out"
 fi
+
+# A preference other than nr means nobody is asking for 5G. It is not a
+# failure - it is a legitimate choice - so it warns rather than failing, but it
+# must be visible: this was silently reset once and cost a day of wondering
+# where 5G had gone.
+cat > "$STUBDIR/dbus-send" <<'STUB'
+#!/bin/sh
+case "$*" in
+  *RadioSettings*)
+    echo '         string "TechnologyPreference"'
+    echo '         variant             string "lte"' ;;
+  *)
+    echo '         string "AccessPointName"'
+    echo '         variant             string "web.vodafone.de"' ;;
+esac
+STUB
+chmod +x "$STUBDIR/dbus-send"
+reset_tree patched 1.6
+out=$(run_status)
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out" | grep -q "5G is not being asked for"; then
+    ok "an LTE-only preference is reported"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "a preference of lte passed unmentioned" "$out"
+fi
+check_status "but it is not treated as a failure" 0 \
+    env MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" bash "$ROOT/modemctl" status
+# back to the healthy stub for the rest
+cat > "$STUBDIR/dbus-send" <<'STUB'
+#!/bin/sh
+case "$*" in
+  *RadioSettings*)
+    echo '         string "TechnologyPreference"'
+    echo '         variant             string "nr"' ;;
+  *)
+    echo '         string "AccessPointName"'
+    echo '         variant             string "web.vodafone.de"' ;;
+esac
+STUB
+chmod +x "$STUBDIR/dbus-send"
 
 # --- upstream moved ---------------------------------------------------------
 #

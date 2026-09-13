@@ -314,6 +314,21 @@ cmd_status() {
         mms)   bad "MMS APN is the placeholder 'mms' again - the mmsd loop is back"; bad_count=$((bad_count+1)) ;;
         *)     ok "MMS APN: $apn" ;;
     esac
+    # The radio technology preference. Not something this project sets - oFono
+    # persists it per SIM - but it is the setting that decides whether 5G is
+    # even asked for, and it has been reset behind our back before: under
+    # radioInterface 1.4 the modem rejected NR outright, and a mobile data
+    # toggle left it on LTE. Worth seeing rather than discovering months later.
+    local pref
+    pref=$(dbus-send --system --print-reply --dest=org.ofono /ril_0 \
+        org.ofono.RadioSettings.GetProperties 2>/dev/null \
+        | grep -A1 TechnologyPreference | tail -1 | grep -o '"[a-z]*"$' | tr -d '"')
+    case "$pref" in
+        "")   skip "radio technology preference unreadable" ;;
+        nr)   ok "radio technology preference: nr (5G asked for)" ;;
+        *)    warn "radio technology preference: $pref - 5G is not being asked for" ;;
+    esac
+
     # The cellular profile by type, NOT the first one listed - that is the
     # Wi-Fi connection on any phone that has ever joined a network, and
     # checking its ipv6.method would say nothing about the modem.
