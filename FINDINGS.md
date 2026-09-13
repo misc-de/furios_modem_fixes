@@ -446,6 +446,89 @@ netlink:
 Cost: one process blocked on a netlink socket. No timer, no polling, no
 wakeups - which on a phone is the difference between a fix and a new problem.
 
+### The standing fight, and who keeps it going
+
+The watcher says the same thing every five minutes, all day:
+
+```
+17:19:14  removed the via-10.46.119.239 route on ccmni0 (it drops every packet)
+17:24:15  removed the via-10.46.119.239 route on ccmni0 (it drops every packet)
+17:29:16  removed the via-10.46.119.239 route on ccmni0 (it drops every packet)
+```
+
+301 seconds apart, to the second, and no journal anywhere names what put the
+route back. The obvious reading is a timer somewhere in NetworkManager. The
+truth is worse and more interesting: **there is no independent timer. The loop
+is closed, and this watcher is one of its two halves.**
+
+Caught with `ip -ts monitor route` on one side and NetworkManager's own debug
+logging on the other. The route arithmetic gives it away before the log does:
+
+```
+18:00:50.176  default via 10.43.240.243 dev ccmni1 proto static metric 21050
+18:00:51.710  default via 10.43.240.243 dev ccmni1 proto static metric  1050
+18:00:51.710  Deleted  ... metric 21050
+18:00:52.331  Deleted  ... metric  1050          <- furios-mobile-route
+```
+
+Two additions for one route, at two metrics, 1.5 s apart. 21050 is 1050 plus
+20000, and 20000 is what NetworkManager adds to a device's default route while
+it considers that device's connectivity degraded. So the route was installed
+twice: once under a penalty, once without. Its own log says why:
+
+```
+connectivity: (ccmni1,IPv4,364) skip connectivity check due to no global route configured
+connectivity: (ccmni1,IPv4,364) check completed: LIMITED; no global route configured
+device (/ril_0): connectivity state changed from FULL to LIMITED
+platform: (ccmni1) route: append IPv4 route: ... metric 21050
+connectivity: (ccmni1,IPv4,365) start request to 'http://conncheck.furios.io'
+connectivity: (ccmni1,IPv4,365) check completed: FULL; expected response
+device (/ril_0): connectivity state changed from LIMITED to FULL
+platform: (ccmni1) route: append IPv4 route: ... metric 1050
+platform: (ccmni1) ip4-route: delete ... metric 21050
+```
+
+Read it as a cycle and it closes on itself:
+
+1. The watcher deletes NetworkManager's route.
+2. NetworkManager now has no default route **of its own** on that device. Ours
+   is in the kernel table the whole time - it counts only the ones it
+   configured.
+3. Five minutes later the connectivity check comes round and **does not run**:
+   "skip connectivity check due to no global route configured". It reports
+   LIMITED without testing anything.
+4. LIMITED means penalty, so the default route goes back in at 21050.
+5. Now there is a route, so the check runs for real, fetches
+   `conncheck.furios.io`, and comes back FULL.
+6. Penalty lifted: the route is reinstalled at 1050 and the 21050 copy deleted.
+7. The watcher sees the netlink event, recognises the next hop as the
+   interface's own address, and deletes it. Back to 1.
+
+The 301 seconds are `connectivity.interval`, which is 300 by default and is not
+set anywhere on this phone, plus the second NetworkManager spends on the second
+attempt. The gaps in the list above that are not 301 - 542 s, 503 s - are the
+ones where the bearer changed interface in between and the cycle restarted.
+
+**What it costs.** Between the moment NetworkManager reinstalls its route at
+metric 1050 and the moment the watcher removes it, both defaults sit in the
+table with the same destination and the same metric, and the kernel picks by
+FIB order. Measured at **621 ms**, once every five minutes, and only while
+traffic is on mobile data. Plus three `ip` writes and the watcher's three
+`mmcli` calls per round.
+
+**What it is not.** It is not a fight the phone would have without us. Left
+alone, NetworkManager would keep its route, every check would pass, and nothing
+would repeat - at the price of a default route that drops every packet, which
+is the whole reason section 7 exists. The choice is not between the loop and
+quiet; it is between the loop and the black hole.
+
+**What could end it.** `ipv4.never-default=yes` on the cellular profile would
+stop NetworkManager installing a default route at all, which ends the cycle at
+step 4. The price is that the device then never has a global route by
+NetworkManager's reckoning, so it is LIMITED for good - which feeds the primary
+connection and metered logic above it. Worth measuring before it is worth
+doing. Not done.
+
 ## 8. The filled resolver nobody asks
 
 The other half of "Wi-Fi off means offline", found the same day and only
