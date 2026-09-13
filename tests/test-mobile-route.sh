@@ -19,14 +19,17 @@ TOOL="$ROOT/tools/furios-mobile-route"
 # The scenario file is what each test rewrites; both stubs read it fresh on
 # every call, so a test is three assignments and a run.
 scenario() {
-    # scenario <bearers> <addr iface> <existing route iface> [via]
-    # "via" renders the existing route as NetworkManager writes it: a next hop
-    # pointing at the interface's own address.
+    # scenario <bearers> <addr iface> <our on-link route iface> [via gateway]
+    #
+    # The two route arguments are independent, because on this phone both
+    # routes really do sit in the table at once: ours on-link, and
+    # NetworkManager's "via" the interface's own address, same destination and
+    # same metric. A gateway given here puts such a route on the addr iface.
     cat > "$STUBDIR/scenario" <<EOF
 BEARERS="$1"
 ADDR_IFACE="$2"
 ROUTE_IFACE="$3"
-ROUTE_VIA="${4:-}"
+VIA_GW="${4:-}"
 EOF
 }
 
@@ -62,26 +65,27 @@ cat > "$STUBDIR/ip" <<'STUB'
 . "$(dirname "$0")/scenario"
 printf '%s\n' "$*" >> "$(dirname "$0")/ip.args"
 dev=$(echo "$*" | awk '{print $6}')
+# One on-link line for ours, one via line for NetworkManager's, exactly as
+# "ip route show" renders them.
+lines_for() {
+    [ -n "$ROUTE_IFACE" ] && [ "$1" = "$ROUTE_IFACE" ] &&
+        echo "default dev $1 scope link metric 1050"
+    [ -n "$VIA_GW" ] && [ "$1" = "$ADDR_IFACE" ] &&
+        echo "default via $VIA_GW dev $1 proto static metric 1050"
+}
 case "$*" in
   "-4 -o addr show dev "*" scope global")
       [ -n "$ADDR_IFACE" ] && [ "$dev" = "$ADDR_IFACE" ] &&
-          echo "2: $dev    inet 10.13.195.47/24 scope global $dev" ;;
+          echo "2: $dev    inet 10.10.95.220/24 scope global $dev" ;;
+  "-4 -o addr show dev "*)
+      [ -n "$ADDR_IFACE" ] && [ "$dev" = "$ADDR_IFACE" ] &&
+          echo "2: $dev    inet 10.10.95.220/24 scope global $dev" ;;
   "-4 route show default dev "*)
-      [ -n "$ROUTE_IFACE" ] && [ "$dev" = "$ROUTE_IFACE" ] && {
-          if [ -n "$ROUTE_VIA" ]; then
-              echo "default via $ROUTE_VIA dev $dev proto static metric 1050"
-          else
-              echo "default dev $dev scope link metric 1050"
-          fi
-      } ;;
+      lines_for "$dev" ;;
   "-4 route show default metric "*)
-      [ -n "$ROUTE_IFACE" ] && {
-          if [ -n "$ROUTE_VIA" ]; then
-              echo "default via $ROUTE_VIA dev $ROUTE_IFACE proto static metric 1050"
-          else
-              echo "default dev $ROUTE_IFACE scope link metric 1050"
-          fi
-      } ;;
+      [ -n "$ROUTE_IFACE" ] && echo "default dev $ROUTE_IFACE scope link metric 1050"
+      [ -n "$VIA_GW" ] && [ -n "$ADDR_IFACE" ] &&
+          echo "default via $VIA_GW dev $ADDR_IFACE proto static metric 1050" ;;
 esac
 exit 0
 STUB
@@ -140,10 +144,27 @@ printf '\n\033[1m== NetworkManager own route is not ours\033[0m\n'
 # looks healthy and NM reports connectivity "full". Treating that as "the route
 # is there" would leave the phone with a black hole and a watcher reporting
 # success.
+# Only NetworkManager's route is there. Ours has to be written, and its black
+# hole taken out of the table.
+scenario "default:yes:ccmni0" ccmni0 "" 10.10.95.220
+run_tool
+check "a via-route alone is not mistaken for ours" \
+      "route replace default dev ccmni0 metric 1050;route del default via 10.10.95.220 dev ccmni0 metric 1050;" \
+      "$(writes)"
+
+# Both in the table at once - which is the state the phone was actually found
+# in. Ours is correct, so nothing is rewritten; the black hole still goes.
 scenario "default:yes:ccmni0" ccmni0 ccmni0 10.10.95.220
 run_tool
-check "a via-route at our metric is replaced, not accepted" \
-      "route replace default dev ccmni0 metric 1050;" "$(writes)"
+check "with ours already right, only the black hole is removed" \
+      "route del default via 10.10.95.220 dev ccmni0 metric 1050;" "$(writes)"
+
+# A next hop that is NOT one of the interface's own addresses is somebody
+# else's correct configuration. Deleting that would be this tool inventing a
+# defect to fix.
+scenario "default:yes:ccmni0" ccmni0 ccmni0 10.99.99.1
+run_tool
+check "a real gateway is left alone" "" "$(writes)"
 
 printf '\n\033[1m== cleaning up after itself\033[0m\n'
 

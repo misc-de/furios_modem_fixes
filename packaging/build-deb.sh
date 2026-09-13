@@ -158,6 +158,12 @@ if [ "$1" = configure ]; then
     # until the next reboot, which is exactly the failure it exists to prevent.
     systemctl enable --now furios-mobile-route.service >/dev/null 2>&1 || true
     systemctl enable --now furios-mobile-context.service >/dev/null 2>&1 || true
+    # "enable --now" does NOT restart a unit that is already running, so an
+    # upgrade would install new code and leave the old process in charge - and
+    # the old process is exactly the one with the bug that was just fixed.
+    # try-restart touches only what is actually running.
+    systemctl try-restart furios-mobile-route.service furios-mobile-context.service \
+        >/dev/null 2>&1 || true
     # Apply now rather than at the next boot. Quiet, and never fatal: a
     # package that fails to configure because a patch did not fit would leave
     # dpkg half-done, which is a worse problem than an unpatched modem.

@@ -320,6 +320,13 @@ carries nothing over NetworkManager's `via` route and everything over this one.
 Replacing NetworkManager's route is safe: watched for 20 s after each replace,
 it does not put its own back.
 
+Both can also sit in the table at the same time - same destination, same
+metric, different next hop, which the kernel keeps as two routes and picks
+between by FIB order. That is a coin flip on every packet, so the watcher
+deletes the via-route outright. Only ever when the next hop is one of the
+interface's **own** addresses: a real gateway is somebody else's correct
+configuration.
+
 **This is why the watcher checks for `via`.** Its first version asked only
 whether a default route existed on the interface at its metric - which is
 true of NetworkManager's blackhole - and would have left the phone with a

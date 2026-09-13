@@ -53,6 +53,9 @@ sudo systemctl enable furios-modem-fixes.service >/dev/null
 # without telling anybody.
 sudo systemctl enable --now furios-mobile-route.service >/dev/null
 sudo systemctl enable --now furios-mobile-context.service >/dev/null
+# Re-running install.sh over a running watcher has to hand it the new code;
+# "enable --now" alone leaves the old process running.
+sudo systemctl try-restart furios-mobile-route.service furios-mobile-context.service
 
 sudo "$BIN/modemctl" apply
 

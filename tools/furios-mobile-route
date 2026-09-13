@@ -120,8 +120,12 @@ has_global_v4() {
 # measured at 100% packet loss while looking perfectly healthy in ip route. A
 # check that merely asked "is there a default route on this interface at this
 # metric" would answer yes to it and leave the phone with a route that eats
-# every packet. Replacing it is safe - NetworkManager does not put it back
-# (watched for 20 s after each replace).
+# every packet.
+#
+# Asked line by line, not of the whole output: both routes can sit there at
+# once - same destination, same metric, different next hop - and a check that
+# went false just because a via-route was present would rewrite a route that is
+# already correct on every event.
 #
 # Checking before writing is also not politeness: every write of ours comes
 # back as a netlink event, and a watcher that writes on every event it sees is
@@ -130,8 +134,28 @@ route_present() {
     local r
     r=$(ip -4 route show default dev "$1" metric "$METRIC" 2>/dev/null)
     [ -n "$r" ] || return 1
-    case "$r" in *" via "*) return 1 ;; esac
+    printf '%s\n' "$r" | grep -qv ' via ' || return 1
     return 0
+}
+
+# NetworkManager's route, when it sits next to ours. Same destination, same
+# metric, different next hop: the kernel keeps both and picks by FIB order, so
+# leaving it there makes every packet a coin flip between a working route and
+# a black hole.
+#
+# Only ever removed when the next hop is one of the interface's OWN addresses.
+# That is the defect, precisely; a next hop that is a real gateway is somebody
+# else's correct configuration and none of our business.
+drop_self_via() {
+    local iface=$1 gw own
+    own=$(ip -4 -o addr show dev "$iface" 2>/dev/null | awk '{split($4,a,"/"); print a[1]}')
+    ip -4 route show default dev "$iface" metric "$METRIC" 2>/dev/null \
+      | awk '{for (i=1;i<=NF;i++) if ($i=="via") print $(i+1)}' \
+      | while read -r gw; do
+            printf '%s\n' "$own" | grep -qx "$gw" || continue
+            ip route del default via "$gw" dev "$iface" metric "$METRIC" 2>/dev/null \
+                && log "removed the via-$gw route on $iface (it drops every packet)"
+        done
 }
 
 assert_route() {
@@ -158,7 +182,11 @@ assert_route() {
         return 0
     fi
 
-    route_present "$iface" && return 0
+    if route_present "$iface"; then
+        # Ours is there, but NetworkManager's may have appeared beside it.
+        drop_self_via "$iface"
+        return 0
+    fi
 
     if ip route replace default dev "$iface" metric "$METRIC" 2>/dev/null; then
         log "default route on $iface (metric $METRIC)"
@@ -166,6 +194,7 @@ assert_route() {
         err "furios-mobile-route: could not set default route on $iface"
         return 1
     fi
+    drop_self_via "$iface"
 }
 
 command -v mmcli >/dev/null 2>&1 || { err "furios-mobile-route: mmcli not found"; exit 1; }
