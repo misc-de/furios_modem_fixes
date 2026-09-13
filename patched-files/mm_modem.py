@@ -68,6 +68,7 @@ class MMModemInterface(ServiceInterface):
         self.selected_current_mode = []
         self.sim = Variant('o', f'/org/freedesktop/ModemManager1/SIM/{self.index}')
         self.bearers = {}
+        self.watched_interfaces = set()
 
         self.was_powered = False
         self.enabled = True
@@ -186,7 +187,8 @@ class MMModemInterface(ServiceInterface):
         if self.mm_modem_signal_interface:
             self.mm_modem_signal_interface.ofono_interface_props = self.ofono_interface_props
 
-        if iface not in self.interfaces_without_props:
+        if iface not in self.interfaces_without_props and iface not in self.watched_interfaces:
+            self.watched_interfaces.add(iface)
             self.ofono_interface_props[iface].on('*', self.ofono_interface_changed(iface))
 
         if self.mm_modem3gpp_interface:
@@ -1665,7 +1667,55 @@ class MMModemInterface(ServiceInterface):
             protocol = 1
         return protocol
 
+    async def resync_ofono_interfaces(self, interfaces):
+        """
+        Read the interfaces that were asked for before oFono had them.
+
+        Every interface is asked for exactly twice in the life of the process:
+        once when the modem object is built, once if the SIM is unlocked later.
+        Both bursts fire while oFono is still bringing the modem up, and an
+        interface that is not registered yet answers nothing - which is not an
+        error anyone sees. The proxy is built from a static XML file, so asking
+        for an interface oFono has never heard of still hands back a perfectly
+        good object; init() then catches the bus error itself and leaves the
+        properties empty. So add_ofono_interface() always reports success, its
+        five retries covering two and a half seconds of a startup that takes
+        longer than that.
+
+        What happens afterwards depends on the interface. The ones whose
+        properties change repair themselves, because a PropertyChanged brings
+        the value along with it. RadioSettings does not: AvailableTechnologies
+        is fixed for the life of the modem, so it never announces itself, and
+        the empty read stands for the whole uptime. set_props() then pins
+        CurrentCapabilities to LTE alone and leaves SupportedModes empty, and
+        the shell is offered no technology and no mode at all while oFono sits
+        there with gsm, umts and lte. The data path keeps working throughout,
+        which is why nothing complains.
+
+        oFono does say when an interface arrives - the modem's own Interfaces
+        property lists them - and nothing was listening for it. That list is
+        the only announcement an interface with static properties will ever
+        make, so this is the one place the missed read can be caught.
+
+        Only interfaces whose properties are still empty are asked again: once
+        a read works, the condition is false forever. The ones that are
+        deliberately kept without properties are left alone, or they would be
+        re-read on every change for the life of the process.
+        """
+        for iface in interfaces:
+            if iface not in self.used_interfaces or iface in self.interfaces_without_props:
+                continue
+
+            if self.ofono_interface_props[iface].props:
+                continue
+
+            ofono2mm_print(f"oFono interface {iface} is here now but was never read, asking again", self.verbose)
+            await self.add_ofono_interface(iface)
+
     async def ofono_changed(self, name, varval):
+        if name == 'Interfaces':
+            await self.resync_ofono_interfaces(varval.value)
+
         await self.set_props()
         if self.mm_modem3gpp_interface:
             self.mm_modem3gpp_interface.ofono_changed(name, varval)

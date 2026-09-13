@@ -9,7 +9,7 @@
  from ofono2mm.dbus_interface_properties import DBusInterfaceProperties
  from ofono2mm.types import _BANDS
  
-@@ -61,6 +61,8 @@
+@@ -61,11 +61,14 @@
          self.mm_modem_voice_interface = None
          self.mm_modem_messaging_interface = None
          self.mm_modem_cell_broadcast_interface = None
@@ -18,7 +18,23 @@
          self.mm_interface_objects = [f'/org/freedesktop/ModemManager1/Modem/{self.index}']
          self.mm_bearer_interfaces = []
          self.selected_current_mode = []
-@@ -194,6 +196,40 @@
+         self.sim = Variant('o', f'/org/freedesktop/ModemManager1/SIM/{self.index}')
+         self.bearers = {}
++        self.watched_interfaces = set()
+ 
+         self.was_powered = False
+         self.enabled = True
+@@ -184,7 +187,8 @@
+         if self.mm_modem_signal_interface:
+             self.mm_modem_signal_interface.ofono_interface_props = self.ofono_interface_props
+ 
+-        if iface not in self.interfaces_without_props:
++        if iface not in self.interfaces_without_props and iface not in self.watched_interfaces:
++            self.watched_interfaces.add(iface)
+             self.ofono_interface_props[iface].on('*', self.ofono_interface_changed(iface))
+ 
+         if self.mm_modem3gpp_interface:
+@@ -194,6 +198,40 @@
          if self.mm_modem_signal_interface and iface == "org.ofono.NetworkMonitor":
              await self.mm_modem_signal_interface.set_props()
  
@@ -59,7 +75,7 @@
          if iface == "org.ofono.FuriLabs.AT":
              self.loop.create_task(self._restore_saved_bands())
  
-@@ -355,10 +391,15 @@
+@@ -355,10 +393,15 @@
      async def init_mm_signal_interface(self):
          ofono2mm_print("Initialize Signal interface", self.verbose)
  
@@ -76,7 +92,7 @@
      async def init_mm_location_interface(self):
          ofono2mm_print("Initialize Location interface", self.verbose)
  
-@@ -390,6 +431,11 @@
+@@ -390,6 +433,11 @@
          self.loop.create_task(self.init_cell_broadcast())
  
      def unexport_mm_interface_objects(self):
@@ -88,7 +104,7 @@
          self.mm_sim_interface = None
          self.mm_modem3gpp_interface = None
          self.mm_modem3gpp_ussd_interface = None
-@@ -423,6 +469,29 @@
+@@ -423,6 +471,29 @@
      def get_mm_modem_simple_interface(self):
          return self.mm_modem_simple_interface
  
@@ -118,7 +134,7 @@
      async def check_ofono_contexts(self):
          ofono2mm_print("Checking ofono contexts", self.verbose)
  
-@@ -471,6 +540,7 @@
+@@ -471,6 +542,7 @@
  
                  ipv4_method = 0
                  ipv4_address = ''
@@ -126,7 +142,7 @@
                  ipv4_dns = []
                  ipv4_gateway = ''
  
-@@ -485,6 +555,9 @@
+@@ -485,6 +557,9 @@
                      if 'Address' in settings:
                          ipv4_address = settings['Address'].value
  
@@ -136,7 +152,7 @@
                      if 'DomainNameServers' in settings:
                          for dns in settings['DomainNameServers'].value:
                              ipv4_dns.append(dns)
-@@ -500,6 +573,8 @@
+@@ -500,6 +575,8 @@
                  if 'IPv6.Settings' in ctx[1] and ctx[1]['IPv6.Settings'].value:
                      ipv6_settings = ctx[1]['IPv6.Settings'].value
  
@@ -145,7 +161,7 @@
                      if 'Address' in ipv6_settings and ipv6_settings['Address'].value:
                          ipv6_method = 2  # static
                          ipv6_address = ipv6_settings['Address'].value
-@@ -517,6 +592,7 @@
+@@ -517,6 +594,7 @@
                      "Ip4Config": Variant('a{sv}', {
                          "method": Variant('u', ipv4_method),
                          "address": Variant('s', ipv4_address),
@@ -153,7 +169,7 @@
                          "dns1": Variant('s', ipv4_dns[0] if len(ipv4_dns) > 0 else ''),
                          "dns2": Variant('s', ipv4_dns[1] if len(ipv4_dns) > 1 else ''),
                          "dns3": Variant('s', ipv4_dns[2] if len(ipv4_dns) > 2 else ''),
-@@ -535,12 +611,6 @@
+@@ -535,12 +613,6 @@
                      })
                  })
  
@@ -166,7 +182,7 @@
                  ofono_ctx_interface = self.ofono_client["ofono_context"][ctx[0]]["org.ofono.ConnectionContext"]
                  ofono_ctx_interface.on_property_changed(mm_bearer_interface.ofono_context_changed)
                  mm_bearer_interface.ofono_ctx = ctx[0]
-@@ -556,6 +626,8 @@
+@@ -556,6 +628,8 @@
  
                  bearer_i += 1
  
@@ -175,7 +191,7 @@
          if self.props['Bearers'].value != old_bearer_list:
              self.emit_properties_changed({'Bearers': self.props['Bearers'].value})
  
-@@ -574,6 +646,7 @@
+@@ -574,6 +648,7 @@
  
              ipv4_method = 0
              ipv4_address = ''
@@ -183,7 +199,7 @@
              ipv4_dns = []
              ipv4_gateway = ''
  
-@@ -588,6 +661,9 @@
+@@ -588,6 +663,9 @@
                  if 'Address' in settings:
                      ipv4_address = settings['Address'].value
  
@@ -193,7 +209,7 @@
                  if 'DomainNameServers' in settings:
                      for dns in settings['DomainNameServers'].value:
                          ipv4_dns.append(dns)
-@@ -603,6 +679,8 @@
+@@ -603,6 +681,8 @@
              if 'IPv6.Settings' in properties and properties['IPv6.Settings'].value:
                  ipv6_settings = properties['IPv6.Settings'].value
  
@@ -202,7 +218,7 @@
                  if 'Address' in ipv6_settings and ipv6_settings['Address'].value:
                      ipv6_method = 2  # static
                      ipv6_address = ipv6_settings['Address'].value
-@@ -620,6 +698,7 @@
+@@ -620,6 +700,7 @@
                  "Ip4Config": Variant('a{sv}', {
                      "method": Variant('u', ipv4_method),
                      "address": Variant('s', ipv4_address),
@@ -210,7 +226,7 @@
                      "dns1": Variant('s', ipv4_dns[0] if len(ipv4_dns) > 0 else ''),
                      "dns2": Variant('s', ipv4_dns[1] if len(ipv4_dns) > 1 else ''),
                      "dns3": Variant('s', ipv4_dns[2] if len(ipv4_dns) > 2 else ''),
-@@ -638,12 +717,6 @@
+@@ -638,12 +719,6 @@
                  })
              })
  
@@ -223,7 +239,7 @@
              ofono_ctx_interface = self.ofono_client["ofono_context"][path]['org.ofono.ConnectionContext']
              ofono_ctx_interface.on_property_changed(mm_bearer_interface.ofono_context_changed)
              mm_bearer_interface.ofono_ctx = path
-@@ -658,6 +731,7 @@
+@@ -658,6 +733,7 @@
                  self.mm_interface_objects.append(object_path)
  
              bearer_i += 1
@@ -231,7 +247,7 @@
              self.emit_properties_changed({'Bearers': self.props['Bearers'].value})
  
      async def sim_unlocked(self):
-@@ -727,6 +801,15 @@
+@@ -727,6 +803,15 @@
                                          self.props['State'] = Variant('i', 8) # modem is registered MM_MODEM_STATE_REGISTERED
                                          if 'Strength' in self.ofono_interface_props['org.ofono.NetworkRegistration'].props:
                                              self.props['SignalQuality'] = Variant('(ub)', [self.ofono_interface_props['org.ofono.NetworkRegistration']['Strength'].value, True])
@@ -247,7 +263,7 @@
                                      elif self.ofono_interface_props['org.ofono.NetworkRegistration']['Status'].value == 'searching':
                                          self.props['State'] = Variant('i', 7) # modem is searching MM_MODEM_STATE_SEARCHING
                                      else:
-@@ -973,6 +1056,31 @@
+@@ -973,6 +1058,31 @@
          if changed_props:
              self.emit_properties_changed(changed_props)
  
@@ -279,3 +295,59 @@
      @method()
      async def Enable(self, enable: 'b'):
          ofono2mm_print(f"Enable with state {enable}", self.verbose)
+@@ -1557,7 +1667,55 @@
+             protocol = 1
+         return protocol
+ 
++    async def resync_ofono_interfaces(self, interfaces):
++        """
++        Read the interfaces that were asked for before oFono had them.
++
++        Every interface is asked for exactly twice in the life of the process:
++        once when the modem object is built, once if the SIM is unlocked later.
++        Both bursts fire while oFono is still bringing the modem up, and an
++        interface that is not registered yet answers nothing - which is not an
++        error anyone sees. The proxy is built from a static XML file, so asking
++        for an interface oFono has never heard of still hands back a perfectly
++        good object; init() then catches the bus error itself and leaves the
++        properties empty. So add_ofono_interface() always reports success, its
++        five retries covering two and a half seconds of a startup that takes
++        longer than that.
++
++        What happens afterwards depends on the interface. The ones whose
++        properties change repair themselves, because a PropertyChanged brings
++        the value along with it. RadioSettings does not: AvailableTechnologies
++        is fixed for the life of the modem, so it never announces itself, and
++        the empty read stands for the whole uptime. set_props() then pins
++        CurrentCapabilities to LTE alone and leaves SupportedModes empty, and
++        the shell is offered no technology and no mode at all while oFono sits
++        there with gsm, umts and lte. The data path keeps working throughout,
++        which is why nothing complains.
++
++        oFono does say when an interface arrives - the modem's own Interfaces
++        property lists them - and nothing was listening for it. That list is
++        the only announcement an interface with static properties will ever
++        make, so this is the one place the missed read can be caught.
++
++        Only interfaces whose properties are still empty are asked again: once
++        a read works, the condition is false forever. The ones that are
++        deliberately kept without properties are left alone, or they would be
++        re-read on every change for the life of the process.
++        """
++        for iface in interfaces:
++            if iface not in self.used_interfaces or iface in self.interfaces_without_props:
++                continue
++
++            if self.ofono_interface_props[iface].props:
++                continue
++
++            ofono2mm_print(f"oFono interface {iface} is here now but was never read, asking again", self.verbose)
++            await self.add_ofono_interface(iface)
++
+     async def ofono_changed(self, name, varval):
++        if name == 'Interfaces':
++            await self.resync_ofono_interfaces(varval.value)
++
+         await self.set_props()
+         if self.mm_modem3gpp_interface:
+             self.mm_modem3gpp_interface.ofono_changed(name, varval)

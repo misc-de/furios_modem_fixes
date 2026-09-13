@@ -83,7 +83,7 @@ bug report is a public place.
 | 8 | `resolvconf` is a symlink to `resolvectl` and fails on every network change | FuriOS NM config | `/etc/resolv.conf` points at a resolver that only ever learns Wi-Fi's servers |
 | 9 | Nothing brings the data context back after a failed data call | the system as shipped | mobile data stays down until the next reboot |
 | 10 | Interfaces are appended to the modem's port list and never removed | `mm_modem.py`, `mm_bearer.py` | NM binds the resolver to a dead interface; every lookup REFUSED with Wi-Fi off |
-| 11 | The modem's own properties are never recomputed when `RadioSettings` arrives | `mm_modem.py` | `CurrentCapabilities` pinned to LTE alone and `SupportedModes` **empty**, for the whole uptime |
+| 11 | An oFono interface asked for before oFono has it is never asked again | `mm_modem.py` | `CurrentCapabilities` pinned to LTE alone and `SupportedModes` **empty**, for the whole uptime |
 
 Numbers behind each of these, and why they are what they are, in
 [FINDINGS.md](FINDINGS.md).

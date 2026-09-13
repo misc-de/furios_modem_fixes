@@ -780,6 +780,97 @@ It is deliberately narrow. Recomputing for every interface would also move the
 modem's power-on - which happens inside `set_props()` - earlier into the
 startup gather, and boot ordering is exactly what is fragile here.
 
+### 11b. The same symptom again, from an interface that was never there
+
+The boot of 2026-09-13 15:15 came up with exactly the numbers above -
+`CurrentCapabilities 8`, `SupportedModes (0, 0)` - with the fix above
+installed and applied. So there is a third way in, and it is the one that
+actually happens.
+
+`add_ofono_interface` looks like it retries five times over two and a half
+seconds and gives up loudly. It does neither. The proxy it asks through is not
+built by introspecting oFono; it is built from a static XML file shipped with
+the package:
+
+```python
+self.cache[hash(introspection)] = f.read()          # ofono_modem.xml, at startup
+proxy_object = self.bus.get_proxy_object(self.bus_name, path, self.cache[...])
+```
+
+`org.ofono.RadioSettings` is in that file, so asking for it hands back a
+perfectly good object whether or not oFono has ever registered the interface.
+The call on it fails, but one layer further in:
+
+```python
+except Exception as e:
+    retries_left -= 1
+    ...
+    else:
+        ofono2mm_print(f"Interface {self.interface} doesn't have properties? ...")
+```
+
+`DBusInterface.init()` catches that itself and returns normally with empty
+properties. Nothing propagates. So `add_ofono_interface` never sees an
+exception, never retries, and reports success for an interface that does not
+exist yet - and the immediate second read the 11 fix adds hits the same wall a
+millisecond later. oFono registers `RadioSettings` when the modem comes up,
+seconds after this, and by then the two bursts are over.
+
+Two bursts is all there are. `add_ofono_interface` is called from
+`init_ofono_interfaces()` once when the modem object is built, and from
+`sim_unlocked()` if the SIM is unlocked later. Nothing else ever enumerates.
+oFono does announce the arrival - it publishes the modem's `Interfaces`
+property - and the handler for it recomputed properties without ever going
+back to read the interface that had just appeared:
+
+```python
+async def ofono_changed(self, name, varval):
+    await self.set_props()          # recompute from what we have
+```
+
+For every other interface that is enough, because a property that changes
+carries its value along with the signal. For the one interface whose
+properties never change, that list is the only announcement it will ever make,
+and nobody was listening.
+
+Timeline of the boot that failed, from the journal:
+
+| | |
+| --- | --- |
+| 15:15:31 | ModemManager (ofono2mm) started |
+| 15:15:39 | `ofono.service` starts waiting for the radio HAL |
+| 15:15:48 | `IRadio/slot1` appears, ofonod starts |
+| 15:15:51 | SIM card OK - the modem is still coming up |
+| 15:17 | `CurrentCapabilities 8`, `SupportedModes (0, 0)`, oFono has gsm, umts, lte |
+
+Restarting ModemManager at 15:20, with oFono long settled, gave `12` and
+twelve supported modes immediately. Same binary, same fix, different starting
+order.
+
+The repair is to listen to the announcement, and to ask again for anything in
+it that was asked for before oFono had it:
+
+```python
+async def ofono_changed(self, name, varval):
+    if name == 'Interfaces':
+        await self.resync_ofono_interfaces(varval.value)
+
+    await self.set_props()
+```
+
+Only interfaces whose properties are still empty are asked again, so once a
+read works the condition is false forever - which matters, because oFono
+republishes that whole list every time any interface comes or goes. The ones
+ofono2mm deliberately keeps without properties (`NetworkMonitor`,
+`FuriLabs.AT`) are excluded, or their permanently empty dict would have them
+re-read for the life of the process.
+
+One thing had to be fixed alongside it: `add_ofono_interface` registers the
+property watcher every time it runs. Going through it a second time would have
+registered a second watcher on the same interface, and every later change
+would recompute everything twice, forever. The watcher is now registered once
+per interface.
+
 ### What is NOT claimed
 
 Whether this is what hides the technology label in the shell is **not

@@ -67,6 +67,7 @@ def load_method(name):
 
 
 add_ofono_interface = load_method("add_ofono_interface")
+resync_ofono_interfaces = load_method("resync_ofono_interfaces")
 
 
 class Interface:
@@ -78,13 +79,17 @@ class Interface:
     answered with nothing.
     """
 
-    def __init__(self, answers=True):
-        self.answers, self.inits, self.watchers = answers, [], []
+    def __init__(self, name, modem):
+        self.name, self.modem = name, modem
+        self.inits, self.watchers = [], []
         self.props = {}
 
     async def init(self, skip_props=False):
         self.inits.append(skip_props)
-        if self.answers and not skip_props:
+        # Whether it answers is asked fresh every time, because that is the
+        # whole point: oFono registers the interface while the modem is still
+        # coming up, so the same question gets a different answer later.
+        if self.name not in self.modem.silent and not skip_props:
             self.props["AvailableTechnologies"] = ["gsm", "umts", "lte"]
 
     def on(self, prop, callback):
@@ -107,6 +112,7 @@ class Modem:
         }
         self.interfaces = {}
         self.silent = set(failing)
+        self.watched_interfaces = set()
         self.ofono_interfaces = {}
         self.ofono_proxy = Proxy()
         self.ofono_interface_props = Props(self)
@@ -127,6 +133,9 @@ class Modem:
     async def _restore_saved_bands(self):
         pass
 
+    async def add_ofono_interface(self, iface):
+        await add_ofono_interface(self, iface)
+
 
 class Props:
     def __init__(self, modem):
@@ -134,7 +143,7 @@ class Props:
 
     def __getitem__(self, iface):
         if iface not in self.modem.interfaces:
-            self.modem.interfaces[iface] = Interface(iface not in self.modem.silent)
+            self.modem.interfaces[iface] = Interface(iface, self.modem)
         return self.modem.interfaces[iface]
 
 
@@ -155,6 +164,24 @@ class Loop:
 def arrives(iface, **kwargs):
     m = Modem(**kwargs)
     asyncio.run(add_ofono_interface(m, iface))
+    return m
+
+
+def announced(interfaces, asked_first=(), **kwargs):
+    """oFono publishes its interface list; the modem had already asked.
+
+    asked_first names the interfaces the startup burst went through, which is
+    what leaves an empty properties dict behind when oFono was not ready.
+    """
+    m = Modem(**kwargs)
+    for iface in asked_first:
+        asyncio.run(add_ofono_interface(m, iface))
+    # oFono has registered them by the time it publishes the list.
+    m.silent.clear()
+    m.set_props_calls = 0
+    for iface in m.interfaces.values():
+        iface.inits.clear()
+    asyncio.run(resync_ofono_interfaces(m, interfaces))
     return m
 
 
@@ -203,6 +230,59 @@ check("and the modem recomputes afterwards", 1, m.set_props_calls)
 m = arrives("org.ofono.RadioSettings")
 check("a read that worked is not repeated", 1,
       len(m.interfaces["org.ofono.RadioSettings"].inits))
+
+print("\n\033[1m== when oFono did not have it yet at all\033[0m")
+
+# The third way in, and the one that actually happened on the 2026-09-13 boot:
+# not a late arrival and not an empty answer, but an interface oFono had not
+# registered yet when the only two bursts went past. The proxy is built from a
+# static XML file, so asking for it still hands back a usable object and
+# init() swallows the bus error - add_ofono_interface() reports success for an
+# interface that was never there, and the immediate second ask cannot help,
+# because oFono registers RadioSettings seconds later.
+m = announced(["org.ofono.RadioSettings"],
+              asked_first=["org.ofono.RadioSettings"],
+              failing=["org.ofono.RadioSettings"])
+check("an interface that answered nothing is asked again when oFono lists it",
+      1, len(m.interfaces["org.ofono.RadioSettings"].inits))
+check("and the modem recomputes its properties", 1, m.set_props_calls)
+
+# Once a read worked there is nothing to repair, and oFono republishes that
+# list on every interface that comes or goes for the rest of the uptime.
+m = announced(["org.ofono.RadioSettings"], asked_first=["org.ofono.RadioSettings"])
+check("an interface that did answer is left alone", 0,
+      len(m.interfaces["org.ofono.RadioSettings"].inits))
+check("and nothing is recomputed for it", 0, m.set_props_calls)
+
+# These never hold properties by design, so an empty dict says nothing about
+# them - reading it as damage would re-ask them forever.
+m = announced(["org.ofono.NetworkMonitor"], asked_first=["org.ofono.NetworkMonitor"])
+check("an interface kept without properties is not mistaken for a failed read",
+      0, len(m.interfaces["org.ofono.NetworkMonitor"].inits))
+
+m = announced(["org.ofono.Telephony"])
+check("an interface we never use is ignored", [], list(m.interfaces))
+
+# oFono announces the whole list every time, including what arrived long ago.
+m = announced(["org.ofono.Modem", "org.ofono.RadioSettings", "org.ofono.CallSettings"],
+              asked_first=["org.ofono.Modem", "org.ofono.CallSettings"],
+              failing=["org.ofono.RadioSettings"])
+check("only the unread one out of a full list is asked", 1,
+      len(m.interfaces["org.ofono.RadioSettings"].inits))
+check("the ones that answered earlier are not disturbed", [0, 0],
+      [len(m.interfaces["org.ofono.Modem"].inits),
+       len(m.interfaces["org.ofono.CallSettings"].inits)])
+
+print("\n\033[1m== and asking twice does not double the watchers\033[0m")
+
+# The repair goes through add_ofono_interface() a second time, which is also
+# where the property watcher is registered. Registered twice, every later
+# change recomputes everything twice for the life of the process.
+m = Modem(failing=["org.ofono.RadioSettings"])
+asyncio.run(add_ofono_interface(m, "org.ofono.RadioSettings"))
+asyncio.run(add_ofono_interface(m, "org.ofono.RadioSettings"))
+check("a second ask leaves exactly one watcher", ["*"],
+      m.interfaces["org.ofono.RadioSettings"].watchers)
 
 print("\n\033[1m== the reason this matters is still in the file\033[0m")
 
