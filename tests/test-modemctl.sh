@@ -765,6 +765,23 @@ check "half applied is called half applied" mixed \
 
 rm -f "$PROFILEF"
 
+# The two words the app on the phone reads this by. It lives in another
+# package (furios_pipewire), so these keys are a contract between two
+# repositories - and a contract only one side checks is a hope. The other half
+# asserts that the app parses exactly these two; this half asserts that they
+# are what gets printed.
+out=$(sandbox bash "$ROOT/modemctl" profile 2>/dev/null)
+check "profile names the recorded state in a word the app knows" 1 \
+      "$(printf '%s\n' "$out" | grep -c '^recorded:')"
+check "and the running one" 1 \
+      "$(printf '%s\n' "$out" | grep -c '^actual:')"
+# Three values and no others: the app turns each into a sentence, and a fourth
+# would arrive on the phone as a blank row.
+for v in fixed shipped mixed; do
+    check "\"$v\" is a state this can report" yes \
+          "$(grep -q "echo $v" "$ROOT/modemctl" && echo yes || echo no)"
+done
+
 printf '\n\033[1m== a no-op is a no-op\033[0m\n'
 
 # The boot unit and the apt hook both run apply, the hook after every single
