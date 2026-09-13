@@ -1289,12 +1289,59 @@ error a second and LTE.
 
 ### What would have to change
 
-The modem advertises `android.hardware.radio@1.6::IRadio/slot1` - the hardware
-is not the limit. `ofono-binder-plugin` is: 1.0 to 1.5, in the installed
-1.1.22 and in today's upstream master alike. Reaching NR means teaching the
-plugin IRadio 1.6, which is a different kind of work from anything else in
-this repository - patching or building someone else's package rather than
-configuring it. Open.
+The modem advertises `android.hardware.radio@1.6::IRadio/slot1`, so the
+hardware is not the limit. Two libraries are, and the plugin is only the
+smaller of them:
+
+| | stops at | what it is missing |
+|---|---|---|
+| `ofono-binder-plugin` 1.1.22 | 1.5 | the name `"1.6"` and a call site |
+| `libgbinder-radio` | **1.5** | `RADIO_INTERFACE_1_6`, the interface names, and the request and response codes |
+
+`libgbinder-radio`'s `RADIO_INTERFACE_COUNT` follows `RADIO_INTERFACE_1_5`
+directly, and it carries no `android.hardware.radio@1.6::IRadio` string. It
+does already know the *names* `setAllowedNetworkTypesBitmap` and
+`getAllowedNetworkTypesBitmap`, but only as text in a lookup table - no codes
+behind them.
+
+The AIDL route, which the plugin also supports, is closed here: this phone
+runs Android 12.1 and publishes no AIDL radio service on `/dev/binder`. AIDL
+radio arrived in Android 13.
+
+**The transaction codes, derived and checked.** HIDL numbers methods
+consecutively down the inheritance chain, so the codes are computable from the
+`.hal` files:
+
+| interface | methods | codes |
+|---|---|---|
+| `IRadio@1.0` | 130 | 1-130 |
+| `@1.1` | 6 | 131-136 |
+| `@1.2` | 6 | 137-142 |
+| `@1.3` | 3 | 143-145 |
+| `@1.4` | 10 | 146-155 |
+| `@1.5` | 17 | 156-172 |
+| **`@1.6`** | **29** | **173-201** |
+
+Checked against all eight request codes `libgbinder-radio` actually ships -
+`setResponseFunctions` 1, `responseAcknowledgement` 130,
+`startNetworkScan_1_2` 137, `setIndicationFilter_1_2` 138,
+`setupDataCall_1_2` 141, `deactivateDataCall_1_2` 142,
+`setInitialAttachApn_1_4` 147, `setDataProfile_1_4` 148 - and every one
+matches. Which gives the two that matter:
+
+    setAllowedNetworkTypesBitmap = 187
+    getAllowedNetworkTypesBitmap = 188
+
+Building is possible on the device: `gcc`, `make`, `meson` and
+`dpkg-buildpackage` are there, the `-dev` packages are in the FuriOS
+repository, and both projects have public sources. The risk is that
+`libgbinder-radio` carries the whole modem stack - a bad build is a phone with
+no modem until `apt install --reinstall`.
+
+**What such a build could and could not prove here.** It could show whether
+the modem accepts `setAllowedNetworkTypesBitmap` where it rejects the 1.4
+call - that is a yes or no from the RIL and needs no coverage. It could not
+show an NR registration: there is no 5G at this location. Open.
 
 Do **not** reach for `radioInterface = 1.5` on the way there: measured on this
 device, oFono then never gets the modem up at all. It stops at five
