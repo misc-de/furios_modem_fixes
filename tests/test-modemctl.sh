@@ -328,6 +328,21 @@ else
     TESTS_FAILED=$((TESTS_FAILED + 1)); fail "no guard against overrides as root"
 fi
 
+# And EVERY override has to be in that list, not just most of them. Adding a
+# new one and forgetting the guard is how an escape hatch opens without anybody
+# deciding to open it - MODEMCTL_PROFILE arrived the same day as this check.
+used=$(grep -oE '\$\{MODEMCTL_[A-Z_]+' "$ROOT/modemctl" | sed 's/^\${//' | sort -u)
+guarded=$(sed -n '/for v in MODEMCTL_/,/do$/p' "$ROOT/modemctl" \
+          | grep -oE 'MODEMCTL_[A-Z_]+' | sort -u)
+for v in $used; do
+    TESTS_RUN=$((TESTS_RUN + 1))
+    case " $(printf '%s ' $guarded)" in
+        *" $v "*) ok "$v is refused as root" ;;
+        *) TESTS_FAILED=$((TESTS_FAILED + 1))
+           fail "$v is honoured but not guarded" "as root it would point modemctl anywhere" ;;
+    esac
+done
+
 # --- quiet ------------------------------------------------------------------
 #
 # The boot unit and the apt hook run with --quiet. If that still chatters, a
@@ -344,8 +359,14 @@ check "quiet status on a healthy tree says nothing" "" "$out"
 # undone by the next thing that calls the broken resolvconf. A check that said
 # "applied" for half of it would be worse than no check.
 NMD="$WORK/nm-conf.d"; mkdir -p "$NMD"
-NMRESOLV="$WORK/nm-resolv.conf"; echo "nameserver 127.0.0.1" > "$NMRESOLV"
-RC="$WORK/resolv.conf"
+# Laid out the way the phone is, not flat: apply writes the symlink as
+# "../run/NetworkManager/resolv.conf", relative to the directory resolv.conf
+# sits in. Flat paths made that resolve to nothing, so the DNS half of a fix
+# could never reach "applied" in here - which is fine for a check that builds
+# the link by hand, and useless for one that asks whether apply got there.
+mkdir -p "$WORK/etc" "$WORK/run/NetworkManager"
+NMRESOLV="$WORK/run/NetworkManager/resolv.conf"; echo "nameserver 127.0.0.1" > "$NMRESOLV"
+RC="$WORK/etc/resolv.conf"
 
 # Read through "status", not by sourcing modemctl: the script has a dispatcher
 # at the bottom, so sourcing it runs a whole status pass and prints it.
@@ -412,11 +433,13 @@ diff -u --label a/ofono2mm/mm_modem.py --label b/ofono2mm/mm_modem.py \
     "$ROOT/original-files/mm_modem.py" "$WORK/old/ofono2mm/mm_modem.py" \
     > "$OLDP/ofono2mm-mm_modem.patch" || true
 
+PROFILEF="$WORK/profile"
 sandbox() {
     env MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
         MODEMCTL_NM_CONF_D="$NMD" MODEMCTL_RESOLV="$RC" \
         MODEMCTL_NM_RESOLV="$NMRESOLV" MODEMCTL_SHARE="$ROOT" \
         MODEMCTL_DBUS_CONF_D="$DBUSD" MODEMCTL_CBS_DB="$CBSDB" \
+        MODEMCTL_PROFILE="$PROFILEF" \
         "$@"
 }
 
@@ -660,6 +683,87 @@ check "and leaves no marker behind" 0 "$(grep -c 'furios-modem-fixes' "$CBSDB")"
 rm -f "$CBSDB"
 check "a missing database is not called a fault" absent "$(cbs_verdict)"
 write_cbs_db "$FIXED" "$FIXED"
+
+printf '\n\033[1m== the profile switch\033[0m\n'
+
+# One switch between the phone as it shipped and the phone as this package
+# repairs it, and the difference between "for now" and "for good" is one file.
+#
+# Reverting was always temporary by accident: the boot unit put the patches
+# back at the next start, and there was no way to say "shipped, and mean it".
+# So "try" is what revert already did, and "set" is the thing that was missing.
+
+patch_count() {
+    local f n=0
+    for f in $FILES; do
+        grep -q "netmask_to_prefix\|sync_net_ports\|signal_quality\|ModemManagerBus\|ip-type" \
+            "$(tree_path "$f")" 2>/dev/null && n=$((n + 1))
+    done
+    echo "$n"
+}
+
+# Start from the shipped state on every side, not just the patches. The checks
+# above leave the alert database repaired but WITHOUT our marker, and revert
+# rightly refuses to undo a line it did not write - which would leave one piece
+# applied for ever and every answer below stuck at "mixed".
+rm -f "$PROFILEF" "$DBUSD"/furios-modem-cellbroadcast.conf
+write_cbs_db "$SHIPPED" "$SHIPPED"
+reset_tree original 1.4
+check "with no file recorded, the phone is meant to be fixed" "recorded: fixed" \
+      "$(sandbox bash "$ROOT/modemctl" profile | head -1)"
+
+# boot is what the unit and the hook run. With nothing recorded it applies.
+sandbox bash "$ROOT/modemctl" boot --quiet --no-restart >/dev/null 2>&1
+check "and boot puts the repairs in" fixed \
+      "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+
+# try: switch now, record nothing.
+sandbox bash "$ROOT/modemctl" try shipped --quiet --no-restart >/dev/null 2>&1
+check "try shipped takes them out" shipped \
+      "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+check "and records nothing" no \
+      "$([ -f "$PROFILEF" ] && echo yes || echo no)"
+sandbox bash "$ROOT/modemctl" boot --quiet --no-restart >/dev/null 2>&1
+check "so the next boot brings them back" fixed \
+      "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+
+# set: switch now, and mean it.
+sandbox bash "$ROOT/modemctl" set shipped --quiet --no-restart >/dev/null 2>&1
+check "set shipped takes them out too" shipped \
+      "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+check "and records the choice" shipped "$(cat "$PROFILEF" 2>/dev/null)"
+sandbox bash "$ROOT/modemctl" boot --quiet --no-restart >/dev/null 2>&1
+check "and the next boot leaves them out" shipped \
+      "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+# The apt hook runs the same verb after every package operation. A recorded
+# "shipped" that an ofono2mm update quietly undid would be the worst of both.
+sandbox bash "$ROOT/modemctl" boot --quiet --no-restart >/dev/null 2>&1
+check "and so does the apt hook, however often it runs" shipped \
+      "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+
+sandbox bash "$ROOT/modemctl" set fixed --quiet --no-restart >/dev/null 2>&1
+check "set fixed puts them back" fixed \
+      "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+check "and records that" fixed "$(cat "$PROFILEF" 2>/dev/null)"
+
+# A file nobody here wrote. Deciding for ourselves which way it meant is worse
+# than doing nothing, in both directions.
+printf 'sideways\n' > "$PROFILEF"
+check "an unreadable profile is not guessed at" "recorded: unknown" \
+      "$(sandbox bash "$ROOT/modemctl" profile 2>/dev/null | head -1)"
+before_state=$(sandbox bash "$ROOT/modemctl" profile 2>/dev/null | sed -n 's/^actual: *//p')
+sandbox bash "$ROOT/modemctl" boot --quiet --no-restart >/dev/null 2>&1
+check "and boot leaves the phone exactly as it found it" "$before_state" \
+      "$(sandbox bash "$ROOT/modemctl" profile 2>/dev/null | sed -n 's/^actual: *//p')"
+
+# Half is a real state - a patch that no longer fits, an update caught in the
+# middle - and calling it either name would be wrong in both directions.
+printf 'fixed\n' > "$PROFILEF"
+cp "$ROOT/original-files/mm_modem.py" "$(tree_path mm_modem)"
+check "half applied is called half applied" mixed \
+      "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+
+rm -f "$PROFILEF"
 
 printf '\n\033[1m== a no-op is a no-op\033[0m\n'
 

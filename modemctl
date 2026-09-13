@@ -16,7 +16,7 @@ VERSION=0.1.0
 if [ "$(id -u)" -eq 0 ]; then
     for v in MODEMCTL_TARGET MODEMCTL_RADIO_CONF MODEMCTL_SHARE MODEMCTL_PATCHES \
              MODEMCTL_NM_CONF_D MODEMCTL_RESOLV MODEMCTL_NM_RESOLV \
-             MODEMCTL_DBUS_CONF_D MODEMCTL_CBS_DB; do
+             MODEMCTL_DBUS_CONF_D MODEMCTL_CBS_DB MODEMCTL_PROFILE; do
         if [ -n "${!v:-}" ]; then
             echo "refusing to honour $v as root - that would be an arbitrary-file patch" >&2
             exit 3
@@ -96,9 +96,22 @@ if [ -z "$SHARE" ]; then
 fi
 PATCHES=${MODEMCTL_PATCHES:-$SHARE/patches}
 
+# The recorded choice: "fixed" or "shipped". Absent means fixed, so every
+# phone that already has this package keeps behaving exactly as before.
+#
+# This is what makes "try" different from "set" in both directions. Reverting
+# has always been temporary by accident - the boot unit put the patches back at
+# the next start - and there was no way at all to say "shipped, and mean it".
+# Now the file says which one the phone is supposed to be in, "modemctl boot"
+# enforces it, and the boot unit and the apt hook call that instead of apply.
+PROFILE_FILE=${MODEMCTL_PROFILE:-/etc/furios-modem-fixes.profile}
+PROFILES="fixed shipped"
+WATCHERS="furios-mobile-route.service furios-mobile-context.service"
+
 QUIET=0
 NO_RESTART=0
 PATCHES_ONLY=0
+DO_RESTART=0
 
 # Colour only when someone is watching. A boot unit's journal should not be
 # full of escape codes.
@@ -335,6 +348,75 @@ prune_backups() {
     old=$(ls -1t "$(file_path "$f").bak."* 2>/dev/null | tail -n +"$BACKUPS_KEPT")
     [ -n "$old" ] && printf '%s\n' "$old" | while IFS= read -r b; do rm -f "$b"; done
     return 0
+}
+
+# --- profiles ---------------------------------------------------------------
+
+# What the phone is supposed to be. Absent means fixed: that is what every
+# install before this existed was, and a missing file must not silently switch
+# a phone to the shipped state.
+recorded_profile() {
+    local p
+    [ -f "$PROFILE_FILE" ] || { echo fixed; return; }
+    p=$(head -1 "$PROFILE_FILE" 2>/dev/null | tr -d '[:space:]')
+    case " $PROFILES " in
+        *" $p "*) echo "$p" ;;
+        # A file we cannot read is not a licence to decide for ourselves.
+        *)        echo unknown ;;
+    esac
+}
+
+# What the phone actually is. Three answers, because "half" is a real state -
+# a patch that would not fit, an update caught halfway, somebody's experiment -
+# and calling it either of the other two would be a lie in both directions.
+#
+#   fixed / shipped / mixed
+actual_profile() {
+    local f applied=0 total=0
+    for f in $FILES; do
+        total=$((total + 1))
+        [ "$(patch_state "$f")" = applied ] && applied=$((applied + 1))
+    done
+    # The configuration counts too, but only where it exists to be counted:
+    # a phone with no NetworkManager or no alert database is not "half fixed"
+    # for lacking what it never had.
+    case "$(resolvconf_state)" in
+        applied) applied=$((applied + 1)); total=$((total + 1)) ;;
+        missing) total=$((total + 1)) ;;
+    esac
+    case "$(cellbroadcast_state)" in
+        applied) applied=$((applied + 1)); total=$((total + 1)) ;;
+        missing) total=$((total + 1)) ;;
+        # "covered" is ModemManager allowing it on its own. Our drop-in is then
+        # redundant, and whether it is there says nothing about which profile
+        # the phone is in - counting it either way would make one of the two
+        # answers permanently unreachable.
+    esac
+    case "$(cbs_db_state)" in
+        applied) applied=$((applied + 1)); total=$((total + 1)) ;;
+        missing) total=$((total + 1)) ;;
+    esac
+
+    if   [ "$applied" -eq "$total" ]; then echo fixed
+    elif [ "$applied" -eq 0 ];        then echo shipped
+    else                                   echo mixed
+    fi
+}
+
+# The watchers are part of the profile, not decoration: the route watcher is
+# the whole of defect 7 and the supervisor is the whole of defect 9. A phone in
+# the shipped state must not have them running, or it is not in the shipped
+# state.
+set_watchers() {
+    local want=$1 u
+    for u in $WATCHERS; do
+        systemctl list-unit-files "$u" >/dev/null 2>&1 || continue
+        if [ "$want" = on ]; then
+            systemctl enable --now "$u" >/dev/null 2>&1 || warn "could not start $u"
+        else
+            systemctl disable --now "$u" >/dev/null 2>&1 || warn "could not stop $u"
+        fi
+    done
 }
 
 # --- commands ---------------------------------------------------------------
@@ -619,10 +701,121 @@ $0 ~ mark {
         skip "no cell broadcast drop-in of ours to remove"
     fi
 
-    say ""
-    say "Shipped state restored. Takes effect after:"
-    say "    systemctl restart ModemManager"
+    # Opt-in, because plain "modemctl revert" has always left the running
+    # daemon alone and saying so - and a command that quietly started
+    # restarting the modem stack would be a different command with the same
+    # name. The profile switch passes --restart; nothing else does.
+    if [ "$DO_RESTART" = 1 ]; then
+        head_ "restart"
+        if call_in_progress; then
+            # revert never had this check because it never restarted anything.
+            # The moment it does, it needs exactly the one apply has: taking
+            # the modem stack away mid-sentence ends the call.
+            warn "a call is in progress - not restarting the modem stack now"
+            warn "the shipped files are on disk; they take effect at the next restart"
+        elif systemctl restart ModemManager; then
+            ok "ModemManager restarted (that is ofono2mm)"
+            settle_networkmanager || failed=1
+        else
+            bad "could not restart ModemManager"
+            failed=1
+        fi
+        say ""
+        say "Shipped state restored."
+    else
+        say ""
+        say "Shipped state restored. Takes effect after:"
+        say "    systemctl restart ModemManager"
+    fi
     return $failed
+}
+
+# --- profile commands -------------------------------------------------------
+
+cmd_profile() {
+    local rec act
+    rec=$(recorded_profile)
+    act=$(actual_profile)
+    printf 'recorded: %s\n' "$rec"
+    printf 'actual:   %s\n' "$act"
+    if [ "$rec" = unknown ]; then
+        warn "$PROFILE_FILE holds something this does not understand - leaving it alone"
+        return 1
+    fi
+    if [ "$act" = mixed ]; then
+        warn "half of the repairs are in place and half are not"
+        warn "     bring it back in line with: sudo modemctl set $rec"
+        return 1
+    fi
+    if [ "$act" != "$rec" ]; then
+        say ""
+        say "This is a \"try\": the next boot returns to \"$rec\"."
+    fi
+    return 0
+}
+
+# set = say what the phone should be, and make it so. try = make it so now and
+# let the next boot put it back. The difference is one file.
+cmd_switch() {
+    local want=$1 remember=$2 rc=0
+    case " $PROFILES " in
+        *" $want "*) ;;
+        *) echo "unknown profile: $want (known: $PROFILES)" >&2; exit 2 ;;
+    esac
+    need_write "$([ "$remember" = 1 ] && echo set || echo try) $want"
+
+    if [ "$remember" = 1 ]; then
+        printf '%s\n' "$want" > "$PROFILE_FILE" || {
+            bad "could not record the profile in $PROFILE_FILE"; return 1; }
+        chmod 644 "$PROFILE_FILE" 2>/dev/null || true
+    fi
+
+    case "$want" in
+        fixed)
+            cmd_apply || rc=1
+            [ "$remember" = 1 ] && set_watchers on ;;
+        shipped)
+            # --no-restart still means what it says, here as everywhere else:
+            # the boot unit and the tests both need a switch that writes files
+            # and leaves the running stack alone.
+            [ "$NO_RESTART" = 0 ] && DO_RESTART=1
+            cmd_revert || rc=1
+            [ "$remember" = 1 ] && set_watchers off
+            warn "this is the state the phone shipped in, not a working one -"
+            warn "     with Wi-Fi off it resolves no names and has no route out" ;;
+    esac
+
+    say ""
+    if [ "$remember" = 1 ]; then
+        say "Recorded: $want. This survives a reboot and a package update."
+    else
+        say "Not recorded: the next boot returns to \"$(recorded_profile)\"."
+    fi
+    return $rc
+}
+
+# What the boot unit and the apt hook run: make the phone match what was
+# recorded, and nothing else. Deliberately does NOT touch the units - their
+# enablement is already persistent, and enabling a service from a oneshot that
+# other services are ordered against is how the audio stack once built a boot
+# deadlock that survived the reboot.
+cmd_boot() {
+    local rec act
+    rec=$(recorded_profile)
+    act=$(actual_profile)
+    case "$rec" in
+        unknown)
+            warn "$PROFILE_FILE holds something this does not understand - doing nothing"
+            return 0 ;;
+        shipped)
+            [ "$act" = shipped ] && { say "Recorded profile is shipped - nothing to undo."; return 0; }
+            say "Recorded profile is shipped - taking the repairs back out."
+            cmd_revert
+            return $? ;;
+        *)
+            cmd_apply
+            return $? ;;
+    esac
 }
 
 cmd_status() {
@@ -861,19 +1054,31 @@ usage() {
 modemctl $VERSION - keeps the FuriOS modem fixes applied
 
   modemctl status          what is in place, and what the stack says
+  modemctl profile         which profile is recorded, and which one is running
+  modemctl set <profile>   switch and remember it
+  modemctl try <profile>   switch until the next boot
   modemctl apply           apply everything that is missing (idempotent)
   modemctl revert          back to the shipped state
   modemctl check           status plus runtime checks (polling, loops)
   modemctl signal          what the radio really receives, cross-checked
+  modemctl boot            make the phone match the recorded profile
+                           (used by the boot unit and the apt hook)
+
+Profiles
+  fixed       the repairs in this package, and the units that keep them there
+  shipped     FuriOS exactly as it came: no patches, no fallback route, and no
+              name resolution once Wi-Fi is off
 
 Options
   -q, --quiet              only errors (for boot units and apt hooks)
       --no-restart         change files, leave the services alone
+      --restart            revert: restart the modem stack afterwards
       --patches-only       revert: ofono2mm's files only, not the config
 
 The fixes live in files owned by the ofono2mm package, so an update of that
-package removes them. A boot unit and an apt hook run "apply" for you; both
-do nothing when there is nothing to do.
+package removes them. A boot unit and an apt hook run "boot" for you; both do
+nothing when there is nothing to do. "try" is how you look at the phone without
+them for a while: the next boot puts back whatever "set" recorded.
 USAGE
 }
 
@@ -884,6 +1089,7 @@ for a in "$@"; do
         -q|--quiet)     QUIET=1 ;;
         --no-restart)   NO_RESTART=1 ;;
         --patches-only) PATCHES_ONLY=1 ;;
+        --restart)      DO_RESTART=1 ;;
     esac
 done
 
@@ -891,6 +1097,10 @@ case "$CMD" in
     status)       cmd_status ;;
     apply)        cmd_apply ;;
     revert)       cmd_revert ;;
+    profile)      cmd_profile ;;
+    set)          cmd_switch "${1:-}" 1 ;;
+    try)          cmd_switch "${1:-}" "" ;;
+    boot)         cmd_boot ;;
     check)        cmd_check ;;
     signal)       cmd_signal ;;
     version|-V|--version)

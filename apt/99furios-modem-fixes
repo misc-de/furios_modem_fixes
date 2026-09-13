@@ -23,5 +23,5 @@
 // connection, because NetworkManager does not survive a ModemManager restart
 // (see settle_networkmanager in modemctl).
 DPkg::Post-Invoke {
-    "if [ -x /usr/bin/modemctl ] && [ -d /usr/lib/ofono2mm/ofono2mm ]; then /usr/bin/modemctl apply --quiet --no-restart || true; fi";
+    "if [ -x /usr/bin/modemctl ] && [ -d /usr/lib/ofono2mm/ofono2mm ]; then /usr/bin/modemctl boot --quiet --no-restart || true; fi";
 };

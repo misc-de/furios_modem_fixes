@@ -188,7 +188,7 @@ if [ "$1" = configure ]; then
     # Apply now rather than at the next boot. Quiet, and never fatal: a
     # package that fails to configure because a patch did not fit would leave
     # dpkg half-done, which is a worse problem than an unpatched modem.
-    /usr/bin/modemctl apply --quiet || \
+    /usr/bin/modemctl boot --quiet || \
         echo "furios-modem-fixes: could not apply everything - run 'modemctl status'" >&2
 fi
 exit 0

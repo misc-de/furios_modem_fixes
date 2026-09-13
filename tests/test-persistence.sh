@@ -265,6 +265,37 @@ else
     fail "prerm calls an option modemctl does not have"
 fi
 
+# Both run "boot", not "apply". The difference is the whole profile switch: a
+# phone recorded as "shipped" would otherwise have the repairs put back at the
+# next boot, and again after every package operation, with nothing saying why -
+# which is exactly the silent overriding this project exists to stop doing to
+# people.
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q '^ExecStart=.*modemctl boot' "$UNIT"; then
+    ok "the boot unit honours the recorded profile"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "the boot unit runs something other than 'modemctl boot'" \
+         "a recorded 'shipped' would be overridden at every boot"
+fi
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if printf '%s\n' "$directives" | grep -q 'modemctl boot'; then
+    ok "the apt hook honours it too"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "the apt hook runs something other than 'modemctl boot'" \
+         "a recorded 'shipped' would be undone by the next package operation"
+fi
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q 'modemctl boot' "$BUILD"; then
+    ok "and so does the package's postinst"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "postinst does not honour the recorded profile"
+fi
+
 # --- the bus policy ---------------------------------------------------------
 #
 # This grants a capability, so what it does NOT grant is as much the point as

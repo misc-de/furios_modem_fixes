@@ -18,7 +18,7 @@ RemainAfterExit=yes
 # --no-restart because systemd is starting those services right after this
 # anyway. Restarting them from inside a unit they are ordered against is how
 # you build a deadlock, and we have built that one before.
-ExecStart=/usr/bin/modemctl apply --quiet --no-restart
+ExecStart=/usr/bin/modemctl boot --quiet --no-restart
 # A modem that cannot be fixed must not keep the boot from finishing.
 SuccessExitStatus=0 1
 
