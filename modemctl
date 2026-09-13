@@ -236,7 +236,7 @@ prune_backups() {
 
 cmd_apply() {
     need_write apply
-    local ts changed=0 failed=0
+    local ts changed=0 touched=0 failed=0
     ts=$(date +%Y%m%d-%H%M%S)
 
     head_ "ofono2mm"
@@ -299,6 +299,7 @@ $RADIO_CONF.bak.$ts)"
             fi
             if [ "$dns_ok" -eq 1 ] && ln -sfn ../run/NetworkManager/resolv.conf "$RESOLV"; then
                 if [ "$(resolvconf_state)" = applied ]; then
+                    touched=1
                     ok "resolv.conf -> $NM_RESOLV (backup: $(basename "$RESOLV").bak.$ts)"
                     # Deliberately no reload here. rc-manager is only read when
                     # NetworkManager starts or is reloaded, and a reload makes
@@ -327,6 +328,7 @@ $RADIO_CONF.bak.$ts)"
                && ! cmp -s "$SHARE/dbus/$CB_DROPIN" "$DBUS_CONF_D/$CB_DROPIN"; then
                 if install -m644 "$SHARE/dbus/$CB_DROPIN" "$DBUS_CONF_D/$CB_DROPIN"; then
                     systemctl reload dbus >/dev/null 2>&1 || true
+                    touched=1
                     ok "cell broadcast policy updated"
                 else
                     bad "could not update $DBUS_CONF_D/$CB_DROPIN"
@@ -347,8 +349,10 @@ $RADIO_CONF.bak.$ts)"
                 # every service on it down with it. dbus re-reads system.d on
                 # SIGHUP and the new rule is live immediately.
                 if systemctl reload dbus >/dev/null 2>&1; then
+                    touched=1
                     ok "cell broadcast channel list reachable for group radio"
                 else
+                    touched=1
                     ok "$CB_DROPIN installed"
                     say "      (applies at the next dbus reload or boot)"
                 fi
@@ -381,6 +385,12 @@ $RADIO_CONF.bak.$ts)"
     elif [ "$changed" -eq 1 ]; then
         say ""
         say "Changed but not restarted. Apply with: systemctl restart ModemManager"
+    elif [ "$touched" -eq 1 ]; then
+        # Work that needed no restart of the modem stack - a symlink, a bus
+        # policy. Saying "nothing to do" here would be a lie about work just
+        # done, and the next person would go looking for why it had no effect.
+        say ""
+        say "Done - nothing here needs the modem stack restarted."
     else
         say ""
         say "Nothing to do - everything is already in place."

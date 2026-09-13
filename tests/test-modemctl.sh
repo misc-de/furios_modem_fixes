@@ -498,6 +498,19 @@ else
 fi
 rm -f "$DBUSD/zz-upstream-test.conf"
 
+# Work that needs no modem restart still has to be reported as work. This said
+# "Nothing to do - everything is already in place" right after replacing the
+# policy, which is the kind of line that sends the next person hunting for why
+# their fix had no effect.
+rm -f "$DBUSD/furios-modem-cellbroadcast.conf"
+out=$(sandbox bash "$ROOT/modemctl" apply --no-restart 2>&1)
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out" | grep -q "Nothing to do"; then
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "apply called its own work nothing" "$out"
+else
+    ok "installing the policy is not reported as nothing to do"
+fi
+
 # A policy of ours that changed must actually reach a phone that already has
 # the old one - "the file is there" and "the file is right" are not the same
 # question, and the DNS drop-in above answers only the first.
