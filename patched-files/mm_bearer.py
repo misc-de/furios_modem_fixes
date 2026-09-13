@@ -271,9 +271,16 @@ class MMBearerInterface(ServiceInterface):
             if 'Interface' in value.value:
                 self.props['Interface'] = value.value['Interface']
                 self.emit_properties_changed({'Interface': value.value['Interface'].value})
-                if [value.value['Interface'].value, 2] not in self.mm_modem.props['Ports'].value:
-                    self.mm_modem.props['Ports'].value.append([value.value['Interface'].value, 2]) # port type AT MM_MODEM_PORT_TYPE_AT
-                    self.mm_modem.emit_properties_changed({'Ports': self.mm_modem.props['Ports'].value})
+                self.mm_modem.sync_net_ports()
+            elif not value.value:
+                # Settings gone means the data call is down, so the interface
+                # this bearer named is not ours any more. Leaving it behind is
+                # what put a dead interface in the modem's port list and left
+                # NetworkManager binding the resolver to it.
+                if self.props['Interface'].value:
+                    self.props['Interface'] = Variant('s', '')
+                    self.emit_properties_changed({'Interface': ''})
+                self.mm_modem.sync_net_ports()
 
             if 'Method' in value.value:
                 if value.value['Method'].value == 'static':

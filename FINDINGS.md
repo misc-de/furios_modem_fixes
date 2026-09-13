@@ -16,7 +16,7 @@ Three symptoms started this, on different days:
 - switching Wi-Fi off left the phone with no network at all, although mobile
   data was connected and every component called itself healthy.
 
-None was a radio problem. All nine causes are in software, and only one of
+None was a radio problem. All ten causes are in software, and only one of
 them is in code anybody here wrote.
 
 ---
@@ -334,6 +334,34 @@ route that eats every packet while reporting itself healthy. Found by
 measuring rather than by reading, and only because the end-to-end test finally
 had a live bearer to run against.
 
+### Proven with Wi-Fi off
+
+Everything above was measured with Wi-Fi up, on an interface nothing was
+routing over. The whole-phone test - Wi-Fi off, does this thing work - had
+never once completed: every attempt ran into a data call that dropped before
+the test did. On 13 September it completed, in a scripted 25-second window
+that switched Wi-Fi back on from a trap rather than from reaching the end.
+
+With Wi-Fi off, `default dev ccmni0 metric 1050` was the only default route in
+the table, and it is ours:
+
+| | |
+|---|---|
+| `ping 1.1.1.1` | 3 of 3, **0% loss**, 56-74 ms |
+| `curl http://1.1.1.1` | **HTTP 301 in 0.09 s** |
+| `getent hosts heise.de` | nothing |
+| `nslookup heise.de 61.8.132.52` | 193.99.144.80 - the carrier's own resolver answers at once |
+| `nmcli networking connectivity` | `none` |
+
+So the route carries real traffic to the real internet, which is what this
+defect claimed and could not show. What does not work is name resolution, and
+that is defect 10 - a different layer, found by this test.
+
+Worth keeping in view: `connectivity none` on a phone that is demonstrably
+online. NetworkManager checks connectivity by name, so a dead resolver reads
+as a dead network, and defects 7 and 10 are indistinguishable from the
+outside. Both end in a phone that says it has no internet.
+
 ### Why a watcher and not a connection profile
 
 The obvious fix is `ipv4.routes` on the cellular profile. It was tried:
@@ -542,10 +570,124 @@ line.
 Two limits on what that proves. The supervisor did not bring the data call up
 - oFono did, exactly as described above; what is shown here is that it started,
 looked, found the work already done and stayed quiet. And Wi-Fi was up the
-whole time, so every packet left over wlan0 at metric 600. The route on ccmni0
-is in the table; that it carries traffic is still unproven, for the same
-reason as in defect 7 - every attempt to test it with Wi-Fi off has run into a
-data call that dropped first.
+whole time, so every packet left over wlan0 at metric 600, and the route on
+ccmni0 was carrying nothing at the time. That it carries at all was settled
+twenty minutes later, with Wi-Fi actually off - in defect 7.
+
+## 10. The resolver is pinned to an interface that does not exist
+
+Defect 8 got `/etc/resolv.conf` pointing at the resolver NetworkManager
+actually fills. This is the next thing down, and it only became visible once
+that was true: dnsmasq is now asked, and dnsmasq cannot reach the carrier's
+servers, because it is given the right servers over the wrong link.
+
+Watched live first. 13 September, 13:47:27, Wi-Fi switched off from the shell:
+
+```
+audit: op="radio-control" arg="wireless-enabled:off" pid=3261 uid=32011
+policy: set 'Willkommen' (ccmni2) as default for IPv4 routing and DNS
+dnsmasq: using nameserver 61.8.132.52#53(via ccmni2)
+```
+
+Wi-Fi was back on nineteen seconds later. Nothing had worked in between.
+
+`ccmni2` is DOWN and has no address. The data call is on `ccmni0` - and every
+other component in the chain knows that:
+
+| | interface |
+|---|---|
+| ModemManager bearer 0, `connected: yes` | **ccmni0** |
+| oFono `/ril_0/context1`, `Active=true` | **ccmni0** |
+| the address, `10.35.25.230` | **ccmni0** |
+| our default route, metric 1050 | **ccmni0** |
+| **NetworkManager, connection 'Willkommen'** | **ccmni2**, down, no address |
+
+NetworkManager has not named `ccmni0` once since boot - zero occurrences in
+its journal.
+
+### Why dnsmasq says REFUSED
+
+A server bound to an interface that is down is not a slow server. It is no
+server at all, and dnsmasq says so in the fastest way it has. Same version,
+same moment, same network, one dnsmasq per row - only the binding differs:
+
+| server given to dnsmasq | answer | its own log |
+|---|---|---|
+| `61.8.132.52` | NOERROR | `query` → `forwarded` → `reply` |
+| `61.8.132.52@ccmni0` (live) | NOERROR | `query` → `forwarded` → `reply` |
+| `61.8.132.52@ccmni2` (down) | **REFUSED** | `query` - and nothing after it |
+
+The third row is the phone. dnsmasq accepts the query, finds that its only
+nameserver sits on an interface it cannot send from, forwards nothing and
+refuses - in 0 ms, no timeout, no error. Its own counters agree: `queries
+answered locally` rises, `queries forwarded` does not move. It is the same
+state it reports at startup as `no upstream servers configured`.
+
+Restarting it does not help - a fresh instance is handed the same bound
+servers and refuses just as fast. Neither does the obvious repair of setting
+the servers unbound over D-Bus: dnsmasq logs them without the `via`, and still
+refuses, for five, ten, fifteen seconds. The same servers passed on the
+command line work immediately in a test instance. Why the D-Bus path behaves
+differently is **not understood** and is not needed for the fix.
+
+### Where the dead interface comes from
+
+Not from oFono, and not from the bearer: both name `ccmni0` correctly. It is
+ofono2mm's port list. Three places learn an interface name and append it -
+`mm_modem.py` in `check_ofono_contexts` and `ofono_context_added`,
+`mm_bearer.py` in `ofono_context_changed` - and **not one of them ever removes
+one**. `check_ofono_contexts` runs exactly once, at startup. So an interface
+that carried an earlier data call stays in the list for the life of the
+process:
+
+```
+modem.generic.ports.value[2] : ccmni0 (net)
+modem.generic.ports.value[3] : ccmni2 (net)   <- from the first data call
+```
+
+ModemManager offers two net ports for one modem, NetworkManager picks one, and
+this phone picks the corpse. That is the whole chain: a list that only grows,
+three layers up from a resolver that refuses.
+
+### The fix, and what it proved
+
+The port list is made to say what the bearers actually have: a `sync_net_ports`
+that rebuilds it from the bearers' own `Interface` property, called wherever an
+interface is learned or lost, instead of three separate appends. A bearer whose
+`Settings` go away now clears its interface rather than leaving the name
+behind. Pinned down in `tests/test-ports.py`, including the two mistakes in the
+other direction - dropping the IMS context's own ccmni, and announcing a change
+when nothing changed.
+
+With that in place, and Wi-Fi switched off for real:
+
+```
+dnsmasq: using nameserver 61.8.132.52#53(via ccmni0)
+```
+
+| | before | after |
+|---|---|---|
+| dnsmasq | REFUSED | **NOERROR** |
+| `getent hosts heise.de` | nothing | answers |
+| `getent hosts github.com` | nothing | 140.82.121.4 |
+| `ping 1.1.1.1` | 0% loss | 0% loss |
+| `curl https://heise.de` (by name) | - | **HTTP 301 in 0.15 s** |
+| `nmcli networking connectivity` | `none` | **`full`** |
+
+The last row is the one to keep. `full` means NetworkManager resolved a name
+over mobile data on its own - the check that had reported `none` on a phone
+that was passing packets the whole time.
+
+Two things this does not settle. Whether NetworkManager picks the live
+interface by rule or by luck when a modem really does have two net ports is
+untested - here there is now only one to pick. And the fix was proven after a
+restart of ModemManager, not across a reboot.
+
+And because NetworkManager tests connectivity by resolving a name, this
+reported as `connectivity none` on a phone that was passing packets - which is
+exactly what defect 7 looked like from the outside, and why this sat
+underneath it undetected for so long. Two different defects, one symptom: Wi-Fi
+off means offline.
 
 ---
 
@@ -720,7 +862,7 @@ the change if its timestamp still looks newer. `modemctl apply` removes it.
 
 ## 5G
 
-Not a seventh defect, but the question fault 1 leaves behind: is NR reachable
+Not a defect of its own, but the question fault 1 leaves behind: is NR reachable
 once the modem stops rejecting it?
 
 `radioInterface = 1.4` made oFono ask for NR through a call this modem refuses,

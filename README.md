@@ -1,11 +1,11 @@
 # furios_modem_fixes
 
-Nine defects in the FuriOS modem stack, and a way to keep them fixed.
+Ten defects in the FuriOS modem stack, and a way to keep them fixed.
 
 Out of the box on this phone the data connection often only came up after a
 reboot, the signal icon sat at the emptiest bar regardless of reception, and
 mobile data never carried a single packet of anybody's traffic. None of it was
-a radio problem. Five of the causes are in `ofono2mm`, one is in oFono's binder
+a radio problem. Six of the causes are in `ofono2mm`, one is in oFono's binder
 configuration, one is in oFono itself, and one is in how FuriOS wires up DNS.
 
 The last two are different in kind from the rest: nothing gets patched. Number
@@ -69,7 +69,7 @@ identify the tower you are on, which places you within a kilometre or so. The
 signal levels do not. Nothing is stored or sent - it prints and exits - but a
 bug report is a public place.
 
-## The nine defects
+## The ten defects
 
 | # | What | Where | Symptom |
 |---|---|---|---|
@@ -82,16 +82,17 @@ bug report is a public place.
 | 7 | Data call's `Gateway` reported as the interface's own address | oFono | either no default route at all, or one that silently drops every packet |
 | 8 | `resolvconf` is a symlink to `resolvectl` and fails on every network change | FuriOS NM config | `/etc/resolv.conf` points at a resolver that only ever learns Wi-Fi's servers |
 | 9 | Nothing brings the data context back after a failed data call | the system as shipped | mobile data stays down until the next reboot |
+| 10 | Interfaces are appended to the modem's port list and never removed | `mm_modem.py`, `mm_bearer.py` | NM binds the resolver to a dead interface; every lookup REFUSED with Wi-Fi off |
 
 Numbers behind each of these, and why they are what they are, in
 [FINDINGS.md](FINDINGS.md).
 
-Numbers 7 and 8 are the ones nobody notices, because everything reports itself
+Numbers 7, 8 and 10 are the ones nobody notices, because everything reports itself
 healthy: the modem is registered, the bearer is connected, the interface has an
 address, `mmcli` is happy, names resolve, and `ip route` can even show a
 default route - one measured at 100% packet loss. There is simply no way out of the
-phone, and no resolver that will answer once Wi-Fi is gone. Both only show the
-moment Wi-Fi goes away. `furios-mobile-route` installs the route and keeps it
+phone, and no resolver that will answer once Wi-Fi is gone. All three only show
+the moment Wi-Fi goes away. `furios-mobile-route` installs the route and keeps it
 installed, `modemctl apply` fixes the DNS wiring, `furios-mobile-context` puts
 the data call back when it dies, and `modemctl status` calls out any of them
 when it is missing.
@@ -105,7 +106,7 @@ than no patch:
     FAIL  mm_modem_signal.py: patch does not fit (upstream moved)
           ready-made file in /usr/share/furios-modem/patched-files/... - check by hand
 
-Two of the nine are already fixed or half-fixed upstream, so this is expected to
+Two of the ten are already fixed or half-fixed upstream, so this is expected to
 happen eventually.
 
 ## Root, cost, and what is checked

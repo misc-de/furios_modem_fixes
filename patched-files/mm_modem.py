@@ -435,6 +435,29 @@ class MMModemInterface(ServiceInterface):
     def get_mm_modem_simple_interface(self):
         return self.mm_modem_simple_interface
 
+    def sync_net_ports(self):
+        # The net ports are exactly the interfaces the bearers name right now.
+        #
+        # Three places used to append an interface here and not one of them
+        # ever removed one, so an interface that carried an earlier data call
+        # stayed in the list for the life of the process. ModemManager then
+        # offers NetworkManager two net ports for one modem, NetworkManager
+        # picks one, and when it picks the stale one it hands dnsmasq the
+        # carrier's resolvers bound to an interface that is DOWN. dnsmasq
+        # answers REFUSED without forwarding anything, so every lookup fails
+        # while packets still flow perfectly over the live interface - a phone
+        # that is online and looks offline.
+        ports = [[self.modem_name, 0]]  # MM_MODEM_PORT_TYPE_UNKNOWN
+
+        for bearer in self.bearers.values():
+            iface = bearer.props['Interface'].value if 'Interface' in bearer.props else ''
+            if iface and [iface, 2] not in ports:  # MM_MODEM_PORT_TYPE_NET
+                ports.append([iface, 2])
+
+        if ports != self.props['Ports'].value:
+            self.props['Ports'] = Variant('a(su)', ports)
+            self.emit_properties_changed({'Ports': ports})
+
     async def check_ofono_contexts(self):
         ofono2mm_print("Checking ofono contexts", self.verbose)
 
@@ -554,12 +577,6 @@ class MMModemInterface(ServiceInterface):
                     })
                 })
 
-                if 'Settings' in ctx[1] and 'Interface' in ctx[1]['Settings'].value:
-                    port = [ctx[1]['Settings'].value['Interface'].value, 2]
-                    if port not in self.props['Ports'].value:
-                        self.props['Ports'].value.append(port) # port type AT MM_MODEM_PORT_TYPE_AT
-                        self.emit_properties_changed({'Ports': self.props['Ports'].value})
-
                 ofono_ctx_interface = self.ofono_client["ofono_context"][ctx[0]]["org.ofono.ConnectionContext"]
                 ofono_ctx_interface.on_property_changed(mm_bearer_interface.ofono_context_changed)
                 mm_bearer_interface.ofono_ctx = ctx[0]
@@ -574,6 +591,8 @@ class MMModemInterface(ServiceInterface):
                     self.mm_interface_objects.append(object_path)
 
                 bearer_i += 1
+
+        self.sync_net_ports()
 
         if self.props['Bearers'].value != old_bearer_list:
             self.emit_properties_changed({'Bearers': self.props['Bearers'].value})
@@ -664,12 +683,6 @@ class MMModemInterface(ServiceInterface):
                 })
             })
 
-            if 'Settings' in properties and 'Interface' in properties['Settings'].value:
-                port = [properties['Settings'].value['Interface'].value, 2]
-                if port not in self.props['Ports'].value:
-                    self.props['Ports'].value.append(port)
-                    self.emit_properties_changed({'Ports': self.props['Ports'].value})
-
             ofono_ctx_interface = self.ofono_client["ofono_context"][path]['org.ofono.ConnectionContext']
             ofono_ctx_interface.on_property_changed(mm_bearer_interface.ofono_context_changed)
             mm_bearer_interface.ofono_ctx = path
@@ -684,6 +697,7 @@ class MMModemInterface(ServiceInterface):
                 self.mm_interface_objects.append(object_path)
 
             bearer_i += 1
+            self.sync_net_ports()
             self.emit_properties_changed({'Bearers': self.props['Bearers'].value})
 
     async def sim_unlocked(self):
