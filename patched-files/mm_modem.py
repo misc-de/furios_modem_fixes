@@ -196,6 +196,40 @@ class MMModemInterface(ServiceInterface):
         if self.mm_modem_signal_interface and iface == "org.ofono.NetworkMonitor":
             await self.mm_modem_signal_interface.set_props()
 
+        if iface == "org.ofono.RadioSettings":
+            # RadioSettings is read once and then never speaks again:
+            # AvailableTechnologies does not change while the modem runs, so no
+            # PropertyChanged ever arrives for it and nothing re-runs
+            # set_props(). Every other interface repairs itself that way - this
+            # one cannot.
+            #
+            # So if it turns up after the modem's own properties were last
+            # computed, caps stays 0. The fallback in set_props() then pins
+            # CurrentCapabilities to LTE alone, and modes stays 0, which
+            # matches none of the four totals the mode table is written for, so
+            # SupportedModes comes out EMPTY. ModemManager offers the shell no
+            # technology and no mode at all while oFono is sitting there with
+            # gsm, umts and lte, and nothing says so: the data path keeps
+            # working perfectly throughout.
+            #
+            # Measured on the 2026-09-13 boot, which lost that race:
+            # CurrentCapabilities 8 and SupportedModes (0,0) before restarting
+            # ModemManager, 12 and 2g/3g/4g after. Every consumer above is
+            # already recomputed when an interface arrives; the modem's own
+            # properties were the one thing that was not.
+            #
+            # Asking again first, because there are two ways to arrive here
+            # with nothing to compute from and afterwards they look identical:
+            # the interface turned up late, or its one read failed. init()
+            # swallows its own failures and leaves the properties empty, so an
+            # interface that never answered cannot be told from one that
+            # answered with nothing - and since AvailableTechnologies never
+            # changes, no PropertyChanged will ever fill it in later either.
+            if 'AvailableTechnologies' not in self.ofono_interface_props[iface].props:
+                await self.ofono_interface_props[iface].init()
+
+            await self.set_props()
+
         if iface == "org.ofono.FuriLabs.AT":
             self.loop.create_task(self._restore_saved_bands())
 

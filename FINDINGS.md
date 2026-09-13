@@ -16,7 +16,7 @@ Three symptoms started this, on different days:
 - switching Wi-Fi off left the phone with no network at all, although mobile
   data was connected and every component called itself healthy.
 
-None was a radio problem. All ten causes are in software, and only one of
+None was a radio problem. All eleven causes are in software, and only one of
 them is in code anybody here wrote.
 
 ---
@@ -688,6 +688,106 @@ reported as `connectivity none` on a phone that was passing packets - which is
 exactly what defect 7 looked like from the outside, and why this sat
 underneath it undetected for so long. Two different defects, one symptom: Wi-Fi
 off means offline.
+
+---
+
+## 11. The modem ends up with no technology and no mode at all
+
+`mmcli` on the 2026-09-13 boot, with oFono sitting right next to it holding
+`AvailableTechnologies = gsm, umts, lte`:
+
+```
+Hardware |  supported: lte              <- gsm and umts are gone
+Modes    |  supported: allowed: none; preferred: none    <- no mode at all
+```
+
+The data path was perfect throughout - `curl` over `ccmni0` answered HTTP 301
+in 0.21 s - which is why nothing complained. `AccessTechnologies` was correct
+too (16384, LTE). Only the modem's *capabilities* and *modes* were wrong, and
+they were wrong for the whole uptime.
+
+`mm_modem.py` computes both in `set_props()`:
+
+```python
+if 'org.ofono.RadioSettings' in self.ofono_interface_props:
+    if 'AvailableTechnologies' in self.ofono_interface_props['org.ofono.RadioSettings'].props:
+        ...                       # caps |= 4/8/64, modes |= 2/4/8/16
+...
+if caps == 0:
+    self.props['CurrentCapabilities'] = Variant('u', 8)   # lte, and only lte
+...
+if modes == 30: ...
+if modes == 14: ...
+if modes == 6: ...
+if modes == 2: ...
+self.props['SupportedModes'] = Variant('a(uu)', supported_modes)
+```
+
+With no `AvailableTechnologies` to read, `caps` stays 0 and the fallback pins
+LTE alone. `modes` stays 0, which matches none of the four totals the table is
+written for, so `supported_modes` is never appended to and `SupportedModes`
+comes out **empty**. Not "reduced" - empty.
+
+### Why it never repaired itself
+
+`set_props()` re-runs on every *change* of a watched property, so almost
+anything wrong here corrects itself within seconds. `org.ofono.RadioSettings`
+is the exception: its properties are static. `AvailableTechnologies` does not
+change while the modem runs, so no `PropertyChanged` is ever emitted for it,
+so nothing ever re-runs the computation. `add_ofono_interface` recomputes the
+3GPP interface, the SIM and the signal interface when an interface arrives -
+the modem's own properties were the one thing it did not.
+
+The 30-second signal poll does not help either: our own fix for defect 6 emits
+`SignalQuality` directly and never goes through `set_props()`.
+
+### Proof
+
+A plain restart of ModemManager, nothing else touched:
+
+| | before | after |
+| --- | --- | --- |
+| `CurrentCapabilities` | `8` (lte) | `12` (gsm-umts, lte) |
+| `SupportedModes` | `(0, 0)` | 2g, 3g, 4g |
+| `CurrentModes` | `(0, 0)` | allowed 4g |
+
+So it is a race at startup, not a permanent state - this boot lost it, an
+earlier one the same day won it. `TechnologyPreference` stayed `nr` across the
+restart and there were no Error 44.
+
+### The fix
+
+Recompute the modem's own properties when `RadioSettings` arrives, and ask
+oFono again first if the interface came up with nothing:
+
+```python
+if iface == "org.ofono.RadioSettings":
+    if 'AvailableTechnologies' not in self.ofono_interface_props[iface].props:
+        await self.ofono_interface_props[iface].init()
+
+    await self.set_props()
+```
+
+The second half is not decoration. There are two ways to reach this point with
+nothing to compute from and they are indistinguishable afterwards: the
+interface arrived late, or its one read failed. `DBusInterface.init()` catches
+its own failures and leaves the properties empty rather than raising, so the
+outer retry loop in `add_ofono_interface` never sees anything to retry. The
+first version of this fix recomputed and found nothing to compute from, and
+the test caught it.
+
+It is deliberately narrow. Recomputing for every interface would also move the
+modem's power-on - which happens inside `set_props()` - earlier into the
+startup gather, and boot ordering is exactly what is fragile here.
+
+### What is NOT claimed
+
+Whether this is what hides the technology label in the shell is **not
+established**. `AccessTechnologies` was correct the whole time, so the label
+should have worked regardless; the phone's screen was off and the status bar
+could not be photographed. What is established is that ModemManager reported no
+capabilities and no modes while oFono had three technologies, and that the fix
+removes that.
 
 ---
 
