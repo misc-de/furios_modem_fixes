@@ -28,7 +28,7 @@
 #
 # Woken by oFono's own signals, not by a clock: the loop blocks on
 # dbus-monitor, and the timer is a net under it rather than the mechanism.
-# Healthy, it costs one look every five minutes - 0.029 % of a core - and
+# Healthy, it costs one look every five minutes - 0.022 % of a core, measured - and
 # nothing at all in between.
 set -u
 
@@ -57,8 +57,9 @@ ESCALATE_AFTER=${FURIOS_MOBILE_CONTEXT_ESCALATE:-3}
 # minute, so something looked every few seconds whether it had reason to or
 # not. Narrowing that filter took 0.53 % of a core off an idle phone and took
 # the accident with it. Five minutes is what buys the net back honestly - 288
-# looks a day, 25 s of CPU, 0.029 % - and bounds the blind window at the same
-# order as NetworkManager's own connectivity check rather than at an hour.
+# looks a day, 0.022 % of a core measured over 300 s - and bounds the blind
+# window at the same order as NetworkManager's own connectivity check rather
+# than at an hour.
 IDLE=${FURIOS_MOBILE_CONTEXT_IDLE:-300}
 
 ONCE=0

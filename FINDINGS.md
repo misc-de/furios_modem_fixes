@@ -1075,7 +1075,7 @@ after a package operation.
 |---|---|---|
 | ofono2mm, polling every 30 s | 30 ms CPU in 600 s = **0.005%** | `/proc/<pid>/stat`, 20 polls |
 | ofonod, same window | 410 ms = **0.068%** | same, and this is an upper bound |
-| `furios-mobile-context`, idle | **0.53%**, now **nothing** | `CPUUsageNSec` of the unit did not move in 300 s |
+| `furios-mobile-context`, idle | **0.53%**, now **0.022%** | `CPUUsageNSec` of the unit over 300 s: one idle look, nothing else |
 | `furios-mobile-route`, idle | **0.36%** | same |
 | `modemctl apply` as a no-op | **101 ms** | what the boot unit and the apt hook run |
 | `modemctl status` | 424 ms | the patch checks are ~40 ms of it; the rest is mmcli, dbus-send and nmcli |
@@ -1111,12 +1111,14 @@ net that is now load-bearing. The state it has to catch is the one
 data call has gone. Nothing changed, so nothing is announced, and no filter can
 catch what is never sent.
 
-`FURIOS_MOBILE_CONTEXT_IDLE` is therefore five minutes, not an hour: 288 looks
-a day, 25 s of CPU, 0.029 % of a core - eighteen times cheaper than the
-heartbeat it replaces, and it bounds that blind window at the same order as
-NetworkManager's own connectivity check. One minute would be 0.145 % for looks
-that are almost always wasted, which is the polling this daemon was written not
-to be.
+`FURIOS_MOBILE_CONTEXT_IDLE` is therefore five minutes, not an hour. The
+arithmetic said 288 looks a day and 0.029 % of a core; the unit measured
+**0.065 s of CPU over 300 s, 0.022 %** - a look costs slightly less inside the
+daemon than it does when timed from a shell. Either way it is twenty-four times
+cheaper than the heartbeat it replaces, and it bounds that blind window at the
+same order as NetworkManager's own connectivity check. One minute would be
+0.145 % for looks that are almost always wasted, which is the polling this
+daemon was written not to be.
 
 The route watcher's share is not polling either - it blocks on netlink, and
 `ip monitor address route link` saw no event at all in a 60 s idle sample. What
