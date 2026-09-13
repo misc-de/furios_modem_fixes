@@ -77,7 +77,7 @@ identify the tower you are on, which places you within a kilometre or so. The
 signal levels do not. Nothing is stored or sent - it prints and exits - but a
 bug report is a public place.
 
-## The fourteen defects
+## The fifteen defects
 
 | # | What | Where | Symptom |
 |---|---|---|---|
@@ -95,6 +95,7 @@ bug report is a public place.
 | 12 | SIM and bearer objects announced through the ObjectManager, which ModemManager reserves for modems | `main.py` | phosh grabs a bearer, finds no modem on it and shows **no signal icon at all** |
 | 13 | ModemManager's bus policy has no rule for the CellBroadcast interface it gained in 1.24 | `/etc/dbus-1/system.d` | the system bus rejects `SetChannels`, so **emergency alert channels never reach the modem** |
 | 14 | The alert channel database lists EU-Alert level 2 for `de` and `nl` without channel 4372, while listing its local-language counterpart | `serviceproviders.xml` | **"extreme, immediate, likely" warnings sent on 4372 go unheard** |
+| 15 | The one of three places that builds a bearer for `Simple.Connect` never subscribes to its oFono context | `mm_modem.py` | bearer stays `connected: no` with no interface, NM fails every activation with `missing data port` - **no mobile data for the whole boot** |
 
 Numbers behind each of these, and why they are what they are, in
 [FINDINGS.md](FINDINGS.md).
@@ -175,9 +176,10 @@ byte for byte, and reverts cleanly; that the signal conversions turn real
 readings taken off this phone into the right numbers; that `modemctl`
 recognises a file it must not touch; that the route watcher picks the default
 bearer rather than the IMS one, and writes nothing when there is nothing to
-write; that half a DNS fix is never reported as a whole one; and - most of it -
-that the context supervisor refuses to act, on mobile data somebody switched
-off, on a radio that is not registered, and during a call.
+write; that half a DNS fix is never reported as a whole one; that whatever builds a
+bearer also subscribes to its oFono context; and - most of it - that the
+context supervisor refuses to act, on mobile data somebody switched off, on a
+radio that is not registered, and during a call.
 
 What cannot: whether the bar on the screen moves. That is `modemctl check`, on
 the device, with a SIM in it.

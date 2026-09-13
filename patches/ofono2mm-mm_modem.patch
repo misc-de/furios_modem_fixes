@@ -295,7 +295,44 @@
      @method()
      async def Enable(self, enable: 'b'):
          ofono2mm_print(f"Enable with state {enable}", self.verbose)
-@@ -1557,7 +1667,55 @@
+@@ -1054,6 +1164,9 @@
+             if name.lower() == "internet":
+                 ofono_ctx = ctx[0]
+                 ofono_ctx_interface = self.ofono_client["ofono_context"][ofono_ctx]['org.ofono.ConnectionContext']
++                # Subscribe before touching Active, or the activation we are
++                # about to ask for happens before anyone is listening.
++                ofono_ctx_interface.on_property_changed(mm_bearer_interface.ofono_context_changed)
+                 await ofono_ctx_interface.call_set_property("Active", Variant('b', False))
+                 await ofono_ctx_interface.call_set_property("Protocol", Variant('s', protocol))
+                 await ofono_ctx_interface.call_set_property("Active", Variant('b', True))
+@@ -1064,6 +1177,7 @@
+             try:
+                 ofono_ctx = await self.ofono_proxy['org.ofono.ConnectionManager'].call_add_context("internet")
+                 ofono_ctx_interface = self.ofono_client["ofono_context"][ofono_ctx]['org.ofono.ConnectionContext']
++                ofono_ctx_interface.on_property_changed(mm_bearer_interface.ofono_context_changed)
+                 if 'apn' in properties:
+                     await ofono_ctx_interface.call_set_property("AccessPointName", properties['apn'])
+                 await ofono_ctx_interface.call_set_property("Protocol", Variant('s', protocol))
+@@ -1075,6 +1189,18 @@
+         if ofono_ctx is not None:
+             mm_bearer_interface.ofono_ctx = ofono_ctx
+ 
++            # A context that is already up sends no signal, so read its state
++            # once instead of waiting for a change that has already happened.
++            # Settings first: Connected without an Interface is what makes
++            # NetworkManager fail an activation with "missing data port".
++            try:
++                props = await ofono_ctx_interface.call_get_properties()
++                for prop in ('Settings', 'IPv6.Settings', 'Active'):
++                    if prop in props:
++                        mm_bearer_interface.ofono_context_changed(prop, props[prop])
++            except Exception as e:
++                ofono2mm_print(f"Failed to read context {ofono_ctx}: {e}", self.verbose)
++
+         object_path = f'/org/freedesktop/ModemManager1/Bearer/{bearer_i}'
+         mm_bearer_interface.own_object_path = object_path
+         self.bus.export(object_path, mm_bearer_interface)
+@@ -1557,7 +1683,55 @@
              protocol = 1
          return protocol
  

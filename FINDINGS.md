@@ -1135,6 +1135,12 @@ The system bus does not let an unprivileged process eavesdrop. A run that
 prints no matches looks exactly like a run that proves absence. The first
 attempt to confirm the 30-second poll "showed" that no poll was happening.
 
+**`dbus-send` without `--print-reply` does not wait for the reply**, so it
+exits 0 whether the call worked or was refused. Two context toggles sent that
+way looked like they had produced no signal at all, which pointed the search
+for defect 15 at exactly the wrong component. When the answer is evidence,
+`--print-reply`.
+
 **oFono serves cell info only on demand.** `GetServingCellInformation` makes
 the cellinfo netmon plugin switch RIL cell reporting on at a 500 ms interval,
 wait for one update, and switch it off again. Nothing pushes signal
@@ -1410,6 +1416,159 @@ Netherlands reads the Dutch list, and the same slip is in both.
 ```
 
 The gap in the middle of the range is gone.
+
+---
+
+## 15. A bearer that never hears its context
+
+The phone came up on 13.9. at 17:03 with no mobile data at all, and nothing
+said so. Wi-Fi was on, the signal icon was there, `mmcli` showed the modem
+`registered`, `attached`, `lte`, oFono had the internet context `Active` with
+an address on `ccmni0`, and `furios-mobile-context` was keeping it that way.
+The only hint was one line in `modemctl status`:
+
+```
+--    no mobile data connected, no fallback route to check
+```
+
+NetworkManager had tried five times in four seconds and given up:
+
+```
+device (/ril_0): state change: disconnected -> prepare
+modem-broadband[/ril_0]: failed to connect modem: missing data port
+device (/ril_0): state change: prepare -> failed (reason 'config-failed')
+```
+
+`missing data port` is NetworkManager saying that ModemManager's bearer has no
+`Interface`. And it did not:
+
+```
+Bearer/0:  connected: no,  no interface
+Modem Ports:  [("/ril_0", 0)]        <- the control port, and nothing else
+```
+
+A modem with no net port cannot carry a connection, so Wi-Fi off would have
+meant offline again - the failure of defect 7, with none of its causes.
+
+### Where the silence comes from
+
+ofono2mm builds an `MMBearerInterface` in three places:
+
+| | called from | subscribes to the context |
+|---|---|---|
+| `check_ofono_contexts` | startup, and whenever oFono's interfaces resync | yes |
+| `ofono_context_added` | oFono announcing a new context | yes |
+| `doCreateBearer` | `Simple.Connect`, i.e. NetworkManager | **no** |
+
+The first two end with
+
+```python
+ofono_ctx_interface.on_property_changed(mm_bearer_interface.ofono_context_changed)
+```
+
+`doCreateBearer` sets `mm_bearer_interface.ofono_ctx` and exports the object,
+and never subscribes. Everything a bearer knows - `Connected`, `Interface`,
+the addresses, its entry in the modem's port list - arrives through that one
+callback. Without it the object answers every question with its constructor
+defaults, forever.
+
+Forever is not an exaggeration, and that is the second half of the defect:
+
+```python
+existing_contexts = [bearer.ofono_ctx for bearer in self.bearers.values()]
+for ctx in contexts:
+    if ctx[0] in existing_contexts:
+        continue
+```
+
+The deaf bearer owns `/ril_0/context1`, so the path that would have subscribed
+properly skips it from then on. Nothing reopens the question.
+
+### Why it is intermittent
+
+Which of the three runs first is a race between oFono publishing the internet
+context and NetworkManager's autoconnect:
+
+- oFono first - `check_ofono_contexts` builds the bearer, it listens, data works;
+- NetworkManager first - `doCreateBearer` builds it, it is deaf, and mobile
+  data is gone until something restarts ModemManager.
+
+This boot NetworkManager won. At 17:03:50 `furios-mobile-context` still found
+*no internet context at all* ("nothing to supervise"); NetworkManager knocked
+at 17:03:54. Four minutes earlier, on the previous boot, the order had been the
+other way round and the same phone with the same packages had working mobile
+data - which is why this looked like it came out of nowhere.
+
+Weak reception makes losing the race more likely, because registration is what
+oFono waits for. It was -119 dBm RSRP that evening.
+
+### Proving it, without guessing
+
+The suspicion was the signal wiring, and there are three ways for a dbus_fast
+subscription to be silently absent: no signal sent, a proxy built from static
+XML that never matches the sender, or a handler on an object nobody kept. So
+each was measured separately rather than argued about:
+
+```
+# 1. does oFono actually announce it?
+sudo dbus-monitor --system "type='signal',path='/ril_0/context1'"
+sudo dbus-send --system --print-reply --dest=org.ofono /ril_0/context1 \
+    org.ofono.ConnectionContext.SetProperty string:Active variant:boolean:false
+```
+
+```
+PropertyChanged  "Settings"  {}
+PropertyChanged  "Active"    false
+PropertyChanged  "Settings"  {Interface: ccmni0, Address: 10.9.54.198, ...}
+PropertyChanged  "Active"    true
+```
+
+It does. Meanwhile `Bearer/0` stayed `connected: no` through all of it.
+
+2. is the idiom itself sound? A 20-line script subscribed through ofono2mm's
+own `Ofono` client, with the same static XML, dropped the proxy reference and
+called `gc.collect()` - and received every one of those signals. So dbus_fast,
+the XML and the object lifetime are all fine, and the fault is that ofono2mm
+never subscribed at all.
+
+3. `systemctl restart ModemManager` then made `check_ofono_contexts` build the
+bearer instead, and the same phone, same radio, same context went to
+`connected: yes, interface ccmni0` with NetworkManager connected in seconds.
+
+**Note `dbus-send` without `--print-reply`.** It does not wait for a reply, so
+it returns 0 whether the call succeeded or failed. Two toggles were "sent" that
+way early on and appeared to produce no signal - which pointed at exactly the
+wrong culprit. Always `--print-reply` when the answer is evidence.
+
+### The fix
+
+Subscribe in `doCreateBearer` too, in **both** branches that get hold of a
+context - the provisioned one and the one it adds itself when MBPI provisioned
+nothing. A phone whose carrier is not in the database would otherwise keep the
+old silence.
+
+Subscribe *before* setting `Active`, or the activation being asked for happens
+before anyone is listening.
+
+And subscribing is still not enough on its own: `Simple.Connect` can arrive
+when the context is **already** active, and then there is no property change
+left to hear. So the state is read once, `Settings` before `Active` - a bearer
+that reports `Connected` without an `Interface` is precisely what
+NetworkManager rejects as `missing data port`.
+
+### Measured
+
+Straight into the repaired path, with `mmcli -m 0 --create-bearer` - which is
+`doCreateBearer` and nothing else:
+
+```
+before:  Bearer/1  connected: no
+after:   Bearer/1  connected: yes, interface ccmni1, 100.80.165.176/24
+```
+
+`tests/test-bearer-wiring.py` holds the rule in place: whatever builds a
+bearer, subscribes. It reads the shipped file with `ast`, so a fourth builder
+added later fails the test instead of failing a boot.
 
 ---
 
