@@ -59,6 +59,53 @@ export MODEMCTL_DBUS_CONF_D="$DBUSD"
 # healthy oFono. The missing case is exercised on purpose further down.
 install -m644 "$ROOT/dbus/furios-modem-cellbroadcast.conf" "$DBUSD/"
 
+# The alert channel database. Baseline is a healthy phone, like the policy
+# above; what the distribution actually ships - de and nl subscribing to
+# EU-Alert level 2 with 4371, 4384 and 4385, and not 4372 - is written in
+# further down, where that case is the point.
+CBSDB="$WORK/serviceproviders.xml"
+export MODEMCTL_CBS_DB="$CBSDB"
+write_cbs_db() {
+    # $1: "de" channel line, $2: "nl" channel line
+    cat > "$CBSDB" <<XML
+<serviceproviders format="2.0">
+<country code="de">
+	<name>Germany</name>
+	<cbs>
+		<level type="presidential">
+			<channels start="4370" end="4370"/>
+		</level>
+		<level type="extreme">
+			$1
+			<channels start="4384" end="4384"/>
+			<channels start="4385" end="4385"/>
+		</level>
+	</cbs>
+</country>
+<country code="nl">
+	<name>Netherlands</name>
+	<cbs>
+		<level type="extreme">
+			$2
+			<channels start="4385" end="4385"/>
+		</level>
+	</cbs>
+</country>
+<country code="us">
+	<name>United States</name>
+	<cbs>
+		<level type="extreme">
+			<channels start="4371" end="4372"/>
+		</level>
+	</cbs>
+</country>
+</serviceproviders>
+XML
+}
+SHIPPED='<channels start="4371" end="4371"/>'
+FIXED='<channels start="4371" end="4372"/>'
+write_cbs_db "$FIXED" "$FIXED"
+
 RADIO="$WORK/radio-interface-binder.conf"
 TREE="$WORK/usr/lib/ofono2mm/ofono2mm"
 
@@ -369,7 +416,7 @@ sandbox() {
     env MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
         MODEMCTL_NM_CONF_D="$NMD" MODEMCTL_RESOLV="$RC" \
         MODEMCTL_NM_RESOLV="$NMRESOLV" MODEMCTL_SHARE="$ROOT" \
-        MODEMCTL_DBUS_CONF_D="$DBUSD" \
+        MODEMCTL_DBUS_CONF_D="$DBUSD" MODEMCTL_CBS_DB="$CBSDB" \
         "$@"
 }
 
@@ -533,5 +580,85 @@ if [ ! -f "$DBUSD/furios-modem-cellbroadcast.conf" ]; then
 else
     TESTS_FAILED=$((TESTS_FAILED + 1)); fail "revert left the bus policy behind"
 fi
+
+# ---------------------------------------------------------------------------
+# Defect 14: the alert channel database that lists the translation of a warning
+# without the warning.
+#
+# This one edits a file belonging to a third package that upstream rewrites
+# constantly, so the checks that matter are the ones about NOT editing: an
+# unfamiliar block, and an upstream that has fixed it already.
+cbs_verdict() {
+    local out
+    out=$(sandbox bash "$ROOT/modemctl" status 2>&1)
+    case "$out" in
+        *"level 2 complete"*)            echo applied ;;
+        *"missing channel 4372"*)        echo missing ;;
+        *"looks different than expected"*) echo unknown ;;
+        *"no alert channel database"*)   echo absent ;;
+        *)                               echo unrecognised ;;
+    esac
+}
+
+write_cbs_db "$SHIPPED" "$SHIPPED"
+check "the shipped database is called incomplete" missing "$(cbs_verdict)"
+
+sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+check "apply completes EU-Alert level 2" applied "$(cbs_verdict)"
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q '<channels start="4371" end="4372"/><!--.*-->' "$CBSDB"; then
+    ok "the edited line carries a marker saying who changed it"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "the edit left no marker" "$(grep 4371 "$CBSDB")"
+fi
+
+# Both countries, because a German phone roaming in the Netherlands reads the
+# Dutch list - and the same slip is in both.
+check "both de and nl were corrected" 2 "$(grep -c 'end="4372"/><!--' "$CBSDB")"
+
+# The file has to survive as XML. If it does not, the whole alert list is gone,
+# which is worse than the one channel this fixes.
+TESTS_RUN=$((TESTS_RUN + 1))
+if python3 -c 'import sys,xml.etree.ElementTree as E; E.parse(sys.argv[1])' "$CBSDB" 2>/dev/null; then
+    ok "the database still parses after the edit"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "the edit broke the XML"
+fi
+
+out=$(sandbox bash "$ROOT/modemctl" apply --no-restart 2>&1)
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out" | grep -q "already lists 4372"; then
+    ok "a second apply leaves the database alone"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "second apply edited the database again" "$out"
+fi
+
+# An upstream that fixed this itself must not be undone, and must not be
+# re-marked as ours.
+write_cbs_db "$FIXED" "$FIXED"
+sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+check "an upstream fix is left untouched" 0 "$(grep -c 'furios-modem-fixes' "$CBSDB")"
+sandbox bash "$ROOT/modemctl" revert --quiet >/dev/null 2>&1
+check "and revert does not take upstream's fix away" applied "$(cbs_verdict)"
+
+# A block that no longer looks the way this expects is a block to leave alone.
+write_cbs_db '<channels start="4371" end="4378"/>' "$SHIPPED"
+check "an unfamiliar block is not guessed at" unknown "$(cbs_verdict)"
+before=$(md5sum "$CBSDB")
+sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+check "and apply does not touch it" "$before" "$(md5sum "$CBSDB")"
+
+# revert undoes only our own line.
+write_cbs_db "$SHIPPED" "$SHIPPED"
+sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+sandbox bash "$ROOT/modemctl" revert --quiet >/dev/null 2>&1
+check "revert puts the shipped line back" missing "$(cbs_verdict)"
+check "and leaves no marker behind" 0 "$(grep -c 'furios-modem-fixes' "$CBSDB")"
+
+# A missing database is not a fault - the phone simply has no list.
+rm -f "$CBSDB"
+check "a missing database is not called a fault" absent "$(cbs_verdict)"
+write_cbs_db "$FIXED" "$FIXED"
 
 summary

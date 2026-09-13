@@ -16,7 +16,7 @@ VERSION=0.1.0
 if [ "$(id -u)" -eq 0 ]; then
     for v in MODEMCTL_TARGET MODEMCTL_RADIO_CONF MODEMCTL_SHARE MODEMCTL_PATCHES \
              MODEMCTL_NM_CONF_D MODEMCTL_RESOLV MODEMCTL_NM_RESOLV \
-             MODEMCTL_DBUS_CONF_D; do
+             MODEMCTL_DBUS_CONF_D MODEMCTL_CBS_DB; do
         if [ -n "${!v:-}" ]; then
             echo "refusing to honour $v as root - that would be an arbitrary-file patch" >&2
             exit 3
@@ -56,6 +56,32 @@ NM_RESOLV=${MODEMCTL_NM_RESOLV:-/run/NetworkManager/resolv.conf}
 DBUS_CONF_D=${MODEMCTL_DBUS_CONF_D:-/etc/dbus-1/system.d}
 CB_DROPIN=furios-modem-cellbroadcast.conf
 CB_IFACE=org.freedesktop.ModemManager1.Modem.CellBroadcast
+
+# Defect 14. The database cellbroadcastd takes its channel list from subscribes
+# de and nl to EU-Alert level 2 with three of its four channels: 4371, 4384 and
+# 4385, but not 4372. ETSI TS 102 900 assigns the level 1113/1114/1120/1121 -
+# 4371, 4372, 4384, 4385 - and 4385 carries the local-language text of exactly
+# the warning sent on 4372. Listing the translation of a warning but not the
+# warning is not a choice anyone makes; us and il write the same pair as a
+# range. Wrong upstream too, so no update brings the channel back.
+# See upstream/mobile-broadband-provider-info-1-eu-alert-4372.md.
+CBS_DB=${MODEMCTL_CBS_DB:-/usr/share/mobile-broadband-provider-info/serviceproviders.xml}
+CBS_MARK='furios-modem-fixes: EU-Alert level 2 is 4371-4372'
+
+# Walks only the <level type="extreme"> of the de and nl blocks. Anything else
+# in this 363 KB file is none of our business, and it is rewritten often.
+CBS_SCAN='
+/<country code=/            { inc = ($0 ~ /code="(de|nl)"/) ? 1 : 0; lvl = 0 }
+inc && /<level type="extreme">/ { lvl = 1 }
+inc && /<\/level>/            { lvl = 0 }
+inc && lvl && /<channels start="4371"/ {
+    if ($0 ~ /end="4372"/) good++; else if ($0 ~ /end="4371"/) gap++; else odd++
+}
+END {
+    if (odd > 0 || (good + gap) == 0) print "unknown"
+    else if (gap > 0)                 print "missing"
+    else                              print "applied"
+}'
 
 # Next to this script when run straight from the work tree; otherwise
 # wherever it was installed. /usr/local first: install.sh puts it there, the
@@ -157,6 +183,33 @@ cellbroadcast_state() {
         echo covered; return
     fi
     echo missing
+}
+
+#   applied / missing / unknown / absent
+# "unknown" is the important one: upstream rewrites this file constantly, and a
+# block that no longer looks the way this expects is a block to leave alone.
+cbs_db_state() {
+    [ -f "$CBS_DB" ] || { echo absent; return; }
+    awk "$CBS_SCAN" "$CBS_DB" 2>/dev/null || echo unknown
+}
+
+# Rewrites the one line, in place, through a temporary file beside the original
+# - never through /tmp, which is world-writable and this runs as root. The
+# result has to parse as XML before it replaces anything: a database that no
+# longer loads takes the whole alert list with it, which is worse than the one
+# missing channel this fixes.
+cbs_db_edit() {
+    local prog=$1 tmp rc=0
+    tmp=$(mktemp "$CBS_DB.furios.XXXXXX") || return 1
+    if awk -v mark="$CBS_MARK" "$prog" "$CBS_DB" > "$tmp" \
+       && python3 -c 'import sys,xml.etree.ElementTree as E; E.parse(sys.argv[1])' "$tmp" 2>/dev/null \
+       && [ -s "$tmp" ]; then
+        chmod 644 "$tmp" && mv -f "$tmp" "$CBS_DB" || rc=1
+    else
+        rc=1
+    fi
+    rm -f "$tmp"
+    return $rc
 }
 
 # Every apply after a package update leaves another set of backups behind.
@@ -362,6 +415,31 @@ $RADIO_CONF.bak.$ts)"
             fi ;;
     esac
 
+    head_ "alert channel database"
+    case "$(cbs_db_state)" in
+        applied) skip "EU-Alert level 2 already lists 4372" ;;
+        absent)  skip "$(basename "$CBS_DB") not installed" ;;
+        unknown) warn "the de/nl alert channel block does not look the way this
+      expects - leaving $(basename "$CBS_DB") alone" ;;
+        missing)
+            if cbs_db_edit '
+/<country code=/            { inc = ($0 ~ /code="(de|nl)"/) ? 1 : 0; lvl = 0 }
+inc && /<level type="extreme">/ { lvl = 1 }
+inc && /<\/level>/            { lvl = 0 }
+inc && lvl && /<channels start="4371" end="4371"\/>/ {
+    sub(/end="4371"/, "end=\"4372\"")
+    sub(/\/>/, "/><!-- " mark " -->")
+}
+{ print }' && [ "$(cbs_db_state)" = applied ]; then
+                touched=1
+                ok "EU-Alert level 2 completed with channel 4372"
+                say "      (cellbroadcastd hands the list to the modem at its next start)"
+            else
+                bad "could not add channel 4372 to $(basename "$CBS_DB")"
+                failed=1
+            fi ;;
+    esac
+
     # Stale bytecode is not cosmetic: Python will happily run a .pyc from
     # before the patch if its timestamp still looks newer.
     [ "$changed" -eq 1 ] && rm -rf "$TARGET/__pycache__"
@@ -455,6 +533,27 @@ cmd_revert() {
         warn "with this undone, mobile data resolves no names once Wi-Fi is off"
     else
         skip "resolv.conf is not ours to revert"
+    fi
+
+    head_ "alert channel database"
+    if [ -f "$CBS_DB" ] && grep -q "$CBS_MARK" "$CBS_DB" 2>/dev/null; then
+        # Only ever our own line, found by the marker we left on it. Without
+        # that, revert would undo an upstream that had fixed this itself.
+        if cbs_db_edit '
+$0 ~ mark {
+    sub(/end="4372"/, "end=\"4371\"")
+    sub(/<!--[^>]*EU-Alert level 2 is 4371-4372[^>]*-->/, "")
+}
+{ print }'; then
+            ok "channel 4372 removed from $(basename "$CBS_DB")"
+            warn "with this undone, EU-Alert level 2 is back to three of its four"
+            warn "channels - see upstream/mobile-broadband-provider-info-1-*.md"
+        else
+            bad "could not restore $(basename "$CBS_DB")"
+            failed=1
+        fi
+    else
+        skip "no alert channel edit of ours to undo"
     fi
 
     head_ "cell broadcast"
@@ -574,6 +673,16 @@ and no 5G"; bad_count=$((bad_count+1)) ;;
         missing)
             bad "cell broadcast channels cannot be set (bus policy denies it)"
             bad "     emergency alerts stay on whatever the modem defaulted to"
+            bad_count=$((bad_count+1)) ;;
+    esac
+
+    case "$(cbs_db_state)" in
+        applied) ok "EU-Alert level 2 complete (4372 present)" ;;
+        absent)  skip "no alert channel database installed" ;;
+        unknown) warn "alert channel database looks different than expected - not checked" ;;
+        missing)
+            bad "EU-Alert level 2 is missing channel 4372"
+            bad "     'extreme, immediate, likely' warnings on that channel go unheard"
             bad_count=$((bad_count+1)) ;;
     esac
 

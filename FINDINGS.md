@@ -1326,6 +1326,93 @@ effect is +18 channels and -1.
 
 ---
 
+## 14. The translation of a warning, without the warning
+
+Found by fixing defect 13. Handing the country's channel list to the modem
+raised it from 8 channels to 25 - and took one off it:
+
+```
+before:  4370,4372,4378,4383,4385,4391,4396-4397        8
+after:   919,4370-4371,4373-4392,4396-4397             25   <- 4372 gone
+```
+
+4372 was in the modem's own list and is not in `serviceproviders.xml` for `de`.
+It is not a national choice.
+
+### The proof is in the entry itself
+
+`serviceproviders.xml` groups channels by alert level. The German block:
+
+```xml
+<level type="extreme">
+    <channels start="4371" end="4371"/>
+    <channels start="4384" end="4384"/>
+    <channels start="4385" end="4385"/>
+</level>
+```
+
+ETSI TS 102 900 assigns EU-Alert **level 2** four message identifiers -
+`1113`, `1114`, `1120`, `1121`, which is 4371, 4372, 4384 and 4385. The pairing
+is an offset of 13: 4384 carries the local-language text of 4371, and **4385
+carries the local-language text of 4372**.
+
+So the entry subscribes to the translation of a warning without subscribing to
+the warning. Nobody chooses that.
+
+Three more things say the same:
+
+- **Every other level in the block pairs cleanly** across that offset:
+  presidential 4370/4383, severe 4373-4378/4386-4391, amber 4379/4392. Only
+  `extreme` is short one.
+- **The countries that get it right write it as a range.** `us` and `il` both
+  carry `<channels start="4371" end="4372"/>`. `de` and `nl` carry
+  `end="4371"`. One character.
+- **`de` and `nl` are otherwise identical here**, so one slip explains both.
+
+### Wrong upstream too
+
+Checked against GNOME's `main`, fetched 13.9.: the same. No package update
+brings this channel back, which is why it is fixed here rather than waited out.
+The report is in
+`upstream/mobile-broadband-provider-info-1-eu-alert-4372.md`.
+
+### The fix
+
+`modemctl apply` rewrites one line in each of the two country blocks and leaves
+a marker on it:
+
+```xml
+<channels start="4371" end="4372"/><!-- furios-modem-fixes: EU-Alert level 2 is 4371-4372 -->
+```
+
+The marker is what `revert` looks for, so an upstream that fixes this itself is
+never undone. This is the first file here belonging to a third package that
+upstream rewrites constantly, so the caution is in what it refuses to do:
+
+- it walks **only** `<level type="extreme">` inside `de` and `nl`;
+- a block that does not look the way it expects reports `unknown` and is left
+  alone - no guessing;
+- the rewrite goes through a temporary file **beside the original**, never
+  `/tmp`, since this runs as root;
+- and the result must parse as XML before it replaces anything. A database that
+  no longer loads takes the whole alert list with it, which is far worse than
+  the one channel this adds.
+
+Both countries are corrected, not just `de`: a German phone roaming in the
+Netherlands reads the Dutch list, and the same slip is in both.
+
+### Measured
+
+13.9., after `apply` and a restart of cellbroadcastd, in oFono's `Topics`:
+
+```
+919,4370-4392,4396-4397        26 channels, 4372 among them
+```
+
+The gap in the middle of the range is gone.
+
+---
+
 ## 5G
 
 Not a defect of its own, but the question defect 1 leaves behind: can this
