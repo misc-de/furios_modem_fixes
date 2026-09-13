@@ -513,6 +513,40 @@ ready is lost - and at boot that is exactly the registration being waited for.
 Missing it used to mean sitting on the idle timer for an hour. The first wait
 after startup is now capped at ten seconds.
 
+**And it did carry one, watched once.** A real reboot on 13 September, with
+`furios-mobile-data.service` still disabled, so nothing but these three units
+was in charge:
+
+```
+13:40:58  furios-modem-fixes   starting
+13:41:42  furios-modem-fixes   finished - patches in place
+13:41:42  furios-mobile-route  started
+13:41:59  furios-mobile-context started
+13:41:59  furios-mobile-context  no oFono modem or no internet context
+13:42:00  furios-mobile-context  no oFono modem or no internet context
+13:42:05  furios-mobile-route    default route on ccmni0 (metric 1050)
+          (and then nothing)
+```
+
+The silence at the end is the evidence, not the absence of it. `pass()` logs
+when it acts and when it finds nothing to supervise; a context that is simply
+up, with no failures behind it, goes by without a word. So the two lines at
+13:41:59 and 13:42:00 are the modem not being there yet, and the quiet after
+them is the next pass finding it. That pass happened because of the ten-second
+cap above - on the old idle timer the first look would have been an hour away.
+
+Three minutes in: `/ril_0/context1` `Active=true`, ccmni0 carrying an address,
+`default dev ccmni0 metric 1050` in the table, `modemctl status` `ok` on every
+line.
+
+Two limits on what that proves. The supervisor did not bring the data call up
+- oFono did, exactly as described above; what is shown here is that it started,
+looked, found the work already done and stayed quiet. And Wi-Fi was up the
+whole time, so every packet left over wlan0 at metric 600. The route on ccmni0
+is in the table; that it carries traffic is still unproven, for the same
+reason as in defect 7 - every attempt to test it with Wi-Fi off has run into a
+data call that dropped first.
+
 ---
 
 ## What it costs, measured
