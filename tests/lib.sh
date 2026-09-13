@@ -44,15 +44,16 @@ summary() {
 
 # Put a stub on PATH that prints whatever the test wants it to print.
 #
-# The point is to pin down what audioctl does with the *output* of pactl and
-# systemctl, without a sound server anywhere near it.
+# The point is to pin down what these tools do with the *output* of mmcli,
+# dbus-send and ip, without a modem anywhere near them - and without a test
+# that only passes on a phone that happens to be registered right now.
 make_stub() {
     # make_stub <name> <exit code> <stdout...>
     #
     # No output means no output - not an empty line. The difference matters:
-    # "pactl list sinks short" with nothing to list prints zero bytes, and a
-    # stub that prints a blank line instead would let an empty-line-tolerant
-    # check pass a test it should fail.
+    # "mmcli -L" with no modem prints zero bytes, and a stub that printed a
+    # blank line instead would let an empty-line-tolerant check pass a test it
+    # should fail.
     local name=$1 code=$2; shift 2
     {
         printf '#!/bin/sh\n'
@@ -67,8 +68,8 @@ make_stub() {
 # The same, but it also writes down how it was called.
 #
 # Sometimes what matters is not what a command answered but that it was asked
-# at all, and with what - "callaudiod was started with a harmless method, not
-# with SelectMode" is exactly that kind of check.
+# at all, and with what - "every dbus-send carried --print-reply" is exactly
+# that kind of check, and no answer from a stub can show it.
 make_recording_stub() {
     # make_recording_stub <name> <exit code> <stdout...>
     local name=$1 code=$2; shift 2

@@ -49,15 +49,17 @@ METRIC=${FURIOS_MOBILE_ROUTE_METRIC:-1050}
 ONCE=0
 QUIET=0
 PRINT_IFACE=0
+PRINT_METRIC=0
 for arg in "$@"; do
     case "$arg" in
         --once)    ONCE=1 ;;
         --iface)   PRINT_IFACE=1 ;;
+        --metric)  PRINT_METRIC=1 ;;
         --quiet)   QUIET=1 ;;
         --version) echo "furios-mobile-route $VERSION"; exit 0 ;;
         -h|--help)
             cat <<'EOF'
-Usage: furios-mobile-route [--once | --iface] [--quiet]
+Usage: furios-mobile-route [--once | --iface | --metric] [--quiet]
 
 Keeps a default route on the mobile data interface. Without --once it stays in
 the foreground and follows netlink; that is how the service runs it.
@@ -69,6 +71,11 @@ the foreground and follows netlink; that is how the service runs it.
              notably "modemctl status", which must not trust NetworkManager:
              NM reports the cellular device "connected" long after the bearer
              behind it has gone, and a check built on that cries wolf.
+  --metric   print the route metric and exit. Same reason: "modemctl status"
+             has to look for the route at the metric this actually writes, and
+             uninstall.sh has to remove the one it left behind. A second copy
+             of the number in either of them is a check that lies the day this
+             one is overridden.
   --quiet    only complain, do not narrate
 
 Environment:
@@ -201,10 +208,15 @@ command -v mmcli >/dev/null 2>&1 || { err "furios-mobile-route: mmcli not found"
 command -v ip    >/dev/null 2>&1 || { err "furios-mobile-route: ip not found"; exit 1; }
 
 # Asking, not acting. Before --once, so a query never writes a route.
+[ "$PRINT_METRIC" -eq 1 ] && { printf '%s\n' "$METRIC"; exit 0; }
 [ "$PRINT_IFACE" -eq 1 ] && { default_bearer_iface; exit 0; }
 
+# The status has to be caught before anything else runs. "assert_route; [ test
+# ] && exit $?" reads the status of the TEST, which is 0 whenever --once was
+# given - so a failed assertion exited 0 and said it had worked.
 assert_route
-[ "$ONCE" -eq 1 ] && exit $?
+rc=$?
+[ "$ONCE" -eq 1 ] && exit "$rc"
 
 # Event-driven on purpose. This blocks on a netlink socket and costs nothing
 # while nothing happens - no timer, no wakeup, which matters on a phone.

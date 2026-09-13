@@ -661,4 +661,32 @@ rm -f "$CBSDB"
 check "a missing database is not called a fault" absent "$(cbs_verdict)"
 write_cbs_db "$FIXED" "$FIXED"
 
+printf '\n\033[1m== nothing assumed that can be asked\033[0m\n'
+
+# /ril_0 is what oFono calls the modem on THIS phone, and it was written into
+# four checks as though it were a constant. On a phone that calls it something
+# else every one of them reports "unreadable" for a modem that is answering
+# perfectly - a wrong answer in the voice of a right one. Comments may mention
+# it; code may not.
+code=$(grep -v '^[[:space:]]*#' "$ROOT/modemctl")
+check "the modem path is asked for, not assumed" 0 \
+      "$(printf '%s\n' "$code" | grep -c '/ril_0')"
+
+# Same for the route metric. furios-mobile-route makes it configurable, so a
+# copy of the number here agrees with it right up to the day it is overridden,
+# and then reports a missing route on a phone whose route is where it belongs.
+# One fallback for "the tool is not installed" is allowed; a second copy is not.
+check "the route metric is asked of the tool" yes \
+      "$(printf '%s\n' "$code" | grep -c '\b1050\b' | awk '{print ($1<=1)?"yes":"no ("$1" copies)"}')"
+check "and it is asked with --metric" yes \
+      "$(printf '%s\n' "$code" | grep -q -- '--metric' && echo yes || echo no)"
+check "the tool answers --metric" yes \
+      "$(grep -q -- '--metric)' "$ROOT/tools/furios-mobile-route" && echo yes || echo no)"
+
+# The MMS context used to be addressed by its number. Contexts are numbered in
+# the order they were added, so adding or removing one renumbers the rest and
+# the APN check starts reading a different context without a word.
+check "the MMS context is found by type, not by number" yes \
+      "$(printf '%s\n' "$code" | grep -q 'context_path mms' && echo yes || echo no)"
+
 summary

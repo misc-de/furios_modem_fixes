@@ -220,9 +220,53 @@ cbs_db_edit() {
 # apt hook runs after every package operation, including an unattended upgrade
 # that happens to land while the phone is being used as a phone. The patched
 # files are already on disk by then; the restart can wait for the next boot.
+#
+# The modem path is asked for, not assumed. /ril_0 is what this phone happens
+# to call it, and every one of the four places that used to hardcode it would
+# have gone quietly wrong on a phone that calls it something else - reporting
+# "unreadable" for a modem that is answering perfectly.
+#
+# Asked once and remembered: unlike a context, the modem object is there for
+# as long as oFono is.
+MODEM_PATH=
+modem_path() {
+    [ -n "$MODEM_PATH" ] && { printf '%s' "$MODEM_PATH"; return 0; }
+    MODEM_PATH=$(timeout 5 dbus-send --system --print-reply --dest=org.ofono / \
+        org.ofono.Manager.GetModems 2>/dev/null \
+        | grep -oE '"/[^"]+"' | tr -d '"' | head -1)
+    [ -n "$MODEM_PATH" ] || return 1
+    printf '%s' "$MODEM_PATH"
+}
+
+# The context of a given type, by asking oFono which is which. The MMS context
+# used to be addressed as /ril_0/context2, which is true today and is true by
+# position rather than by meaning: contexts are numbered in the order they were
+# added, so adding or removing one renumbers the rest and the check would
+# silently start reading the wrong context's APN.
+context_path() {
+    local want=$1 modem paths p type
+    modem=$(modem_path) || return 1
+    paths=$(timeout 5 dbus-send --system --print-reply --dest=org.ofono "$modem" \
+        org.ofono.ConnectionManager.GetContexts 2>/dev/null \
+        | grep -oE '"/[^"]+"' | tr -d '"')
+    for p in $paths; do
+        type=$(timeout 5 dbus-send --system --print-reply --dest=org.ofono "$p" \
+            org.ofono.ConnectionContext.GetProperties 2>/dev/null \
+            | grep -A2 '"Type"' | grep -o 'string "[^"]*"' | tail -1 | cut -d'"' -f2)
+        [ "$type" = "$want" ] && { printf '%s' "$p"; return 0; }
+    done
+    return 1
+}
+
+# Deliberately a second implementation of what furios-mobile-context also does:
+# they are separate programs, installed separately, and a shared shell library
+# would be a third installed artefact for eleven lines. What they must not
+# differ in is --print-reply, which is the whole reason either of them is
+# trustworthy.
 call_in_progress() {
-    local calls
-    calls=$(timeout 5 dbus-send --system --print-reply --dest=org.ofono /ril_0 \
+    local calls modem
+    modem=$(modem_path) || return 1
+    calls=$(timeout 5 dbus-send --system --print-reply --dest=org.ofono "$modem" \
         org.ofono.VoiceCallManager.GetCalls 2>/dev/null) || return 1
     printf '%s' "$calls" | grep -q 'object path'
 }
@@ -497,9 +541,9 @@ cmd_revert() {
     # An upgrade wants exactly this much and no more: the Python files back to
     # what ofono2mm ships, while the patches that describe them are still the
     # ones on disk. Everything below is configuration the new version is about
-    # to set again anyway, and radioInterface in particular must not be left at
-    # 1.4 if the upgrade stops half way - that is the value that brings back
-    # the Error-44 loop on the next start of ofono.
+    # to set again anyway, and undoing it in the middle of an upgrade is how a
+    # half-finished one leaves the phone without its DNS wiring, without the
+    # cell broadcast policy and without the alert channel.
     if [ "$PATCHES_ONLY" = 1 ]; then
         say ""
         say "ofono2mm's own code is back; configuration left alone."
@@ -605,8 +649,9 @@ cmd_status() {
 
     # Settings that live outside any package, so no update can undo them -
     # but they were part of the same repair and are worth seeing.
-    local apn ipv6m
-    apn=$(dbus-send --system --print-reply --dest=org.ofono /ril_0/context2 \
+    local apn ipv6m mms_ctx
+    mms_ctx=$(context_path mms)
+    apn=$([ -n "$mms_ctx" ] && dbus-send --system --print-reply --dest=org.ofono "$mms_ctx" \
         org.ofono.ConnectionContext.GetProperties 2>/dev/null \
         | grep -A2 '"AccessPointName"' | grep -o 'string "[^"]*"' | tail -1 | cut -d'"' -f2)
     case "$apn" in
@@ -622,7 +667,7 @@ cmd_status() {
     # modem rejecting the argument, not a coverage problem. So nr is a warning
     # here, not a goal, until the plugin can speak IRadio 1.6.
     local pref
-    pref=$(dbus-send --system --print-reply --dest=org.ofono /ril_0 \
+    pref=$(dbus-send --system --print-reply --dest=org.ofono "$(modem_path)" \
         org.ofono.RadioSettings.GetProperties 2>/dev/null \
         | grep -A1 TechnologyPreference | tail -1 | grep -o '"[a-z]*"$' | tr -d '"')
     case "$pref" in
@@ -660,7 +705,7 @@ and no 5G"; bad_count=$((bad_count+1)) ;;
         applied|covered)
             local topics
             topics=$(timeout 5 dbus-send --system --print-reply --dest=org.ofono \
-                /ril_0 org.ofono.CellBroadcast.GetProperties 2>/dev/null \
+                "$(modem_path)" org.ofono.CellBroadcast.GetProperties 2>/dev/null \
                 | grep -A1 '"Topics"' | sed -n 's/.*variant *string "\(.*\)".*/\1/p' | head -1)
             if [ -z "$topics" ]; then
                 warn "cell broadcast policy in place, but oFono reports no channels"
@@ -700,7 +745,15 @@ and no 5G"; bad_count=$((bad_count+1)) ;;
              /usr/local/bin/furios-mobile-route /usr/bin/furios-mobile-route; do
         [ -x "$t" ] && { tool=$t; break; }
     done
-    route_iface=$(ip -4 route show default metric 1050 2>/dev/null \
+    # The metric comes from the tool too, for the same reason the interface
+    # does. A copy of 1050 here would keep agreeing with it right up to the day
+    # somebody overrides FURIOS_MOBILE_ROUTE_METRIC - and then this reports a
+    # missing route on a phone whose route is exactly where it belongs.
+    local metric=
+    [ -n "$tool" ] && metric=$("$tool" --metric 2>/dev/null)
+    # The one fallback, for a phone where the watcher is not installed at all.
+    metric=${metric:-1050}
+    route_iface=$(ip -4 route show default metric "$metric" 2>/dev/null \
         | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
     mobile_iface=$([ -n "$tool" ] && "$tool" --iface 2>/dev/null)
     mobile_state=$(systemctl is-enabled furios-mobile-route.service 2>/dev/null)
@@ -832,7 +885,15 @@ case "$CMD" in
     revert)       cmd_revert ;;
     check)        cmd_check ;;
     signal)       cmd_signal ;;
-    version|-V|--version) echo "modemctl $VERSION" ;;
+    version|-V|--version)
+        # VERSION is this script's own interface version and moves rarely. The
+        # question people actually ask here is "which build is on this phone",
+        # and dpkg is the only thing that knows - so say both, and say nothing
+        # about a package when this was installed by hand.
+        echo "modemctl $VERSION"
+        pkgver=$(dpkg-query -W -f='${Version}' furios-modem-fixes 2>/dev/null)
+        [ -n "${pkgver:-}" ] && echo "furios-modem-fixes $pkgver"
+        ;;
     help|-h|--help) usage ;;
     *) echo "unknown command: $CMD" >&2; usage >&2; exit 2 ;;
 esac

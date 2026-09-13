@@ -80,6 +80,11 @@ case "$*" in
   "-4 -o addr show dev "*)
       [ -n "$ADDR_IFACE" ] && [ "$dev" = "$ADDR_IFACE" ] &&
           echo "2: $dev    inet 10.10.95.220/24 scope global $dev" ;;
+  # The kernel refusing the write. Through the scenario rather than through a
+  # second stub, because replacing the stub here once quietly disarmed the
+  # debounce test below - it lost the "monitor" case and the burst never came.
+  "route replace "*)
+      [ -n "${FAIL_WRITE:-}" ] && exit 2 ;;
   "-4 route show default dev "*)
       lines_for "$dev" ;;
   "-4 route show default metric "*)
@@ -102,6 +107,7 @@ STUB
 chmod +x "$STUBDIR/ip"
 
 # Appended to the scenario, so the stub picks them up like everything else.
+fail_writes() { printf 'FAIL_WRITE=1\n' >> "$STUBDIR/scenario"; }
 monitor_emits() {
     # monitor_emits <burst lines> <seconds to hold the stream open afterwards>
     printf 'MONITOR_BURST=%s\nMONITOR_HOLD=%s\n' "$1" "$2" >> "$STUBDIR/scenario"
@@ -223,6 +229,38 @@ iface=$(PATH="$STUBDIR:$PATH" bash "$TOOL" --iface 2>/dev/null)
 check "--iface says nothing when there is no mobile data" "" "$iface"
 # The stale route is left alone: a question must not change the answer.
 check "--iface does not clean up either" "" "$(writes)"
+
+printf '\n\033[1m== answering honestly\033[0m\n'
+
+# A failed assertion has to come back as a failure. "assert_route; [ "$ONCE"
+# -eq 1 ] && exit $?" reads the status of the TEST - which is 0 whenever --once
+# was given - so every failure exited 0 and reported success. Nothing in
+# production runs --once today, which is exactly why it could sit there unseen.
+scenario "default:yes:ccmni0" ccmni0 ""
+fail_writes
+rm -f "$STUBDIR/ip.args"
+PATH="$STUBDIR:$PATH" bash "$TOOL" --once --quiet >/dev/null 2>&1
+once_rc=$?
+check "--once reports a route it could not write" yes \
+      "$([ "$once_rc" -ne 0 ] && echo yes || echo "no - exit $once_rc")"
+
+# And the success case still has to say success, or a boot unit would restart
+# on a phone that is perfectly fine.
+scenario "default:yes:ccmni0" ccmni0 ccmni0
+rm -f "$STUBDIR/ip.args"
+PATH="$STUBDIR:$PATH" bash "$TOOL" --once --quiet >/dev/null 2>&1
+check "--once reports success when there is nothing to do" 0 "$?"
+
+# The metric it writes has to be the metric it tells everyone else about, or
+# modemctl status looks for the route in the wrong place and uninstall.sh
+# leaves one behind - both of which used to carry their own copy of 1050.
+check "--metric answers with the metric in use" "$metric" \
+      "$(bash "$TOOL" --metric 2>/dev/null)"
+check "--metric honours an override" 2000 \
+      "$(FURIOS_MOBILE_ROUTE_METRIC=2000 bash "$TOOL" --metric 2>/dev/null)"
+rm -f "$STUBDIR/ip.args"
+PATH="$STUBDIR:$PATH" bash "$TOOL" --metric >/dev/null 2>&1
+check "--metric writes nothing" "" "$(writes)"
 
 printf '\n\033[1m== the loop the service actually runs\033[0m\n'
 

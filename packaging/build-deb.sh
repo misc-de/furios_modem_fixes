@@ -149,12 +149,17 @@ Maintainer: misc-de <11610690+misc-de@users.noreply.github.com>
 Section: net
 Priority: optional
 Depends: ofono2mm, ofono, patch, python3, python3-dbus, modemmanager, dbus-bin | dbus, network-manager, iproute2
-Description: Keeps five fixes to the FuriOS modem stack applied
- Five defects in ofono2mm and one in oFono's binder configuration: a signal
- bar that can never leave zero, LTE RSRP and RSRQ reported swapped and without
- their sign, a preferred-mode loop the modem rejects twice a second, a missing
- netmask, a bearer that claims IPv6 it never has, and a connect that can hang
- until the next reboot.
+Description: Keeps fifteen fixes to the FuriOS modem stack applied
+ Defects in ofono2mm, in oFono's binder configuration, in oFono itself, in how
+ FuriOS wires up DNS, in ModemManager's own bus policy and in the database the
+ emergency alert channel list comes from: a signal bar that can never leave
+ zero, LTE RSRP and RSRQ reported swapped and without their sign, a missing
+ netmask, a bearer that claims IPv6 it never has, a connect that can hang until
+ the next reboot, mobile data with no default route and no resolver anybody
+ asks, a data call that stays down once it drops, a modem offered to the shell
+ with no technology and no mode, a phone with no signal icon at all, emergency
+ alert channels the bus refuses to let anyone set, one such channel missing
+ from the database, and a bearer that never hears its own context.
  .
  The fixes live in files owned by the ofono2mm package, so every update of
  that package removes them. This package applies them again - from a boot unit
@@ -214,8 +219,10 @@ upgrade)
     # file had to be copied into place by hand.
     #
     # Files only. The configuration is what the new postinst is about to set
-    # again anyway, and radioInterface must not be left at 1.4 if the upgrade
-    # stops between the two halves.
+    # again anyway, and undoing it here would mean an upgrade that stops
+    # between the two halves leaves the phone without the DNS wiring, without
+    # the cell broadcast policy and without the alert channel - none of which
+    # the package it is upgrading from would have put back either.
     /usr/bin/modemctl revert --patches-only --quiet || true
     ;;
 esac

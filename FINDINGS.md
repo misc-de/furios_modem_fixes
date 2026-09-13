@@ -216,6 +216,23 @@ Why it does not is still open, and finding out would mean restarting oFono with
 debug output - which is not something to do casually on a phone that is also
 someone's phone.
 
+**It does now, and the heading above is kept as history rather than as fact.**
+Measured again on 13 September, after the later fixes: `Strength` is in the
+property list, `byte 6`, ModemManager reports exactly that 6 %, and
+`dbus-monitor` counts eleven `PropertyChanged` for it in 75 s. Something
+between the two measurements taught the driver to answer - the radio interface
+went back to the shipped 1.4 in between, which is the obvious suspect and is
+not proof.
+
+Two things follow, and neither is "the fix was pointless". The `SignalQuality`
+fallback in 6c is inert while the property is there: `update_signal_quality`
+returns early rather than overriding a driver that does report. What still runs
+is the poll, which feeds the Signal interface - `Rsrp`, `Rsrq`, `Rssi`, what
+`mmcli --signal-get` and `modemctl signal` read - and nothing else fills those.
+The two do not agree, either: oFono's own byte says 6 %, while RSRP of
+-121 dBm through the curve in 6c says 24 %. Which is the better number for a
+bar is not decided here.
+
 ### 6b. ofono2mm had no second source
 
 `mm_modem.py` fed `SignalQuality` exclusively from that missing property, and
@@ -1148,225 +1165,6 @@ nowhere; they stopped being announced.
 
 ---
 
-## What it costs, measured
-
-Numbers from the phone, not estimates. Three things here run all the time -
-the 30 s poll and the two watchers; everything else happens once at boot or
-after a package operation.
-
-| | measured | how |
-|---|---|---|
-| ofono2mm, polling every 30 s | 30 ms CPU in 600 s = **0.005%** | `/proc/<pid>/stat`, 20 polls |
-| ofonod, same window | 410 ms = **0.068%** | same, and this is an upper bound |
-| `furios-mobile-context`, idle | **0.53%**, now **0.022%** | `CPUUsageNSec` of the unit over 300 s: one idle look, nothing else |
-| `furios-mobile-route`, idle | **0.36%** | same |
-| `modemctl apply` as a no-op | **101 ms** | what the boot unit and the apt hook run |
-| `modemctl status` | 424 ms | the patch checks are ~40 ms of it; the rest is mmcli, dbus-send and nmcli |
-
-ofonod's share is an upper bound because that process also does everything
-else oFono does - registration, contexts, SMS. Even attributing all of it to
-the poll puts the whole feature under a tenth of a percent of one core.
-
-The supervisor was the expensive one, and for nothing. It woke on three whole
-oFono interfaces, and `NetworkRegistration` is not quiet: it announces
-`Strength`, eleven times in 75 s on a cell this weak. Each announcement cost a
-full pass - a dozen short-lived processes, 87 ms - to re-read a number this
-daemon never looks at, which put it above oFono and ModemManager together on
-an idle phone. The match rules now name the properties a pass actually reads.
-`arg0` of `PropertyChanged` is the property name, so the bus drops the rest
-before anyone is woken; `ContextAdded` and `ContextRemoved` carry an object
-path instead and are matched by member, because they are the only
-announcement a context that did not exist at startup will ever make. Measured
-again with the new rules: zero oFono wake-ups in 70 s, and a unit whose CPU
-counter does not move at all while the phone sits there.
-
-That the filter still hears what matters was measured on a real event rather
-than argued: at 18:01:37 oFono cleared the context and rebuilt it, and the
-unit's CPU counter - motionless for the five minutes before - moved by 219 ms,
-two or three passes. The drop this supervisor was written for announces itself.
-
-What the narrowing did take away was an accident. The Strength chatter had been
-a heartbeat: a state change matching none of the rules was picked up within
-seconds anyway, because something else woke the loop every few seconds. The
-only fallback left is the declared one, and an hour was the wrong length for a
-net that is now load-bearing. The state it has to catch is the one
-`context_up()` exists for - oFono reporting `Active=true` on a context whose
-data call has gone. Nothing changed, so nothing is announced, and no filter can
-catch what is never sent.
-
-`FURIOS_MOBILE_CONTEXT_IDLE` is therefore five minutes, not an hour. The
-arithmetic said 288 looks a day and 0.029 % of a core; the unit measured
-**0.065 s of CPU over 300 s, 0.022 %** - a look costs slightly less inside the
-daemon than it does when timed from a shell. Either way it is twenty-four times
-cheaper than the heartbeat it replaces, and it bounds that blind window at the
-same order as NetworkManager's own connectivity check. One minute would be
-0.145 % for looks that are almost always wasted, which is the polling this
-daemon was written not to be.
-
-The route watcher's share is not polling either - it blocks on netlink, and
-`ip monitor address route link` saw no event at all in a 60 s idle sample. What
-it pays for is the ~5 minute cadence at which NetworkManager reinstalls its own
-`via`-the-own-address default route, which this then removes again; each round
-is three `mmcli` calls. Nothing in any journal says who installs it.
-
-Two things keep it that low. The poll only runs while there is a SIM to read:
-`set_props` returns at the SimManager check before touching D-Bus, so a phone
-with no SIM pays nothing. And a poll enables RIL cell reporting for about half
-a second and switches it off again, rather than leaving it on.
-
-## Privacy
-
-Nothing here stores or transmits anything. Two things are worth knowing anyway.
-
-`modemctl signal` prints the serving cell id and EARFCN. Those identify the
-tower, which places the phone within roughly a kilometre - they are the one
-part of its output that is about the person rather than the radio. Fine on
-your own screen, worth trimming out of a bug report.
-
-This repository names the carrier (MCC/MNC 262-23, APN `web.vodafone.de`,
-operator name `Willkommen`) because the upstream reports are not reproducible
-without it. It contains no IMEI, no IMSI, no cell id and no phone number, and
-that is worth re-checking before publishing anything new here.
-
-## Privileges
-
-`apply` and `revert` write files under `/usr/lib`, so they need root and there
-is no way around that. Everything else does not, and does not ask:
-
-    modemctl status     reads world-readable files, mmcli, D-Bus - no root
-    modemctl signal     D-Bus only - no root
-    modemctl check      the same, except the dbus-monitor part, which says so
-
-What `apply` actually checks is not `id -u` but whether it can write the files
-it is about to change. That gives a better message when it cannot, and it is
-why the test suite can exercise apply and revert against a tree it owns rather
-than needing root to test the one command that does all the work.
-
-As root, the four `MODEMCTL_*` overrides the tests use are refused outright.
-Without that, anyone able to run `sudo modemctl` - a NOPASSWD line is the usual
-way that happens - could point them anywhere and have root apply an arbitrary
-diff to an arbitrary file. sudo's `env_reset` makes that hard today; one
-`env_keep` line elsewhere would undo it, and nothing about the overrides is
-worth that.
-
-The unprivileged signal tool has an override of its own
-(`FURIOS_MODEM_OFONO2MM`) and does not need the same treatment: it holds no
-privileges, so redirecting it gains nobody anything.
-
----
-
-## Traps that cost time
-
-**`dbus-monitor` without `sudo` shows nothing, and says nothing about it.**
-The system bus does not let an unprivileged process eavesdrop. A run that
-prints no matches looks exactly like a run that proves absence. The first
-attempt to confirm the 30-second poll "showed" that no poll was happening.
-
-**`dbus-send` without `--print-reply` does not wait for the reply**, so it
-exits 0 whether the call worked or was refused. Two context toggles sent that
-way looked like they had produced no signal at all, which pointed the search
-for defect 15 at exactly the wrong component. When the answer is evidence,
-`--print-reply`.
-
-**oFono serves cell info only on demand.** `GetServingCellInformation` makes
-the cellinfo netmon plugin switch RIL cell reporting on at a 500 ms interval,
-wait for one update, and switch it off again. Nothing pushes signal
-measurements on its own, so without a poll the bar does not move at all - and
-polling costs about 2% duty cycle, not continuous reporting.
-
-**`systemctl restart ModemManager` is how you restart ofono2mm.** There is no
-`ofono2mm.service`; a drop-in (`10-ofono2mm.conf`) replaces ModemManager's
-`ExecStart`. Restarting `ofono` instead is a different and worse idea - it
-leaves the modem OFFLINE.
-
-**A ping proves nothing about the radio while Wi-Fi is up.** `ping -I /ril_0`
-does not work either: `/ril_0` is NetworkManager's name for the device, while
-the kernel calls it `ccmni0` or `ccmni1` depending on the context. Check
-`ip route get` first.
-
-**`+CESQ` returns indices, not dBm**, and this modem appends three
-MTK-specific fields after the six standard ones. Read by position from the
-left.
-
-**`DPkg::Post-Invoke-Success` does not exist.** apt parses it without a
-complaint and lists it in `apt-config dump`, so the hook looks installed. Only
-`APT::Update` has a `-Success` variant; for DPkg, apt runs `DPkg::Post-Invoke`
-and nothing else. Found by reinstalling ofono2mm and discovering every patch
-gone afterwards - while the running daemon still had the patched code in
-memory and everything therefore looked fine. That gap between what is on disk
-and what is running is the reason to test this by actually reinstalling the
-package rather than by reading the hook.
-
-**A `mktemp -d` staging directory travels into the .deb as the mode of `./`.**
-mktemp makes it 0700, and nothing of ours should be telling dpkg anything
-about the root directory's permissions. `chmod 755` on the staging directory
-before building.
-
-**`exec a || exec b` is not a fallback.** A failed `exec` ends the shell
-outright, so the second one never runs. Pointing the share directory somewhere
-empty produced exit 127 and not one word of explanation. Test for an executable
-first, then exec.
-
-**Backups pile up where nobody looks.** Every `apply` after a package update
-writes another set. After a day of testing there were 28 of them, 1.1 MB, in a
-directory that is supposed to hold a Python package. Three are kept now.
-
-**NetworkManager does not survive a ModemManager restart.** It keeps the proxy
-for the modem object of the process that just died -
-
-```
-NetworkManager: modem-manager: ModemManager now available
-NetworkManager: <warn> modem with path .../ModemManager1/Modem/0 already exists, ignoring
-```
-
-- and every `Connect` it makes after that goes nowhere. The device sits in
-`connecting (prepare)` indefinitely while oFono is never even asked: activating
-the context by hand through `org.ofono.ConnectionContext` brings the data call
-straight up, which is what proves the modem and the network were fine all
-along. Measured on every restart, not occasionally, with no recovery in 80 s.
-Disconnecting the device, taking it unmanaged and back, and re-activating the
-profile all fail. Only restarting NetworkManager makes it look again.
-
-Two consequences: the apt hook runs `apply --no-restart` (after a package
-update the running daemon still holds our patched code, so a restart buys
-nothing but the new upstream and costs the connection), and an interactive
-`apply` follows its restart with `settle_networkmanager`.
-
-**Wait for the device before deciding it is absent.** For a moment after the
-restart NetworkManager does not list the modem at all. The first version of
-that settle step looked once, found nothing, concluded "no modem, nothing to
-do" and returned - so it did precisely nothing on the one occasion it existed
-for, and mobile data stayed down. Look inside the wait loop, not before it.
-
-**Do not restart the modem stack during a call.** The apt hook runs after every
-package operation, including an unattended upgrade that lands while the phone
-is being used as a phone. `apply` asks `VoiceCallManager.GetCalls` first and
-leaves the restart for later - the patched files are on disk either way.
-
-**Stale `__pycache__` outlives a patch.** Python will run bytecode from before
-the change if its timestamp still looks newer. `modemctl apply` removes it.
-
----
-
-## What this does NOT fix
-
-- **Weak reception.** Measured at the desk where this was written: RSRP around
-  -120 dBm on LTE band 1 (2100 MHz). Band 20 (800 MHz) is enabled; the phone
-  simply picked this cell. The connection is stable now, not fast. Earlier the
-  same day, in a different spot, the same phone measured -78 dBm and 63 Mbit/s
-  down - which the icon reported as the emptiest bar, because of fault 6.
-
-- **`binder-death=245`** (`/var/lib/ofono/rilerror`). The Android radio HAL has
-  crashed 245 times over the life of this device. Each crash takes the modem
-  stack with it and only a reboot helps. That is below the Linux stack.
-
-- **The band lock** in `/var/lib/ofono2mm/settings.conf` (`AT+EPBSEH=...`),
-  re-applied at every start. Checked against `AT+EPBSEH=?`: every band ofono2mm
-  knows about is enabled, band 20 included. A few UMTS bands and one LTE band
-  its table does not know are off - irrelevant in Germany.
-
----
-
 ## 13. Emergency alerts the phone is not allowed to subscribe to
 
 The whole defect is one line in the journal at boot, in a file nobody opens:
@@ -1696,6 +1494,225 @@ after:   Bearer/1  connected: yes, interface ccmni1, 100.80.165.176/24
 `tests/test-bearer-wiring.py` holds the rule in place: whatever builds a
 bearer, subscribes. It reads the shipped file with `ast`, so a fourth builder
 added later fails the test instead of failing a boot.
+
+---
+
+## What it costs, measured
+
+Numbers from the phone, not estimates. Three things here run all the time -
+the 30 s poll and the two watchers; everything else happens once at boot or
+after a package operation.
+
+| | measured | how |
+|---|---|---|
+| ofono2mm, polling every 30 s | 30 ms CPU in 600 s = **0.005%** | `/proc/<pid>/stat`, 20 polls |
+| ofonod, same window | 410 ms = **0.068%** | same, and this is an upper bound |
+| `furios-mobile-context`, idle | **0.53%**, now **0.022%** | `CPUUsageNSec` of the unit over 300 s: one idle look, nothing else |
+| `furios-mobile-route`, idle | **0.36%** | same |
+| `modemctl apply` as a no-op | **101 ms** | what the boot unit and the apt hook run |
+| `modemctl status` | 424 ms | the patch checks are ~40 ms of it; the rest is mmcli, dbus-send and nmcli |
+
+ofonod's share is an upper bound because that process also does everything
+else oFono does - registration, contexts, SMS. Even attributing all of it to
+the poll puts the whole feature under a tenth of a percent of one core.
+
+The supervisor was the expensive one, and for nothing. It woke on three whole
+oFono interfaces, and `NetworkRegistration` is not quiet: it announces
+`Strength`, eleven times in 75 s on a cell this weak. Each announcement cost a
+full pass - a dozen short-lived processes, 87 ms - to re-read a number this
+daemon never looks at, which put it above oFono and ModemManager together on
+an idle phone. The match rules now name the properties a pass actually reads.
+`arg0` of `PropertyChanged` is the property name, so the bus drops the rest
+before anyone is woken; `ContextAdded` and `ContextRemoved` carry an object
+path instead and are matched by member, because they are the only
+announcement a context that did not exist at startup will ever make. Measured
+again with the new rules: zero oFono wake-ups in 70 s, and a unit whose CPU
+counter does not move at all while the phone sits there.
+
+That the filter still hears what matters was measured on a real event rather
+than argued: at 18:01:37 oFono cleared the context and rebuilt it, and the
+unit's CPU counter - motionless for the five minutes before - moved by 219 ms,
+two or three passes. The drop this supervisor was written for announces itself.
+
+What the narrowing did take away was an accident. The Strength chatter had been
+a heartbeat: a state change matching none of the rules was picked up within
+seconds anyway, because something else woke the loop every few seconds. The
+only fallback left is the declared one, and an hour was the wrong length for a
+net that is now load-bearing. The state it has to catch is the one
+`context_up()` exists for - oFono reporting `Active=true` on a context whose
+data call has gone. Nothing changed, so nothing is announced, and no filter can
+catch what is never sent.
+
+`FURIOS_MOBILE_CONTEXT_IDLE` is therefore five minutes, not an hour. The
+arithmetic said 288 looks a day and 0.029 % of a core; the unit measured
+**0.065 s of CPU over 300 s, 0.022 %** - a look costs slightly less inside the
+daemon than it does when timed from a shell. Either way it is twenty-four times
+cheaper than the heartbeat it replaces, and it bounds that blind window at the
+same order as NetworkManager's own connectivity check. One minute would be
+0.145 % for looks that are almost always wasted, which is the polling this
+daemon was written not to be.
+
+The route watcher's share is not polling either - it blocks on netlink, and
+`ip monitor address route link` saw no event at all in a 60 s idle sample. What
+it pays for is the ~5 minute cadence at which NetworkManager reinstalls its own
+`via`-the-own-address default route, which this then removes again; each round
+is three `mmcli` calls. Nothing in any journal says who installs it.
+
+Two things keep it that low. The poll only runs while there is a SIM to read:
+`set_props` returns at the SimManager check before touching D-Bus, so a phone
+with no SIM pays nothing. And a poll enables RIL cell reporting for about half
+a second and switches it off again, rather than leaving it on.
+
+## Privacy
+
+Nothing here stores or transmits anything. Two things are worth knowing anyway.
+
+`modemctl signal` prints the serving cell id and EARFCN. Those identify the
+tower, which places the phone within roughly a kilometre - they are the one
+part of its output that is about the person rather than the radio. Fine on
+your own screen, worth trimming out of a bug report.
+
+This repository names the carrier (MCC/MNC 262-23, APN `web.vodafone.de`,
+operator name `Willkommen`) because the upstream reports are not reproducible
+without it. It contains no IMEI, no IMSI, no cell id and no phone number, and
+that is worth re-checking before publishing anything new here.
+
+## Privileges
+
+`apply` and `revert` write files under `/usr/lib`, so they need root and there
+is no way around that. Everything else does not, and does not ask:
+
+    modemctl status     reads world-readable files, mmcli, D-Bus - no root
+    modemctl signal     D-Bus only - no root
+    modemctl check      the same, except the dbus-monitor part, which says so
+
+What `apply` actually checks is not `id -u` but whether it can write the files
+it is about to change. That gives a better message when it cannot, and it is
+why the test suite can exercise apply and revert against a tree it owns rather
+than needing root to test the one command that does all the work.
+
+As root, the nine `MODEMCTL_*` overrides the tests use are refused outright.
+Without that, anyone able to run `sudo modemctl` - a NOPASSWD line is the usual
+way that happens - could point them anywhere and have root apply an arbitrary
+diff to an arbitrary file. sudo's `env_reset` makes that hard today; one
+`env_keep` line elsewhere would undo it, and nothing about the overrides is
+worth that.
+
+The unprivileged signal tool has an override of its own
+(`FURIOS_MODEM_OFONO2MM`) and does not need the same treatment: it holds no
+privileges, so redirecting it gains nobody anything.
+
+---
+
+## Traps that cost time
+
+**`dbus-monitor` without `sudo` shows nothing, and says nothing about it.**
+The system bus does not let an unprivileged process eavesdrop. A run that
+prints no matches looks exactly like a run that proves absence. The first
+attempt to confirm the 30-second poll "showed" that no poll was happening.
+
+**`dbus-send` without `--print-reply` does not wait for the reply**, so it
+exits 0 whether the call worked or was refused. Two context toggles sent that
+way looked like they had produced no signal at all, which pointed the search
+for defect 15 at exactly the wrong component. When the answer is evidence,
+`--print-reply`.
+
+**oFono serves cell info only on demand.** `GetServingCellInformation` makes
+the cellinfo netmon plugin switch RIL cell reporting on at a 500 ms interval,
+wait for one update, and switch it off again. Nothing pushes signal
+measurements on its own, so without a poll the bar does not move at all - and
+polling costs about 2% duty cycle, not continuous reporting.
+
+**`systemctl restart ModemManager` is how you restart ofono2mm.** There is no
+`ofono2mm.service`; a drop-in (`10-ofono2mm.conf`) replaces ModemManager's
+`ExecStart`. Restarting `ofono` instead is a different and worse idea - it
+leaves the modem OFFLINE.
+
+**A ping proves nothing about the radio while Wi-Fi is up.** `ping -I /ril_0`
+does not work either: `/ril_0` is NetworkManager's name for the device, while
+the kernel calls it `ccmni0` or `ccmni1` depending on the context. Check
+`ip route get` first.
+
+**`+CESQ` returns indices, not dBm**, and this modem appends three
+MTK-specific fields after the six standard ones. Read by position from the
+left.
+
+**`DPkg::Post-Invoke-Success` does not exist.** apt parses it without a
+complaint and lists it in `apt-config dump`, so the hook looks installed. Only
+`APT::Update` has a `-Success` variant; for DPkg, apt runs `DPkg::Post-Invoke`
+and nothing else. Found by reinstalling ofono2mm and discovering every patch
+gone afterwards - while the running daemon still had the patched code in
+memory and everything therefore looked fine. That gap between what is on disk
+and what is running is the reason to test this by actually reinstalling the
+package rather than by reading the hook.
+
+**A `mktemp -d` staging directory travels into the .deb as the mode of `./`.**
+mktemp makes it 0700, and nothing of ours should be telling dpkg anything
+about the root directory's permissions. `chmod 755` on the staging directory
+before building.
+
+**`exec a || exec b` is not a fallback.** A failed `exec` ends the shell
+outright, so the second one never runs. Pointing the share directory somewhere
+empty produced exit 127 and not one word of explanation. Test for an executable
+first, then exec.
+
+**Backups pile up where nobody looks.** Every `apply` after a package update
+writes another set. After a day of testing there were 28 of them, 1.1 MB, in a
+directory that is supposed to hold a Python package. Three are kept now.
+
+**NetworkManager does not survive a ModemManager restart.** It keeps the proxy
+for the modem object of the process that just died -
+
+```
+NetworkManager: modem-manager: ModemManager now available
+NetworkManager: <warn> modem with path .../ModemManager1/Modem/0 already exists, ignoring
+```
+
+- and every `Connect` it makes after that goes nowhere. The device sits in
+`connecting (prepare)` indefinitely while oFono is never even asked: activating
+the context by hand through `org.ofono.ConnectionContext` brings the data call
+straight up, which is what proves the modem and the network were fine all
+along. Measured on every restart, not occasionally, with no recovery in 80 s.
+Disconnecting the device, taking it unmanaged and back, and re-activating the
+profile all fail. Only restarting NetworkManager makes it look again.
+
+Two consequences: the apt hook runs `apply --no-restart` (after a package
+update the running daemon still holds our patched code, so a restart buys
+nothing but the new upstream and costs the connection), and an interactive
+`apply` follows its restart with `settle_networkmanager`.
+
+**Wait for the device before deciding it is absent.** For a moment after the
+restart NetworkManager does not list the modem at all. The first version of
+that settle step looked once, found nothing, concluded "no modem, nothing to
+do" and returned - so it did precisely nothing on the one occasion it existed
+for, and mobile data stayed down. Look inside the wait loop, not before it.
+
+**Do not restart the modem stack during a call.** The apt hook runs after every
+package operation, including an unattended upgrade that lands while the phone
+is being used as a phone. `apply` asks `VoiceCallManager.GetCalls` first and
+leaves the restart for later - the patched files are on disk either way.
+
+**Stale `__pycache__` outlives a patch.** Python will run bytecode from before
+the change if its timestamp still looks newer. `modemctl apply` removes it.
+
+---
+
+## What this does NOT fix
+
+- **Weak reception.** Measured at the desk where this was written: RSRP around
+  -120 dBm on LTE band 1 (2100 MHz). Band 20 (800 MHz) is enabled; the phone
+  simply picked this cell. The connection is stable now, not fast. Earlier the
+  same day, in a different spot, the same phone measured -78 dBm and 63 Mbit/s
+  down - which the icon reported as the emptiest bar, because of fault 6.
+
+- **`binder-death=245`** (`/var/lib/ofono/rilerror`). The Android radio HAL has
+  crashed 245 times over the life of this device. Each crash takes the modem
+  stack with it and only a reboot helps. That is below the Linux stack.
+
+- **The band lock** in `/var/lib/ofono2mm/settings.conf` (`AT+EPBSEH=...`),
+  re-applied at every start. Checked against `AT+EPBSEH=?`: every band ofono2mm
+  knows about is enabled, band 20 included. A few UMTS bands and one LTE band
+  its table does not know are off - irrelevant in Germany.
 
 ---
 

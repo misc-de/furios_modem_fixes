@@ -1,26 +1,29 @@
 # furios_modem_fixes
 
-Fourteen defects in the FuriOS modem stack, and a way to keep them fixed.
+Fifteen defects in the FuriOS modem stack, and a way to keep them fixed.
 
 Out of the box on this phone the data connection often only came up after a
 reboot, the signal icon sat at the emptiest bar regardless of reception, and
 mobile data never carried a single packet of anybody's traffic. None of it was
-a radio problem. Seven of the causes are in `ofono2mm`, one is in oFono's binder
-configuration, one is in oFono itself, one is in how FuriOS wires up DNS, one
-is in ModemManager's own bus policy, and one is in the database the alert
-channel list comes from.
+a radio problem. Eight of them are in `ofono2mm`, one is in oFono's binder
+configuration, and one is in the state oFono keeps between boots - and one of
+those eight, the signal bar, has a second cause inside oFono itself, where LTE
+RSRP and RSRQ arrive swapped.
 
-Three are different in kind from the rest: nothing gets patched. Number
-7 is about what oFono *says* about the data call, and the fix is to install the
-route that claim prevents. Number 8 is a resolver that is filled correctly and
-asked by nobody. Together they are why switching Wi-Fi off left this phone with
-no network at all. Number 14 is one line in a database belonging to a third
-package, and the only one here that is wrong upstream as well. Number 13 is a
-permission that was never written down:
+The remaining five are different in kind: nothing gets patched, because there
+is no code of anybody's to patch. Number 7 is about what oFono *says* about the
+data call - it reports the interface's own address as the gateway - and the fix
+is to install the route that claim prevents. Number 8 is a resolver that is
+filled correctly and asked by nobody, which is how FuriOS wires up DNS.
+Together those two are why switching Wi-Fi off left this phone with no network
+at all. Number 9 is a data call that stays down once it drops, so something has
+to be watching. Number 13 is a permission that was never written down:
 ModemManager grew a Cell Broadcast interface and a polkit action to guard it,
 but no rule in its bus policy, so the bus turns the call away before polkit is
 ever asked - and the channels a phone must listen on to receive a public
-emergency alert stay at whatever the modem happened to default to.
+emergency alert stay at whatever the modem happened to default to. Number 14 is
+one line in a database belonging to a third package, and the only one here that
+is wrong upstream as well.
 
 The fixes live in files owned by the `ofono2mm` package, so **every update of
 that package removes them**. That is the entire reason this repository is more
@@ -40,9 +43,10 @@ or build a package:
 
     ./packaging/build-deb.sh --install
 
-Both apply everything immediately and enable the two units - the one that puts
-the patches back after a package update, and the one that keeps a default route
-on mobile data. Reversible with `./uninstall.sh` or
+Both apply everything immediately and enable the three units - the one that
+puts the patches back after a package update, the one that keeps a default
+route on mobile data, and the one that brings the data context back when it
+drops. Reversible with `./uninstall.sh` or
 `apt remove furios-modem-fixes`.
 
 ## modemctl
