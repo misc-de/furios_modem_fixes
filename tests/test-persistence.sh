@@ -296,6 +296,74 @@ else
     fail "postinst does not honour the recorded profile"
 fi
 
+# --- the polkit action ------------------------------------------------------
+#
+# What lets the switch in the app do what "sudo modemctl" does in a terminal.
+# Every line of it is a decision about who may change the modem, so every line
+# is checked - a policy that quietly widened would look exactly like one that
+# did not.
+POLKIT="$ROOT/polkit/de.misc-de.modemctl.policy"
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if err=$(python3 -c 'import sys,xml.etree.ElementTree as E; E.parse(sys.argv[1])' "$POLKIT" 2>&1); then
+    ok "the polkit action parses"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "the polkit action does not parse" "$err"
+fi
+
+# active yes: there is no authentication agent on this phone, so auth_admin
+# would be a switch that cannot ask and therefore cannot work.
+# any/inactive no: a remote login or a switched-away seat has no business
+# changing what the modem is doing - verified on the device, where phosh is
+# authorised for this action and an ssh session is not.
+for pair in "allow_any:no" "allow_inactive:no" "allow_active:yes"; do
+    key=${pair%%:*}; want=${pair#*:}
+    got=$(sed -n "s|.*<$key>\(.*\)</$key>.*|\1|p" "$POLKIT")
+    check "$key is $want" "$want" "$got"
+done
+
+# pkexec only honours the action if the annotation names the program being
+# run. A policy naming /usr/bin while the app starts /usr/local/bin does not
+# fail loudly - pkexec just refuses, and the switch looks broken.
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q 'org.freedesktop.policykit.exec.path">/usr/bin/modemctl<' "$POLKIT"; then
+    ok "the action names the program it authorises"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "the action does not name /usr/bin/modemctl"
+fi
+
+# ...which is why install.sh has to rewrite it for a hand installation, the
+# same way it rewrites the unit and the hook.
+TESTS_RUN=$((TESTS_RUN + 1))
+rewritten=$(sed 's|>/usr/bin/modemctl<|>/usr/local/bin/modemctl<|' "$POLKIT" \
+    | grep -c 'exec.path">/usr/local/bin/modemctl<')
+if [ "$rewritten" = 1 ] && grep -q 'de.misc-de.modemctl.policy' "$ROOT/install.sh"; then
+    ok "install.sh can point the action at its own copy"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "install.sh does not rewrite the polkit action" "pkexec would refuse silently"
+fi
+
+# And it has to be taken away again, or an uninstalled package leaves an
+# authorisation behind for a program that is no longer there.
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q 'de.misc-de.modemctl.policy' "$ROOT/uninstall.sh"; then
+    ok "uninstall.sh takes the action away again"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "uninstall.sh leaves the polkit action behind"
+fi
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q 'polkit-1/actions' "$BUILD"; then
+    ok "the package ships it where polkit reads"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "the package does not ship the polkit action"
+fi
+
 # --- the bus policy ---------------------------------------------------------
 #
 # This grants a capability, so what it does NOT grant is as much the point as

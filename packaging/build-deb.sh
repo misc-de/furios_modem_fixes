@@ -58,6 +58,12 @@ install -Dm644 systemd/furios-mobile-context.service \
     "$STAGE/usr/lib/systemd/system/furios-mobile-context.service"
 install -Dm644 apt/99furios-modem-fixes \
     "$STAGE/etc/apt/apt.conf.d/99furios-modem-fixes"
+# Straight into place, not under /usr/share/furios-modem: polkit reads its
+# actions from this directory only, and the file describes what the package's
+# own /usr/bin/modemctl is allowed to do - so it belongs to the package and
+# goes away with it.
+install -Dm644 polkit/de.misc-de.modemctl.policy \
+    "$STAGE/usr/share/polkit-1/actions/de.misc-de.modemctl.policy"
 
 install -Dm644 README.md   "$STAGE/usr/share/doc/$PKG/README.md"
 install -Dm644 FINDINGS.md "$STAGE/usr/share/doc/$PKG/FINDINGS.md"

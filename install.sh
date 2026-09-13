@@ -46,6 +46,13 @@ sed "s|^ExecStart=/usr/bin/furios-mobile-context|ExecStart=$BIN/furios-mobile-co
     /etc/systemd/system/furios-mobile-context.service >/dev/null
 sudo chmod 644 /etc/systemd/system/furios-mobile-context.service
 
+# The polkit action names the binary it is allowed to run, so it has to name
+# THIS one. A policy pointing at /usr/bin while the app starts /usr/local/bin
+# does not fail loudly - pkexec just refuses, and the switch looks broken.
+sed "s|>/usr/bin/modemctl<|>$BIN/modemctl<|" polkit/de.misc-de.modemctl.policy \
+    | sudo tee /usr/share/polkit-1/actions/de.misc-de.modemctl.policy >/dev/null
+sudo chmod 644 /usr/share/polkit-1/actions/de.misc-de.modemctl.policy
+
 sudo systemctl daemon-reload
 # enable, not start: applying happens below, with output you can read.
 sudo systemctl enable furios-modem-fixes.service >/dev/null

@@ -29,7 +29,8 @@ sudo rm -f /etc/systemd/system/furios-modem-fixes.service \
            /usr/local/bin/modemctl \
            /usr/local/bin/furios-modem-signal \
            /usr/local/bin/furios-mobile-route \
-           /usr/local/bin/furios-mobile-context
+           /usr/local/bin/furios-mobile-context \
+           /usr/share/polkit-1/actions/de.misc-de.modemctl.policy
 sudo rm -rf /usr/local/share/furios-modem
 sudo systemctl daemon-reload
 

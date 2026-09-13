@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
+
+<!-- Lets the switch in the app do what "sudo modemctl" does from a terminal.
+
+     allow_active is "yes", so the person at the phone is not asked for a
+     password. That is a decision, not an oversight, and it rests on two
+     things.
+
+     The first is that there is nobody to ask. Phosh registers no polkit
+     authentication agent, so an action set to auth_admin has no way to put a
+     prompt on the screen: pkexec would simply fail, and the switch would be a
+     button that does nothing. The audio switcher in the sibling project used
+     to carry its own agent for exactly this reason, and was glad to be rid of
+     it once audioctl no longer needed root. modemctl cannot follow it - it
+     patches files under /usr/lib and writes /etc - so the choice is between
+     this and no switch.
+
+     The second is that it grants nothing that is not already granted.
+     ofono2mm ships a bus policy handing group "radio" - which on this phone is
+     the one human account - the whole ModemManager1.Modem interface, raw AT
+     commands included, with no polkit check anywhere. A switch between the
+     shipped state and the repaired one is a smaller capability than that by a
+     wide margin.
+
+     What keeps it from being a general-purpose root tool is in modemctl
+     itself: as root it refuses every MODEMCTL_* override outright, so this
+     cannot be pointed at an arbitrary file. That guard was written for the
+     "sudo modemctl" case and covers this one unchanged.
+
+     Not allow_any and not allow_inactive: a remote session or a switched-away
+     seat has no business changing what the modem is doing. -->
+<policyconfig>
+  <vendor>misc-de</vendor>
+  <vendor_url>https://github.com/misc-de/furios_modem_fixes</vendor_url>
+
+  <action id="de.misc-de.modemctl.switch">
+    <description>Switch the modem between the shipped state and the repairs</description>
+    <description xml:lang="de">Modem zwischen Auslieferungszustand und Reparaturen umschalten</description>
+    <message>Changing the modem configuration</message>
+    <message xml:lang="de">Die Modem-Konfiguration wird geändert</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/modemctl</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
