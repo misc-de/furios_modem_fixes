@@ -1,18 +1,23 @@
 # furios_modem_fixes
 
-Twelve defects in the FuriOS modem stack, and a way to keep them fixed.
+Thirteen defects in the FuriOS modem stack, and a way to keep them fixed.
 
 Out of the box on this phone the data connection often only came up after a
 reboot, the signal icon sat at the emptiest bar regardless of reception, and
 mobile data never carried a single packet of anybody's traffic. None of it was
 a radio problem. Seven of the causes are in `ofono2mm`, one is in oFono's binder
-configuration, one is in oFono itself, and one is in how FuriOS wires up DNS.
+configuration, one is in oFono itself, one is in how FuriOS wires up DNS, and
+one is in ModemManager's own bus policy.
 
-The last two are different in kind from the rest: nothing gets patched. Number
+Three are different in kind from the rest: nothing gets patched. Number
 7 is about what oFono *says* about the data call, and the fix is to install the
 route that claim prevents. Number 8 is a resolver that is filled correctly and
 asked by nobody. Together they are why switching Wi-Fi off left this phone with
-no network at all.
+no network at all. Number 13 is a permission that was never written down:
+ModemManager grew a Cell Broadcast interface and a polkit action to guard it,
+but no rule in its bus policy, so the bus turns the call away before polkit is
+ever asked - and the channels a phone must listen on to receive a public
+emergency alert stay at whatever the modem happened to default to.
 
 The fixes live in files owned by the `ofono2mm` package, so **every update of
 that package removes them**. That is the entire reason this repository is more
@@ -69,7 +74,7 @@ identify the tower you are on, which places you within a kilometre or so. The
 signal levels do not. Nothing is stored or sent - it prints and exits - but a
 bug report is a public place.
 
-## The twelve defects
+## The thirteen defects
 
 | # | What | Where | Symptom |
 |---|---|---|---|
@@ -85,6 +90,7 @@ bug report is a public place.
 | 10 | Interfaces are appended to the modem's port list and never removed | `mm_modem.py`, `mm_bearer.py` | NM binds the resolver to a dead interface; every lookup REFUSED with Wi-Fi off |
 | 11 | An oFono interface asked for before oFono has it is never asked again | `mm_modem.py` | `CurrentCapabilities` pinned to LTE alone and `SupportedModes` **empty**, for the whole uptime |
 | 12 | SIM and bearer objects announced through the ObjectManager, which ModemManager reserves for modems | `main.py` | phosh grabs a bearer, finds no modem on it and shows **no signal icon at all** |
+| 13 | ModemManager's bus policy has no rule for the CellBroadcast interface it gained in 1.24 | `/etc/dbus-1/system.d` | the system bus rejects `SetChannels`, so **emergency alert channels never reach the modem** |
 
 Numbers behind each of these, and why they are what they are, in
 [FINDINGS.md](FINDINGS.md).
@@ -127,7 +133,7 @@ than no patch:
     FAIL  mm_modem_signal.py: patch does not fit (upstream moved)
           ready-made file in /usr/share/furios-modem/patched-files/... - check by hand
 
-Two of the twelve are already fixed or half-fixed upstream, so this is expected to
+Three of the thirteen are already fixed or half-fixed upstream, so this is expected to
 happen eventually.
 
 The same message used to appear for a much less interesting reason: **a patch
@@ -180,6 +186,7 @@ the device, with a SIM in it.
     patched-files/       the finished files - the rescue path when a patch stops fitting
     original-files/      untouched originals from the package, for the tests
     networkmanager/      the DNS drop-in that takes resolvconf out of the path
+    dbus/                the bus policy that lets emergency alert channels be set
     systemd/, apt/       the two things that survive a package update
     upstream/            bug reports, ready to file
     tests/               what can be checked without a radio

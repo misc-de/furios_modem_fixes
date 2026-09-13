@@ -15,7 +15,8 @@ set -u
 VERSION=0.1.0
 if [ "$(id -u)" -eq 0 ]; then
     for v in MODEMCTL_TARGET MODEMCTL_RADIO_CONF MODEMCTL_SHARE MODEMCTL_PATCHES \
-             MODEMCTL_NM_CONF_D MODEMCTL_RESOLV MODEMCTL_NM_RESOLV; do
+             MODEMCTL_NM_CONF_D MODEMCTL_RESOLV MODEMCTL_NM_RESOLV \
+             MODEMCTL_DBUS_CONF_D; do
         if [ -n "${!v:-}" ]; then
             echo "refusing to honour $v as root - that would be an arbitrary-file patch" >&2
             exit 3
@@ -44,6 +45,17 @@ NM_CONF_D=${MODEMCTL_NM_CONF_D:-/etc/NetworkManager/conf.d}
 RESOLV=${MODEMCTL_RESOLV:-/etc/resolv.conf}
 DNS_DROPIN=99-furios-modem-resolvconf.conf
 NM_RESOLV=${MODEMCTL_NM_RESOLV:-/run/NetworkManager/resolv.conf}
+
+# Defect 13. ModemManager 1.24 added the CellBroadcast interface and a polkit
+# action to guard it, but never an <allow> in its bus policy - so the <deny>
+# at the top of that policy rejects every call before polkit is asked, and
+# cellbroadcastd cannot hand the emergency alert channel list to the modem.
+# Fixed upstream since, not in the 1.24.2 shipped here. Not an ofono2mm file,
+# so a package update does not wipe it; it is here because nothing else on
+# the phone will ever put it back.
+DBUS_CONF_D=${MODEMCTL_DBUS_CONF_D:-/etc/dbus-1/system.d}
+CB_DROPIN=furios-modem-cellbroadcast.conf
+CB_IFACE=org.freedesktop.ModemManager1.Modem.CellBroadcast
 
 # Next to this script when run straight from the work tree; otherwise
 # wherever it was installed. /usr/local first: install.sh puts it there, the
@@ -130,6 +142,21 @@ resolvconf_state() {
     [ -f "$dropin" ] && grep -q '^rc-manager *= *symlink' "$dropin" || { echo missing; return; }
     # -f, so an absolute and a relative symlink to the same file both count.
     [ "$(readlink -f "$RESOLV" 2>/dev/null)" = "$NM_RESOLV" ] && echo applied || echo missing
+}
+
+#   applied / covered / missing / absent
+# "covered" is the day this stops being ours: a ModemManager update that grows
+# the allow itself. Then the drop-in is dead weight and revert should take it.
+cellbroadcast_state() {
+    [ -d "$DBUS_CONF_D" ] || { echo absent; return; }
+    if [ -f "$DBUS_CONF_D/$CB_DROPIN" ] && grep -q "$CB_IFACE" "$DBUS_CONF_D/$CB_DROPIN"; then
+        echo applied; return
+    fi
+    if grep -rl "$CB_IFACE" /usr/share/dbus-1/system.d "$DBUS_CONF_D" 2>/dev/null \
+        | grep -qv "/$CB_DROPIN\$"; then
+        echo covered; return
+    fi
+    echo missing
 }
 
 # Every apply after a package update leaves another set of backups behind.
@@ -290,6 +317,47 @@ $RADIO_CONF.bak.$ts)"
             fi ;;
     esac
 
+    head_ "cell broadcast"
+    case "$(cellbroadcast_state)" in
+        applied)
+            # Existing but not identical: a correction to the policy would
+            # otherwise never reach a phone that already has an older copy,
+            # because "is it there" and "is it right" are different questions.
+            if [ -f "$SHARE/dbus/$CB_DROPIN" ] \
+               && ! cmp -s "$SHARE/dbus/$CB_DROPIN" "$DBUS_CONF_D/$CB_DROPIN"; then
+                if install -m644 "$SHARE/dbus/$CB_DROPIN" "$DBUS_CONF_D/$CB_DROPIN"; then
+                    systemctl reload dbus >/dev/null 2>&1 || true
+                    ok "cell broadcast policy updated"
+                else
+                    bad "could not update $DBUS_CONF_D/$CB_DROPIN"
+                    failed=1
+                fi
+            else
+                skip "cell broadcast channels already reachable"
+            fi ;;
+        covered) skip "ModemManager's own policy allows $CB_IFACE now" ;;
+        absent)  skip "$DBUS_CONF_D not found - no system bus?" ;;
+        missing)
+            if [ ! -f "$SHARE/dbus/$CB_DROPIN" ]; then
+                bad "$CB_DROPIN not found in $SHARE/dbus"
+                failed=1
+            elif install -m644 "$SHARE/dbus/$CB_DROPIN" "$DBUS_CONF_D/$CB_DROPIN" \
+                 && [ "$(cellbroadcast_state)" = applied ]; then
+                # A reload, never a restart: restarting the system bus takes
+                # every service on it down with it. dbus re-reads system.d on
+                # SIGHUP and the new rule is live immediately.
+                if systemctl reload dbus >/dev/null 2>&1; then
+                    ok "cell broadcast channel list reachable for group radio"
+                else
+                    ok "$CB_DROPIN installed"
+                    say "      (applies at the next dbus reload or boot)"
+                fi
+            else
+                bad "could not write $DBUS_CONF_D/$CB_DROPIN"
+                failed=1
+            fi ;;
+    esac
+
     # Stale bytecode is not cosmetic: Python will happily run a .pyc from
     # before the patch if its timestamp still looks newer.
     [ "$changed" -eq 1 ] && rm -rf "$TARGET/__pycache__"
@@ -379,6 +447,17 @@ cmd_revert() {
         skip "resolv.conf is not ours to revert"
     fi
 
+    head_ "cell broadcast"
+    if [ -f "$DBUS_CONF_D/$CB_DROPIN" ]; then
+        rm -f "$DBUS_CONF_D/$CB_DROPIN"
+        systemctl reload dbus >/dev/null 2>&1 || true
+        ok "$CB_DROPIN removed"
+        warn "with this undone, emergency alert channels stay at whatever the"
+        warn "modem happened to have - cellbroadcastd cannot set them"
+    else
+        skip "no cell broadcast drop-in of ours to remove"
+    fi
+
     say ""
     say "Shipped state restored. Takes effect after:"
     say "    systemctl restart ModemManager"
@@ -462,6 +541,29 @@ and no 5G"; bad_count=$((bad_count+1)) ;;
         missing)
             bad "resolv.conf does not point at NetworkManager's resolver"
             bad "     with Wi-Fi off, routing works and no name resolves"
+            bad_count=$((bad_count+1)) ;;
+    esac
+
+    # Reported as the channel count, not as "the file is there": the file is
+    # only the permission. What matters is whether the list actually reached
+    # the modem, and that is a question for oFono.
+    case "$(cellbroadcast_state)" in
+        applied|covered)
+            local topics
+            topics=$(timeout 5 dbus-send --system --print-reply --dest=org.ofono \
+                /ril_0 org.ofono.CellBroadcast.GetProperties 2>/dev/null \
+                | grep -A1 '"Topics"' | sed -n 's/.*variant *string "\(.*\)".*/\1/p' | head -1)
+            if [ -z "$topics" ]; then
+                warn "cell broadcast policy in place, but oFono reports no channels"
+            else
+                local n
+                n=$(awk -F, '{t=0; for(i=1;i<=NF;i++){ if(split($i,r,"-")==2) t+=r[2]-r[1]+1; else t++ } print t}' <<<"$topics")
+                ok "cell broadcast: $n emergency channels set"
+            fi ;;
+        absent) skip "no $DBUS_CONF_D - cannot check cell broadcast" ;;
+        missing)
+            bad "cell broadcast channels cannot be set (bus policy denies it)"
+            bad "     emergency alerts stay on whatever the modem defaulted to"
             bad_count=$((bad_count+1)) ;;
     esac
 

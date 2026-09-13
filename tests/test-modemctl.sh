@@ -40,8 +40,24 @@ case "$*" in
   *)                echo "ipv6.method:disabled" ;;
 esac
 STUB
+# modemctl reloads the system bus when it installs the cell broadcast policy.
+# A test suite must not do that to the machine it runs on - and a reload that
+# really happened would hide a drop-in written to the wrong place.
+cat > "$STUBDIR/systemctl" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
 chmod +x "$STUBDIR"/*
 PATH="$STUBDIR:$PATH"; export PATH
+
+# Every modemctl call below is aimed at a directory this test owns, including
+# the ones that do not name it: without this, apply would write its bus policy
+# into the real /etc/dbus-1/system.d.
+DBUSD="$WORK/dbus-1-system.d"; mkdir -p "$DBUSD"
+export MODEMCTL_DBUS_CONF_D="$DBUSD"
+# The baseline is a healthy phone, the same way the checks above assume a
+# healthy oFono. The missing case is exercised on purpose further down.
+install -m644 "$ROOT/dbus/furios-modem-cellbroadcast.conf" "$DBUSD/"
 
 RADIO="$WORK/radio-interface-binder.conf"
 TREE="$WORK/usr/lib/ofono2mm/ofono2mm"
@@ -353,6 +369,7 @@ sandbox() {
     env MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
         MODEMCTL_NM_CONF_D="$NMD" MODEMCTL_RESOLV="$RC" \
         MODEMCTL_NM_RESOLV="$NMRESOLV" MODEMCTL_SHARE="$ROOT" \
+        MODEMCTL_DBUS_CONF_D="$DBUSD" \
         "$@"
 }
 
@@ -407,5 +424,101 @@ sandbox MODEMCTL_PATCHES="$OLDP" bash "$ROOT/modemctl" revert --quiet >/dev/null
 # package ships.
 check "a full revert leaves radioInterface at the shipped value" \
     "radioInterface = 1.4" "$(cat "$RADIO")"
+
+# ---------------------------------------------------------------------------
+# Defect 13: the bus policy that decides whether emergency alert channels can
+# be set at all.
+#
+# The interesting part is not "is the file there". It is that a missing policy
+# is INVISIBLE: the modem stays registered, data flows, mmcli is green, and
+# the only sign is one rejected message in the journal at boot. So status has
+# to call it a fault, and apply has to be able to put it right without being
+# told twice.
+
+cb_state() {
+    local out
+    out=$(sandbox bash "$ROOT/modemctl" status 2>&1)
+    case "$out" in
+        *"emergency channels set"*)              echo applied ;;
+        *"oFono reports no channels"*)           echo applied-noreply ;;
+        *"bus policy denies it"*)                echo missing ;;
+        *"cannot check cell broadcast"*)         echo absent ;;
+        *)                                       echo unknown ;;
+    esac
+}
+
+reset_tree patched 1.4
+rm -f "$DBUSD/furios-modem-cellbroadcast.conf"
+check "a phone without the policy is not called healthy" missing "$(cb_state)"
+
+sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+TESTS_RUN=$((TESTS_RUN + 1))
+if [ -f "$DBUSD/furios-modem-cellbroadcast.conf" ]; then
+    ok "apply installs the bus policy"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "apply did not install the bus policy"
+fi
+
+# The stubbed dbus-send answers oFono's GetProperties without Topics, which is
+# exactly the case where the policy is in place but nothing reached the modem.
+# That must read as a warning, not as success.
+check "policy without channels is not reported as done" applied-noreply "$(cb_state)"
+
+# Idempotent, because a boot unit and an apt hook run this on every boot and
+# every package operation.
+out=$(sandbox bash "$ROOT/modemctl" apply --no-restart 2>&1)
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out" | grep -q "already reachable"; then
+    ok "a second apply leaves the policy alone"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "second apply touched the policy again" "$out"
+fi
+
+# The day ModemManager grows the allow itself, this drop-in stops being ours.
+OTHERD="$WORK/other-system.d"; mkdir -p "$OTHERD"
+rm -f "$DBUSD/furios-modem-cellbroadcast.conf"
+cat > "$DBUSD/zz-upstream-test.conf" <<'POLICY'
+<busconfig><policy context="default">
+  <allow send_destination="org.freedesktop.ModemManager1"
+         send_interface="org.freedesktop.ModemManager1.Modem.CellBroadcast"/>
+</policy></busconfig>
+POLICY
+out=$(sandbox bash "$ROOT/modemctl" apply --no-restart 2>&1)
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out" | grep -q "own policy allows"; then
+    ok "an upstream allow makes apply stand back"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "apply added a drop-in that is not needed" "$out"
+fi
+TESTS_RUN=$((TESTS_RUN + 1))
+if [ ! -f "$DBUSD/furios-modem-cellbroadcast.conf" ]; then
+    ok "and writes no drop-in of its own"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "apply wrote a drop-in anyway"
+fi
+rm -f "$DBUSD/zz-upstream-test.conf"
+
+# A policy of ours that changed must actually reach a phone that already has
+# the old one - "the file is there" and "the file is right" are not the same
+# question, and the DNS drop-in above answers only the first.
+sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+printf '<!-- stale -->\n' >> "$DBUSD/furios-modem-cellbroadcast.conf"
+out=$(sandbox bash "$ROOT/modemctl" apply --no-restart 2>&1)
+TESTS_RUN=$((TESTS_RUN + 1))
+if cmp -s "$ROOT/dbus/furios-modem-cellbroadcast.conf" "$DBUSD/furios-modem-cellbroadcast.conf"; then
+    ok "apply replaces an outdated policy"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "apply left the outdated policy in place" "$out"
+fi
+
+# revert takes back only what is ours.
+sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+sandbox bash "$ROOT/modemctl" revert --quiet >/dev/null 2>&1
+TESTS_RUN=$((TESTS_RUN + 1))
+if [ ! -f "$DBUSD/furios-modem-cellbroadcast.conf" ]; then
+    ok "revert removes the bus policy"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "revert left the bus policy behind"
+fi
 
 summary

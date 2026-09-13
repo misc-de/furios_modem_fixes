@@ -90,6 +90,21 @@ else
     done
 fi
 
+# A bus policy is not like the other config files here: it is read by the
+# system bus itself, and malformed XML in system.d is a complaint at boot in a
+# file nobody thinks to look at. Cheap to check, so it gets checked.
+printf '\n\033[1m== bus policy parses\033[0m\n'
+for f in "$ROOT"/dbus/*.conf; do
+    [ -f "$f" ] || continue
+    if err=$(python3 -c 'import sys,xml.etree.ElementTree as E; E.parse(sys.argv[1])' "$f" 2>&1); then
+        printf '  \033[32mok\033[0m   %s\n' "$(basename "$f")"
+    else
+        printf '  \033[31mFAIL\033[0m %s\n' "$(basename "$f")"
+        printf '       %s\n' "$err"
+        FAILED=$((FAILED + 1))
+    fi
+done
+
 printf '\n'
 if [ "$FAILED" -eq 0 ]; then
     printf '\033[32mall suites passed\033[0m\n'

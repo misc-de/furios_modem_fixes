@@ -20,8 +20,9 @@ sudo install -Dm755 tools/furios-mobile-route "$SHARE/tools/furios-mobile-route"
 sudo install -Dm755 tools/furios-mobile-context "$BIN/furios-mobile-context"
 sudo install -Dm755 tools/furios-mobile-context "$SHARE/tools/furios-mobile-context"
 
-sudo mkdir -p "$SHARE/patches" "$SHARE/patched-files" "$SHARE/networkmanager"
+sudo mkdir -p "$SHARE/patches" "$SHARE/patched-files" "$SHARE/networkmanager" "$SHARE/dbus"
 sudo install -m644 networkmanager/*.conf "$SHARE/networkmanager/"
+sudo install -m644 dbus/*.conf            "$SHARE/dbus/"
 sudo install -m644 patches/*.patch    "$SHARE/patches/"
 # The ready-made files are the rescue path for the day a patch stops fitting.
 # -type f: a stray __pycache__ from a test run must not take the install down.

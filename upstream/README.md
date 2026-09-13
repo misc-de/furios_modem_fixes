@@ -18,6 +18,16 @@ gegen die installierte Version:
 
 ## Nicht gemeldet, weil upstream bereits behoben
 
+**Die fehlende Bus-Policy für Cell Broadcast** (Fehler 13) ist upstream
+erledigt: `data/org.freedesktop.ModemManager1.conf.polkit` hat auf `main` drei
+Regeln für `Modem.CellBroadcast` (`List` für alle, `Delete` und `SetChannels`
+hinter polkit). Im Tag `1.24.2` — der hier installierten Version — kommt
+`CellBroadcast` in der Datei **gar nicht vor**. Also nichts zu melden, sondern
+etwas, das ein ModemManager-Update von selbst mitbringt. Unser Drop-in in
+`../dbus/` ist bewusst enger gefasst als die Upstream-Regeln, weil die auf eine
+polkit-Prüfung bauen, die ofono2mm nicht macht; `modemctl status` erkennt den
+Tag, an dem er überflüssig wird, und `revert` nimmt ihn dann weg.
+
 Die fehlende Netzmaske in `Ip4Config` (→ NetworkManager konfigurierte die
 Adresse als `/0`) ist upstream erledigt: `utils.py` hat inzwischen
 `netmask_to_prefix()`, verwendet in `mm_modem.py` und `mm_bearer.py`. Der

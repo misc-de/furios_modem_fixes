@@ -45,6 +45,11 @@ done
 
 install -Dm644 networkmanager/99-furios-modem-resolvconf.conf \
     "$STAGE/usr/share/furios-modem/networkmanager/99-furios-modem-resolvconf.conf"
+# Shipped as a template under /usr/share and put in place by apply, not
+# installed straight into /etc/dbus-1/system.d: revert has to be able to take
+# it away again, and dpkg would keep putting a conffile back.
+install -Dm644 dbus/furios-modem-cellbroadcast.conf \
+    "$STAGE/usr/share/furios-modem/dbus/furios-modem-cellbroadcast.conf"
 install -Dm644 systemd/furios-modem-fixes.service \
     "$STAGE/usr/lib/systemd/system/furios-modem-fixes.service"
 install -Dm644 systemd/furios-mobile-route.service \

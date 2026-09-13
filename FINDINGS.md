@@ -1234,6 +1234,98 @@ the change if its timestamp still looks newer. `modemctl apply` removes it.
 
 ---
 
+## 13. Emergency alerts the phone is not allowed to subscribe to
+
+The whole defect is one line in the journal at boot, in a file nobody opens:
+
+```
+dbus-daemon[980]: [system] Rejected send message, 2 matched rules;
+  type="method_call", sender=":1.27" (uid=32011 comm="/usr/libexec/cellbroadcastd")
+  interface="org.freedesktop.ModemManager1.Modem.CellBroadcast" member="SetChannels"
+  error name="(unset)" destination=":1.19" (uid=0 comm="... ofono2mm")
+cellbroadcastd: Failed to set channel list in '/org/freedesktop/ModemManager1/Modem/0':
+  GDBus.Error:org.freedesktop.DBus.Error.AccessDenied
+```
+
+Nothing else shows it. The modem is registered, data flows, `mmcli` is green,
+`modemctl status` was green, and the phone would simply have stayed quiet
+through a public warning.
+
+### Why the call is refused
+
+`/usr/share/dbus-1/system.d/org.freedesktop.ModemManager1.conf` opens with
+
+```xml
+<deny send_destination="org.freedesktop.ModemManager1" send_type="method_call"/>
+```
+
+and then lists, interface by interface and member by member, what is allowed
+anyway. ModemManager 1.24 added the `Modem.CellBroadcast` interface **and** a
+polkit action to guard it (`org.freedesktop.ModemManager1.CellBroadcast`,
+`allow_active=yes`) - but no rule in this file. The bus therefore turns the
+call away before polkit is ever asked. The polkit action is real, reachable
+and never consulted.
+
+Checked against upstream: `data/org.freedesktop.ModemManager1.conf.polkit` at
+tag `1.24.2` contains **no** mention of CellBroadcast; on `main` it carries
+three rules - `List` for everyone, `Delete` and `SetChannels` behind polkit.
+So this is a gap in the shipped version, closed upstream since.
+
+Two policy files of that name exist on this phone, and only the layout saves
+us: ofono2mm ships its own in `/etc/dbus-1/system.d`, which takes precedence
+over a file of the same name in `/usr/share`. It is 373 bytes and grants group
+`radio` the `Modem` interface. Had it been a fuller copy, it would have
+replaced ModemManager's entire policy, and far more than cell broadcast would
+have been dead.
+
+### What it costs
+
+oFono's own channel list, before the fix:
+
+```
+Topics: 4370,4372,4378,4383,4385,4391,4396-4397     8 channels
+```
+
+What cellbroadcastd wanted to set, from `serviceproviders.xml` for this
+country:
+
+```
+Topics: 919,4370-4371,4373-4392,4396-4397          25 channels
+```
+
+Eight channels against twenty-five. The gaps are not decoration: 4371-4392 is
+where the graded public warnings live.
+
+### The fix
+
+Not a patch - a drop-in of our own, `dbus/furios-modem-cellbroadcast.conf`,
+installed by `modemctl apply` and removed by `revert`. Deliberately **narrower
+than upstream's**: upstream grants the methods in `context="default"` because
+ModemManager checks polkit afterwards, and ofono2mm checks polkit nowhere at
+all. Copying it verbatim would put the emergency channel list in reach of
+every local account. It goes to group `radio` instead - the group that already
+owns the modem here, and the group cellbroadcastd runs in.
+
+`modemctl status` reports the channel count rather than the file, because the
+file is only the permission:
+
+```
+  ok    cell broadcast: 25 emergency channels set
+```
+
+### Measured
+
+13.9., after `systemctl reload dbus` and a restart of cellbroadcastd: no
+rejection in the journal, `Channels` on ModemManager and `Topics` on oFono
+both at the 25-channel list, `modemctl status` green.
+
+**One channel was lost**: 4372 was in the modem's old list and is not in
+`serviceproviders.xml` for `de`, while 4371 and 4373-4378 are. That looks like
+a gap in the database rather than a decision - 4371 and 4372 are a pair. Net
+effect is +18 channels and -1.
+
+---
+
 ## 5G
 
 Not a defect of its own, but the question defect 1 leaves behind: can this
