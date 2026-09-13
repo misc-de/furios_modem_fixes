@@ -86,10 +86,26 @@ case "$*" in
       [ -n "$ROUTE_IFACE" ] && echo "default dev $ROUTE_IFACE scope link metric 1050"
       [ -n "$VIA_GW" ] && [ -n "$ADDR_IFACE" ] &&
           echo "default via $VIA_GW dev $ADDR_IFACE proto static metric 1050" ;;
+  # The netlink stream the daemon blocks on. A burst first, then the stream is
+  # held open for a while and closes - which is how the real one ends when
+  # something takes netlink away.
+  "monitor address route link")
+      i=0
+      while [ "$i" -lt "${MONITOR_BURST:-0}" ]; do
+          echo "5: $ADDR_IFACE    inet 10.10.95.220/24 scope global $ADDR_IFACE"
+          i=$((i + 1))
+      done
+      [ "${MONITOR_HOLD:-0}" != 0 ] && sleep "$MONITOR_HOLD" ;;
 esac
 exit 0
 STUB
 chmod +x "$STUBDIR/ip"
+
+# Appended to the scenario, so the stub picks them up like everything else.
+monitor_emits() {
+    # monitor_emits <burst lines> <seconds to hold the stream open afterwards>
+    printf 'MONITOR_BURST=%s\nMONITOR_HOLD=%s\n' "$1" "$2" >> "$STUBDIR/scenario"
+}
 
 run_tool() {
     rm -f "$STUBDIR/ip.args"
@@ -207,5 +223,38 @@ iface=$(PATH="$STUBDIR:$PATH" bash "$TOOL" --iface 2>/dev/null)
 check "--iface says nothing when there is no mobile data" "" "$iface"
 # The stale route is left alone: a question must not change the answer.
 check "--iface does not clean up either" "" "$(writes)"
+
+printf '\n\033[1m== the loop the service actually runs\033[0m\n'
+
+# Everything above runs a single pass. This is the other half - the loop the
+# unit starts and never stops - and the two ways it can go wrong while looking
+# perfectly healthy from outside.
+
+# ip monitor gone: netlink was taken away, or it never started. The tool has to
+# leave, and leave non-zero, because Restart= is the only thing that will give
+# the phone a working watcher back. The alternative is the shape that cost the
+# context supervisor 74 dbus-send calls a second: a read that returns at once
+# being treated as "something happened, look again".
+scenario "default:yes:ccmni0" ccmni0 ccmni0
+rm -f "$STUBDIR/ip.args"
+PATH="$STUBDIR:$PATH" timeout 3 bash "$TOOL" --quiet >/dev/null 2>&1
+loop_rc=$?
+check "it leaves when ip monitor is gone instead of spinning" yes \
+      "$([ "$loop_rc" -ne 124 ] && echo yes || echo "no - still running after 3 s")"
+check "and leaves non-zero, so the service is restarted" yes \
+      "$([ "$loop_rc" -ne 0 ] && [ "$loop_rc" -ne 124 ] && echo yes || echo "no - exit $loop_rc")"
+
+# A bearer coming up is a burst of a dozen netlink events at once, and every
+# one of them would otherwise mean three mmcli calls. The tool swallows
+# whatever lands inside the settling window and looks once. Counted in writes
+# because the stub has no memory: every look at a missing route writes one, so
+# the number of writes IS the number of looks.
+scenario "default:yes:ccmni0" ccmni0 ""
+monitor_emits 20 2
+rm -f "$STUBDIR/ip.args"
+PATH="$STUBDIR:$PATH" timeout 5 bash "$TOOL" --quiet >/dev/null 2>&1
+looks=$(grep -c '^route replace' "$STUBDIR/ip.args" 2>/dev/null)
+# One for the pass before the loop, one for the whole burst.
+check "a burst of twenty events is one look, not twenty" 2 "${looks:-0}"
 
 summary

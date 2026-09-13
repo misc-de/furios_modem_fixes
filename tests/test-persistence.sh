@@ -265,6 +265,88 @@ else
     fail "prerm calls an option modemctl does not have"
 fi
 
+# --- the two watchers -------------------------------------------------------
+#
+# The boot unit above is a one-shot: it either applied the patches or it did
+# not, and modemctl status says which. These two are different in kind - they
+# run for the life of the session, and every way they can quietly stop is a
+# phone that is fine until the day it is not. Both failures are invisible:
+# a watcher that died leaves a phone that works until Wi-Fi goes away, and one
+# that was started but never enabled works until the next reboot.
+for w in furios-mobile-route furios-mobile-context; do
+    unit="$ROOT/systemd/$w.service"
+
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if grep -q '^Restart=always' "$unit"; then
+        ok "$w restarts when it dies"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        fail "$w has no Restart=always" "a watcher that dies stays dead, and nothing says so"
+    fi
+
+    # Fast restarts help nothing here: what these supervise is a radio.
+    sec=$(sed -n 's/^RestartSec=\([0-9]*\).*/\1/p' "$unit")
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ -n "$sec" ] && [ "$sec" -ge 5 ]; then
+        ok "$w waits ${sec}s before restarting"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        fail "$w restarts too eagerly or not deliberately" "RestartSec=[$sec]"
+    fi
+
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if grep -q '^WantedBy=multi-user.target' "$unit"; then
+        ok "$w is wanted at boot"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        fail "$w has no WantedBy" "enable would do nothing and it would be gone after a reboot"
+    fi
+
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if grep -q '^Type=simple' "$unit"; then
+        ok "$w is a long-running service, and says so"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        fail "$w is not Type=simple"
+    fi
+
+    # Deliberately Wants=, never Requires=. With the modem stack switched off
+    # there is nothing to watch, and the right answer is to stay quiet rather
+    # than fail in a loop against a phone that is doing what it was told.
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if ! grep -q '^Requires=' "$unit"; then
+        ok "$w does not fail in a loop when the modem stack is off"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        fail "$w uses Requires=" "with the modem off this would fail over and over"
+    fi
+
+    # The unit has to name a program this repository actually ships, whatever
+    # prefix it is rewritten to at install time.
+    prog=$(sed -n 's|^ExecStart=.*/\([a-z-]*\)$|\1|p' "$unit")
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ -n "$prog" ] && [ -f "$ROOT/tools/$prog" ]; then
+        ok "$w starts $prog, which is in tools/"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        fail "$w starts something this repository does not ship" "ExecStart names [$prog]"
+    fi
+
+    # Both installers have to enable AND start it - a watcher that waits for
+    # the next reboot is a fix that is not in place yet - and both have to hand
+    # a running one the new code, which "enable --now" does not do.
+    for installer in "$ROOT/install.sh" "$ROOT/packaging/build-deb.sh"; do
+        TESTS_RUN=$((TESTS_RUN + 1))
+        if grep -q "enable --now $w" "$installer" && grep -q "try-restart.*$w" "$installer"; then
+            ok "$(basename "$installer") enables, starts and refreshes $w"
+        else
+            TESTS_FAILED=$((TESTS_FAILED + 1))
+            fail "$(basename "$installer") does not fully install $w" \
+                 "needs both 'enable --now' and 'try-restart'"
+        fi
+    done
+done
+
 # --- what the package has to pull in ----------------------------------------
 #
 # Not the packages the patches belong to - those were never in doubt - but the
