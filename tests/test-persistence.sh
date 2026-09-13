@@ -265,6 +265,60 @@ else
     fail "prerm calls an option modemctl does not have"
 fi
 
+# --- the bus policy ---------------------------------------------------------
+#
+# This grants a capability, so what it does NOT grant is as much the point as
+# what it does. Checked against the daemon that needs it rather than against an
+# idea of what it might need: cellbroadcastd's binary carries
+# mm_modem_cell_broadcast_set_channels_sync and mm_modem_cell_broadcast_list
+# and nothing for Delete, so Delete has no business being reachable.
+#
+# It is granted to a group rather than a user because the consumer is a user
+# session service - it runs as whoever is using the phone. That is also why
+# this file cannot be the thing that keeps anybody out: ofono2mm's own drop-in
+# already hands the same group the whole Modem interface. Narrowing here keeps
+# this file out of the problem without pretending to solve it.
+POLICY="$ROOT/dbus/furios-modem-cellbroadcast.conf"
+CB_IF=org.freedesktop.ModemManager1.Modem.CellBroadcast
+
+for m in SetChannels List; do
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if grep -q "send_member=\"$m\"" "$POLICY"; then
+        ok "the policy allows $m, which cellbroadcastd calls"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        fail "the policy does not allow $m" "cellbroadcastd cannot set the alert channels"
+    fi
+done
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if ! grep -q 'send_member="Delete"' "$POLICY"; then
+    ok "and does not allow Delete, which it does not call"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "the policy allows Delete" "nothing on this phone calls it"
+fi
+
+# An <allow> with no send_member is the whole interface, whatever methods a
+# later ModemManager adds to it. That is how this file started.
+TESTS_RUN=$((TESTS_RUN + 1))
+if ! grep -A2 '<allow' "$POLICY" | grep -q "send_interface=\"$CB_IF\"/>"; then
+    ok "no rule grants the interface as a whole"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "a rule grants the whole interface" "every method a future MM adds comes with it"
+fi
+
+# modemctl finds the drop-in by the interface name. Narrowing the rules must
+# not cost it the ability to see its own file.
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q "$CB_IF" "$POLICY"; then
+    ok "modemctl can still recognise the drop-in by interface name"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "the interface name is gone from the policy" "cellbroadcast_state would report it missing"
+fi
+
 # --- the two watchers -------------------------------------------------------
 #
 # The boot unit above is a one-shot: it either applied the patches or it did
