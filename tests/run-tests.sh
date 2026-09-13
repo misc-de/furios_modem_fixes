@@ -24,10 +24,22 @@ run "the patches reproduce what we ship" bash "$HERE/test-patches.sh"
 run "modemctl's judgement"               bash "$HERE/test-modemctl.sh"
 run "signal conversions"                 python3 "$HERE/test-signal.py"
 run "what survives a package update"     bash "$HERE/test-persistence.sh"
+run "the mobile fallback route"          bash "$HERE/test-mobile-route.sh"
+
+# What a file is written in is decided by its shebang, not by the directory it
+# sits in. tools/ held nothing but Python until a shell script moved in there,
+# and sorting by directory then reported it as broken Python.
+is_python() { head -1 "$1" 2>/dev/null | grep -q 'python'; }
 
 printf '\n\033[1m== shell scripts parse\033[0m\n'
-for f in "$ROOT"/*.sh "$ROOT"/modemctl "$ROOT"/tests/*.sh "$ROOT"/packaging/*.sh; do
-    [ -e "$f" ] || continue
+for f in "$ROOT"/*.sh "$ROOT"/modemctl "$ROOT"/tests/*.sh "$ROOT"/packaging/*.sh \
+         "$ROOT"/tools/*; do
+    # -f, not -e: tools/ grows a __pycache__ directory as soon as anything
+    # imports from it.
+    [ -f "$f" ] || continue
+    # Skip only what is actually Python, so a shell file without a shebang
+    # still gets checked here rather than quietly falling through both loops.
+    is_python "$f" && continue
     if bash -n "$f" 2>/dev/null; then
         printf '  \033[32mok\033[0m   %s\n' "${f#$ROOT/}"
     else
@@ -42,6 +54,7 @@ for f in "$ROOT"/tools/* "$ROOT"/tests/*.py; do
     # imports from it, and py_compile on a directory is a failure that means
     # nothing.
     [ -f "$f" ] || continue
+    is_python "$f" || continue
     if python3 -m py_compile "$f" 2>/dev/null; then
         printf '  \033[32mok\033[0m   %s\n' "${f#$ROOT/}"
     else
@@ -55,18 +68,21 @@ printf '\n\033[1m== systemd unit\033[0m\n'
 # Two complaints are expected off the device and are not defects: units this
 # one is merely ordered against may not exist here, and modemctl is not
 # installed until install.sh has run.
-noise='Unit .* not found|Command /usr/bin/modemctl is not executable'
-[ -x /usr/bin/modemctl ] && noise='Unit .* not found'
+noise='Unit .* not found|Command /usr/bin/(modemctl|furios-mobile-route) is not executable'
+[ -x /usr/bin/modemctl ] && [ -x /usr/bin/furios-mobile-route ] && noise='Unit .* not found'
 if ! command -v systemd-analyze >/dev/null 2>&1; then
     printf '  \033[33mskipped\033[0m - systemd-analyze not available\n'
-elif systemd-analyze verify "$ROOT/systemd/furios-modem-fixes.service" 2>&1 \
-     | grep -vE "$noise" | grep -q .; then
-    printf '  \033[31mFAIL\033[0m furios-modem-fixes.service\n'
-    systemd-analyze verify "$ROOT/systemd/furios-modem-fixes.service" 2>&1 \
-        | grep -vE "$noise" | sed 's/^/       /'
-    FAILED=$((FAILED + 1))
 else
-    printf '  \033[32mok\033[0m   furios-modem-fixes.service\n'
+    for u in "$ROOT"/systemd/*.service; do
+        [ -f "$u" ] || continue
+        if systemd-analyze verify "$u" 2>&1 | grep -vE "$noise" | grep -q .; then
+            printf '  \033[31mFAIL\033[0m %s\n' "$(basename "$u")"
+            systemd-analyze verify "$u" 2>&1 | grep -vE "$noise" | sed 's/^/       /'
+            FAILED=$((FAILED + 1))
+        else
+            printf '  \033[32mok\033[0m   %s\n' "$(basename "$u")"
+        fi
+    done
 fi
 
 printf '\n'

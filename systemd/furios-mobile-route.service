@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=Keep a default route on the mobile data interface
+Documentation=file:/usr/share/doc/furios-modem-fixes/README.md
+# After, not Before: there is no bearer to ask about until ModemManager is up.
+# The watcher copes with being started early anyway - it just sits on netlink
+# until the bearer appears - but starting it in the right order keeps the
+# journal honest about what happened when.
+After=ModemManager.service NetworkManager.service
+# Not Requires: on a phone with the modem switched off there is nothing to
+# route and this should stay quiet rather than fail.
+Wants=ModemManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/furios-mobile-route
+# ip monitor should never exit. If it does, something took netlink away and a
+# dead watcher would mean a phone that silently loses its fallback route.
+Restart=always
+RestartSec=5
+
+# Everything this does is one ip-route write and some read-only mmcli calls.
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

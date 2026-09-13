@@ -8,13 +8,15 @@ Device: FuriPhone FLX1 (radon), MediaTek modem `MOLY.NR15.R3.MP.V189`, SIM
 262-23, APN `web.vodafone.de`. Package versions in
 [paket-versionen.txt](paket-versionen.txt).
 
-Two symptoms started this, on different days:
+Three symptoms started this, on different days:
 
 - the data connection would only come up reliably after a reboot, and the UI
   said "mobile data unavailable" in between;
-- the signal icon sat at the emptiest bar no matter where the phone was.
+- the signal icon sat at the emptiest bar no matter where the phone was;
+- switching Wi-Fi off left the phone with no network at all, although mobile
+  data was connected and every component called itself healthy.
 
-Neither was a radio problem. All six causes are in software, and only one of
+None was a radio problem. All eight causes are in software, and only one of
 them is in code anybody here wrote.
 
 ---
@@ -239,6 +241,153 @@ polls it every 30 seconds (every 3 seconds during startup, at most 20 times,
 because the interface is exported long before the SIM is readable). Without
 the fast start the bar sits empty for half a minute after every boot; with it,
 measured 15 seconds from `systemctl restart ModemManager` to a filled bar.
+
+## 7. Mobile data has no default route, so Wi-Fi off means offline
+
+Found on 13 September 2026, and it had been true the whole time. Switching
+Wi-Fi off left the phone with no network at all, while every part of the stack
+reported itself healthy:
+
+```
+GENERAL.STATE:            100 (connected)
+IP4.ADDRESS[1]:           10.13.195.47/8
+IP4.GATEWAY:              --          <- nothing here
+IP4.ROUTE[1]:             dst = 10.0.0.0/8, nh = 0.0.0.0
+IP4-CONNECTIVITY:         3 (limited)
+```
+
+An address, an on-link route to its own subnet, and no way out. The only
+component that says anything is wrong is NetworkManager's `limited`, and
+nothing acts on it.
+
+The cause is one line, three layers down. oFono reports the data call's
+`Gateway` as the interface's **own address**:
+
+```
+Address:  10.13.195.47
+Gateway:  10.13.195.47
+```
+
+That is a MediaTek RIL habit and it is not even wrong in spirit - the link is
+point-to-point and genuinely has no gateway. `mm_bearer.py` passes the value
+through unexamined (it is not ofono2mm's to invent), ModemManager republishes
+it, and NetworkManager refuses to build a default route out of a next hop that
+is the local address. Nobody in the chain is doing anything unreasonable, and
+the result is a phone that cannot reach the internet.
+
+**The link itself was never the problem.** With one route added by hand:
+
+```
+# ip route add default dev ccmni0 metric 1050
+3 packets transmitted, 3 received, 0% packet loss   # 9.9.9.9, 55-293 ms
+dig @61.8.132.52 github.com +short -> 140.82.121.4  # carrier DNS answers
+```
+
+No gateway, no `via`, just an on-link device route - which is exactly what
+Android installs for these interfaces.
+
+### Why a watcher and not a connection profile
+
+The obvious fix is `ipv4.routes` on the cellular profile. It was tried:
+
+```
+nmcli con mod Willkommen +ipv4.routes "0.0.0.0/0 0.0.0.0 1050"
+nmcli dev reapply /ril_0
+```
+
+NetworkManager accepted it, reported success, and **flushed the interface** -
+address gone, nothing put back. Repeating the reapply with the route removed
+did the same, so the route was not the cause: NetworkManager holds no IPv4
+configuration for this device at all. It logs the bearer's settings once at
+connect time and never sees the address that oFono puts on the interface
+afterwards, which is also why the kernel shows a `/8` while ModemManager
+insists on a `/24`. Reapplying makes it write down what it believes, and it
+believes nothing.
+
+So the route is asserted from outside, by `furios-mobile-route`, driven by
+netlink:
+
+- **Which interface** comes from ModemManager's *default* bearer, asked fresh
+  each time. Never a glob over `ccmni*`: the IMS bearer has its own `ccmni`
+  with its own address, and routing the world down the IMS APN would be a far
+  worse bug than the one being fixed.
+- **Metric 1050**, above Wi-Fi's 600. Both defaults sit in the table at once,
+  Wi-Fi wins while it is there, and the mobile one takes over the moment it is
+  not. Nothing switches and nothing reconnects, so a connection in flight
+  survives the changeover.
+- **It checks before it writes.** Every write comes back as a netlink event; a
+  watcher that wrote on every event it saw would be an endless loop.
+- **It removes its own route** when the default bearer goes away. A default
+  route to an interface with nothing behind it is worse than none: traffic
+  leaves and never comes back, instead of failing at once.
+
+Cost: one process blocked on a netlink socket. No timer, no polling, no
+wakeups - which on a phone is the difference between a fix and a new problem.
+
+## 8. The filled resolver nobody asks
+
+The other half of "Wi-Fi off means offline", found the same day and only
+because the route fix made it visible: with routing repaired, packets left the
+phone and not a single name resolved.
+
+FuriOS configures NetworkManager in
+`/usr/share/furios-quirks/xtables-legacy/99-furios-backend.conf`:
+
+```
+[main]
+dns=dnsmasq
+```
+
+which NetworkManager resolves to:
+
+```
+dns-mgr: init: dns=dnsmasq,systemd-resolved rc-manager=resolvconf (auto), plugin=dnsmasq
+```
+
+`rc-manager=resolvconf` means NetworkManager writes `/etc/resolv.conf` by
+calling `/usr/sbin/resolvconf`. On this system that is a symlink to
+`resolvectl`, and NetworkManager calls it with `NetworkManager` as the
+interface name. So every single network change ends in:
+
+```
+resolvconf[65259]: Failed to resolve interface "NetworkManager": No such device
+dns-mgr: could not commit DNS changes: resolvconf failed with status 256
+```
+
+Three resolvers, and the wrong one wins:
+
+| | holds | consulted |
+|---|---|---|
+| NetworkManager's dnsmasq, `127.0.0.1` | Wi-Fi **and** carrier servers, correctly prioritised | never |
+| systemd-resolved stub, `127.0.0.53` | Wi-Fi only | by everything |
+| `resolvconf` | - | fails, every time |
+
+`/etc/resolv.conf` is a symlink to systemd-resolved's stub, and NetworkManager
+is never allowed to replace it with one pointing at the resolver it fills.
+`resolvectl status` tells the story plainly: `wlan0` has `192.168.0.1`, and not
+one `ccmni` link has a DNS server at all. `nsswitch.conf` is
+`hosts: files myhostname dns` - no `resolve` module, so lookups really do hang
+on that one file.
+
+Measured, with Wi-Fi up, against the resolver nobody was asking:
+
+```
+dig @127.0.0.1 github.com +short   ->  140.82.121.4
+```
+
+It was right the whole time.
+
+**Fix:** `rc-manager=symlink` in a drop-in numbered *above* the FuriOS one
+(conf.d is read alphabetically and the later file wins), plus setting the
+symlink once - NetworkManager will not replace a symlink that points somewhere
+else, so that half is ours. `rc-manager` is picked up by
+`systemctl reload NetworkManager`; no restart needed.
+
+`modemctl apply` deliberately does **not** reload NetworkManager. A reload makes
+oFono clear and re-activate the data context, and on a weak cell that comes
+straight back as `Unexpected data call status 65535` and leaves mobile data
+down. The symlink works immediately; the drop-in can wait for the next reload
+or boot.
 
 ---
 
@@ -507,6 +656,11 @@ installed version - see [upstream/](upstream/). The signal report
 (`ofono2mm-4-signal-quality.md`) has not been re-checked against current
 upstream, and its third part belongs to oFono rather than ofono2mm.
 
-Two of the six are already fixed or half-fixed upstream, which matters here:
+Nothing has been filed for numbers 7 and 8 yet. It is not clear which project should
+take it: oFono reporting a gateway it does not have, or NetworkManager having
+no way to express "default route, no next hop" for a point-to-point link that
+Android has handled this way for fifteen years.
+
+Two of the eight are already fixed or half-fixed upstream, which matters here:
 an ofono2mm update brings part of this along by itself and overwrites the rest.
 That is what `modemctl apply` is for.

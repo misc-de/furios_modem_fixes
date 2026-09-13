@@ -1,12 +1,18 @@
 # furios_modem_fixes
 
-Six defects in the FuriOS modem stack, and a way to keep them fixed.
+Eight defects in the FuriOS modem stack, and a way to keep them fixed.
 
 Out of the box on this phone the data connection often only came up after a
-reboot, and the signal icon sat at the emptiest bar regardless of reception.
-Neither was a radio problem. Five of the six causes are in `ofono2mm`, one is
-in oFono's binder configuration, and one of the five is really a bug in oFono
-that only becomes visible through ofono2mm.
+reboot, the signal icon sat at the emptiest bar regardless of reception, and
+mobile data never carried a single packet of anybody's traffic. None of it was
+a radio problem. Five of the causes are in `ofono2mm`, one is in oFono's binder
+configuration, one is in oFono itself, and one is in how FuriOS wires up DNS.
+
+The last two are different in kind from the rest: nothing gets patched. Number
+7 is about what oFono *says* about the data call, and the fix is to install the
+route that claim prevents. Number 8 is a resolver that is filled correctly and
+asked by nobody. Together they are why switching Wi-Fi off left this phone with
+no network at all.
 
 The fixes live in files owned by the `ofono2mm` package, so **every update of
 that package removes them**. That is the entire reason this repository is more
@@ -26,8 +32,10 @@ or build a package:
 
     ./packaging/build-deb.sh --install
 
-Both apply everything immediately and enable the boot unit. Reversible with
-`./uninstall.sh` or `apt remove furios-modem-fixes`.
+Both apply everything immediately and enable the two units - the one that puts
+the patches back after a package update, and the one that keeps a default route
+on mobile data. Reversible with `./uninstall.sh` or
+`apt remove furios-modem-fixes`.
 
 ## modemctl
 
@@ -61,7 +69,7 @@ identify the tower you are on, which places you within a kilometre or so. The
 signal levels do not. Nothing is stored or sent - it prints and exits - but a
 bug report is a public place.
 
-## The six defects
+## The eight defects
 
 | # | What | Where | Symptom |
 |---|---|---|---|
@@ -71,9 +79,19 @@ bug report is a public place.
 | 4 | NM profile asks for IPv6 on an IPv4-only context | `mm_modem_simple.py`, `mm_bearer.py` | `modem IP method unsupported` on every activation |
 | 5 | `active_connect` never cleared on the failure path | `mm_modem_simple.py`, `mm_bearer.py` | NetworkManager waits in `prepare` until you reboot |
 | 6 | No signal strength, and RSRP/RSRQ swapped and unsigned | `mm_modem_signal.py`, `mm_modem.py`, `mm_modem_simple.py` | bar stuck at 0%, `rsrp=+10 dBm` |
+| 7 | Data call's `Gateway` reported as the interface's own address | oFono | no default route on mobile data - Wi-Fi off means offline |
+| 8 | `resolvconf` is a symlink to `resolvectl` and fails on every network change | FuriOS NM config | `/etc/resolv.conf` points at a resolver that only ever learns Wi-Fi's servers |
 
 Numbers behind each of these, and why they are what they are, in
 [FINDINGS.md](FINDINGS.md).
+
+Numbers 7 and 8 are the ones nobody notices, because everything reports itself
+healthy: the modem is registered, the bearer is connected, the interface has an
+address, `mmcli` is happy, and names resolve. There is simply no way out of the
+phone, and no resolver that will answer once Wi-Fi is gone. Both only show the
+moment Wi-Fi goes away. `furios-mobile-route` installs the route and keeps it
+installed, `modemctl apply` fixes the DNS wiring, and `modemctl status` calls
+out either one when it is missing.
 
 ## When a patch stops fitting
 
@@ -84,7 +102,7 @@ than no patch:
     FAIL  mm_modem_signal.py: patch does not fit (upstream moved)
           ready-made file in /usr/share/furios-modem/patched-files/... - check by hand
 
-Two of the six are already fixed or half-fixed upstream, so this is expected to
+Two of the eight are already fixed or half-fixed upstream, so this is expected to
 happen eventually.
 
 ## Root, cost, and what is checked
@@ -105,8 +123,10 @@ and the apt hook run, takes 41 ms. Numbers and method in
 
 What can be decided at a desk: that every patch reproduces the file we ship,
 byte for byte, and reverts cleanly; that the signal conversions turn real
-readings taken off this phone into the right numbers; and that `modemctl`
-recognises a file it must not touch.
+readings taken off this phone into the right numbers; that `modemctl`
+recognises a file it must not touch; that the route watcher picks the default
+bearer rather than the IMS one, and writes nothing when there is nothing to
+write; and that half a DNS fix is never reported as a whole one.
 
 What cannot: whether the bar on the screen moves. That is `modemctl check`, on
 the device, with a SIM in it.
@@ -114,10 +134,11 @@ the device, with a SIM in it.
 ## Layout
 
     modemctl             the tool
-    tools/               the honest signal readout
+    tools/               the honest signal readout, and the mobile route watcher
     patches/             the fixes, as unified diffs
     patched-files/       the finished files - the rescue path when a patch stops fitting
     original-files/      untouched originals from the package, for the tests
+    networkmanager/      the DNS drop-in that takes resolvconf out of the path
     systemd/, apt/       the two things that survive a package update
     upstream/            bug reports, ready to file
     tests/               what can be checked without a radio

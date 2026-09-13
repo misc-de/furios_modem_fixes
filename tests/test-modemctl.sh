@@ -262,4 +262,48 @@ out=$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
       bash "$ROOT/modemctl" status --quiet 2>/dev/null)
 check "quiet status on a healthy tree says nothing" "" "$out"
 
+# --- the DNS half of defect 7 -----------------------------------------------
+#
+# Both halves have to be there before this counts as fixed. The drop-in alone
+# changes nothing that anybody resolves through, and the symlink alone gets
+# undone by the next thing that calls the broken resolvconf. A check that said
+# "applied" for half of it would be worse than no check.
+NMD="$WORK/nm-conf.d"; mkdir -p "$NMD"
+NMRESOLV="$WORK/nm-resolv.conf"; echo "nameserver 127.0.0.1" > "$NMRESOLV"
+RC="$WORK/resolv.conf"
+
+# Read through "status", not by sourcing modemctl: the script has a dispatcher
+# at the bottom, so sourcing it runs a whole status pass and prints it.
+dns_state() {
+    local out
+    out=$(env MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+              MODEMCTL_NM_CONF_D="$NMD" MODEMCTL_RESOLV="$RC" \
+              MODEMCTL_NM_RESOLV="$NMRESOLV" \
+              bash "$ROOT/modemctl" status 2>&1)
+    case "$out" in
+        *"resolv.conf -> NetworkManager"*)        echo applied ;;
+        *"does not point at NetworkManager"*)     echo missing ;;
+        *"cannot check DNS"*)                     echo absent ;;
+        *)                                        echo unknown ;;
+    esac
+}
+
+rm -f "$NMD"/*.conf "$RC"
+ln -sfn /run/systemd/resolve/stub-resolv.conf "$RC"
+check "shipped state is not mistaken for fixed" missing "$(dns_state)"
+
+printf 'rc-manager=symlink\n' > "$NMD/99-furios-modem-resolvconf.conf"
+check "drop-in alone is not enough" missing "$(dns_state)"
+
+rm -f "$NMD"/*.conf
+ln -sfn "$NMRESOLV" "$RC"
+check "symlink alone is not enough" missing "$(dns_state)"
+
+printf 'rc-manager=symlink\n' > "$NMD/99-furios-modem-resolvconf.conf"
+check "both halves together are applied" applied "$(dns_state)"
+
+# A drop-in that mentions rc-manager but sets something else must not pass.
+printf 'rc-manager=resolvconf\n' > "$NMD/99-furios-modem-resolvconf.conf"
+check "the wrong rc-manager is not applied" missing "$(dns_state)"
+
 summary

@@ -2,18 +2,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
 # SPDX-License-Identifier: MIT
 #
-# Keeps five fixes to the FuriOS modem stack applied, and tells you honestly
+# Keeps the fixes to the FuriOS modem stack applied, and tells you honestly
 # whether they are working.
 #
-# The fixes live in files that belong to the ofono2mm package, so every update
-# of that package wipes them. That is the whole reason this exists: apply is
+# Most of them live in files that belong to the ofono2mm package, so every
+# update of that package wipes them. Two do not: the oFono binder config, and
+# the DNS wiring that decides whether a name resolves once Wi-Fi is off. That is the whole reason this exists: apply is
 # idempotent and safe to run from a boot unit and from an apt hook, and it
 # refuses to touch a file whose patch no longer fits rather than mangling it.
 set -u
 
 VERSION=0.1.0
 if [ "$(id -u)" -eq 0 ]; then
-    for v in MODEMCTL_TARGET MODEMCTL_RADIO_CONF MODEMCTL_SHARE MODEMCTL_PATCHES; do
+    for v in MODEMCTL_TARGET MODEMCTL_RADIO_CONF MODEMCTL_SHARE MODEMCTL_PATCHES \
+             MODEMCTL_NM_CONF_D MODEMCTL_RESOLV MODEMCTL_NM_RESOLV; do
         if [ -n "${!v:-}" ]; then
             echo "refusing to honour $v as root - that would be an arbitrary-file patch" >&2
             exit 3
@@ -24,6 +26,15 @@ fi
 TARGET=${MODEMCTL_TARGET:-/usr/lib/ofono2mm/ofono2mm}
 RADIO_CONF=${MODEMCTL_RADIO_CONF:-/etc/ofono/binder.d/radio-interface-binder.conf}
 FILES="utils mm_bearer mm_modem mm_modem_simple mm_modem_signal"
+
+# The DNS half of defect 7. Both halves are needed: the drop-in stops
+# NetworkManager calling the resolvconf that cannot work, and the symlink is
+# what actually routes lookups at the resolver NetworkManager fills. NM will
+# not replace a symlink pointing somewhere else, so that one is ours to set.
+NM_CONF_D=${MODEMCTL_NM_CONF_D:-/etc/NetworkManager/conf.d}
+RESOLV=${MODEMCTL_RESOLV:-/etc/resolv.conf}
+DNS_DROPIN=99-furios-modem-resolvconf.conf
+NM_RESOLV=${MODEMCTL_NM_RESOLV:-/run/NetworkManager/resolv.conf}
 
 # Next to this script when run straight from the work tree; otherwise
 # wherever it was installed. /usr/local first: install.sh puts it there, the
@@ -90,6 +101,15 @@ patch_state() {
 radio_state() {
     [ -f "$RADIO_CONF" ] || { echo absent; return; }
     grep -q '^radioInterface *= *1\.6' "$RADIO_CONF" && echo applied || echo missing
+}
+
+#   applied / missing / absent
+resolvconf_state() {
+    local dropin="$NM_CONF_D/$DNS_DROPIN"
+    [ -d "$NM_CONF_D" ] || { echo absent; return; }
+    [ -f "$dropin" ] && grep -q '^rc-manager *= *symlink' "$dropin" || { echo missing; return; }
+    # -f, so an absolute and a relative symlink to the same file both count.
+    [ "$(readlink -f "$RESOLV" 2>/dev/null)" = "$NM_RESOLV" ] && echo applied || echo missing
 }
 
 # Every apply after a package update leaves another set of backups behind.
@@ -210,6 +230,44 @@ cmd_apply() {
             fi ;;
     esac
 
+    head_ "DNS"
+    case "$(resolvconf_state)" in
+        applied) skip "resolv.conf already points at NetworkManager" ;;
+        absent)  skip "$NM_CONF_D not found - NetworkManager not installed?" ;;
+        missing)
+            local dropin="$NM_CONF_D/$DNS_DROPIN" dns_ok=1
+            if [ -f "$SHARE/networkmanager/$DNS_DROPIN" ]; then
+                install -m644 "$SHARE/networkmanager/$DNS_DROPIN" "$dropin" || dns_ok=0
+            else
+                bad "$DNS_DROPIN not found in $SHARE/networkmanager"
+                dns_ok=0
+            fi
+            # Back up whatever is there now - as a symlink if that is what it
+            # is, which is why cp -a and not cp. Without this, revert has
+            # nothing to put back and would have to guess.
+            if [ "$dns_ok" -eq 1 ] && { [ -e "$RESOLV" ] || [ -L "$RESOLV" ]; }; then
+                cp -a "$RESOLV" "$RESOLV.bak.$ts" 2>/dev/null || true
+            fi
+            if [ "$dns_ok" -eq 1 ] && ln -sfn ../run/NetworkManager/resolv.conf "$RESOLV"; then
+                if [ "$(resolvconf_state)" = applied ]; then
+                    ok "resolv.conf -> $NM_RESOLV (backup: $(basename "$RESOLV").bak.$ts)"
+                    # Deliberately no reload here. rc-manager is only read when
+                    # NetworkManager starts or is reloaded, and a reload makes
+                    # oFono clear and re-activate the data context - which on a
+                    # weak cell comes straight back as "data call status 65535"
+                    # and leaves mobile data down. The symlink works at once;
+                    # the drop-in can wait for the next reload or boot.
+                    say "      (rc-manager applies at the next NetworkManager reload or boot)"
+                else
+                    bad "resolv.conf still does not point at NetworkManager"
+                    failed=1
+                fi
+            else
+                [ "$dns_ok" -eq 1 ] && bad "could not write $RESOLV"
+                failed=1
+            fi ;;
+    esac
+
     # Stale bytecode is not cosmetic: Python will happily run a .pyc from
     # before the patch if its timestamp still looks newer.
     [ "$changed" -eq 1 ] && rm -rf "$TARGET/__pycache__"
@@ -266,6 +324,29 @@ cmd_revert() {
         warn "connection. That is the shipped state, not a good state."
     else
         skip "radioInterface is not at 1.6"
+    fi
+
+    head_ "DNS"
+    if [ "$(resolvconf_state)" = applied ]; then
+        rm -f "$NM_CONF_D/$DNS_DROPIN"
+        # Put back exactly what was there before, not what we assume was there.
+        # The newest backup wins; ls -1t is safe here only because nothing but
+        # root can write this directory.
+        local back
+        back=$(ls -1td "$RESOLV.bak."* 2>/dev/null | head -1)
+        if [ -n "$back" ]; then
+            rm -f "$RESOLV" && cp -a "$back" "$RESOLV"
+            ok "resolv.conf restored from $(basename "$back")"
+        elif [ -e /run/systemd/resolve/stub-resolv.conf ]; then
+            ln -sfn ../run/systemd/resolve/stub-resolv.conf "$RESOLV"
+            ok "resolv.conf back to the systemd-resolved stub"
+        else
+            warn "no backup and no resolved stub - leaving $RESOLV alone"
+            warn "check it by hand, or DNS stays pointed at a resolver nobody fills"
+        fi
+        warn "with this undone, mobile data resolves no names once Wi-Fi is off"
+    else
+        skip "resolv.conf is not ours to revert"
     fi
 
     say ""
@@ -339,6 +420,49 @@ cmd_status() {
         "")        skip "no cellular NetworkManager profile found" ;;
         disabled)  ok "NetworkManager ipv6.method: disabled" ;;
         *)         warn "NetworkManager ipv6.method is '$ipv6m', expected 'disabled'" ;;
+    esac
+
+    case "$(resolvconf_state)" in
+        applied) ok "resolv.conf -> NetworkManager (dnsmasq on 127.0.0.1)" ;;
+        absent)  skip "no NetworkManager conf.d - cannot check DNS" ;;
+        missing)
+            bad "resolv.conf does not point at NetworkManager's resolver"
+            bad "     with Wi-Fi off, routing works and no name resolves"
+            bad_count=$((bad_count+1)) ;;
+    esac
+
+    # The mobile fallback route. Checked here because its absence is invisible
+    # until the day Wi-Fi drops - and then the phone is simply offline, with
+    # every part of the stack reporting itself healthy.
+    #
+    # Which interface mobile data is on is asked of furios-mobile-route, which
+    # asks ModemManager. NOT of NetworkManager: NM keeps calling the cellular
+    # device "connected" long after the bearer behind it is gone, and a check
+    # built on that reports a missing route on a phone that simply has no
+    # mobile data - a false alarm, told in the voice of a real one.
+    local mobile_iface route_iface mobile_state tool=
+    for t in "$SHARE/tools/furios-mobile-route" \
+             /usr/local/bin/furios-mobile-route /usr/bin/furios-mobile-route; do
+        [ -x "$t" ] && { tool=$t; break; }
+    done
+    route_iface=$(ip -4 route show default metric 1050 2>/dev/null \
+        | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+    mobile_iface=$([ -n "$tool" ] && "$tool" --iface 2>/dev/null)
+    mobile_state=$(systemctl is-enabled furios-mobile-route.service 2>/dev/null)
+    if [ -z "$tool" ]; then
+        skip "furios-mobile-route not installed - cannot check the fallback route"
+    elif [ -z "$mobile_iface" ]; then
+        skip "no mobile data connected, no fallback route to check"
+    elif [ "$route_iface" = "$mobile_iface" ]; then
+        ok "mobile default route: $mobile_iface"
+    else
+        bad "mobile data is on $mobile_iface but has NO default route - Wi-Fi off means offline"
+        bad_count=$((bad_count+1))
+    fi
+    case "$mobile_state" in
+        enabled) ok "furios-mobile-route.service enabled" ;;
+        "")      skip "furios-mobile-route.service not installed" ;;
+        *)       warn "furios-mobile-route.service is '$mobile_state' - the route will not survive a reboot" ;;
     esac
 
     say ""

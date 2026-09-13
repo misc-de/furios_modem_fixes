@@ -1,0 +1,170 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+#
+# Keeps a default route on the mobile data interface, so the phone still has a
+# way out when Wi-Fi goes away.
+#
+# Why this is needed at all: oFono reports the data call's Gateway as the
+# interface's *own* address - a MediaTek RIL habit, the link is really
+# point-to-point and has no gateway. ofono2mm passes that through to
+# ModemManager, and NetworkManager will not build a default route out of a
+# next hop that is the local address. What is left is an interface with an
+# address, an on-link route to its own subnet, and no way out. NetworkManager
+# knows it too and reports IP4-CONNECTIVITY "limited" - but it never fixes it.
+#
+# The link itself is fine. A plain on-link route ("default dev ccmni0", no via)
+# carries traffic and reaches the carrier's DNS - that is exactly what Android
+# installs for these interfaces. So we install it.
+#
+# Which interface: whichever one ModemManager's *default* bearer is on, asked
+# fresh every time. Never a glob over ccmni*, because the IMS bearer gets its
+# own ccmni with its own address, and routing the world over the IMS APN would
+# be a much worse bug than the one this fixes.
+#
+# The metric is deliberately higher than any Wi-Fi route (NetworkManager gives
+# Wi-Fi 600). Both defaults sit in the table at once; Wi-Fi wins while it is
+# there, and the mobile one takes over the moment it is not. Nothing switches,
+# nothing reconnects, so nothing drops the session that was in flight.
+set -u
+
+VERSION=0.1.0
+
+# Higher than Wi-Fi's 600, and the same value the "Willkommen" connection
+# profile uses for its own routes, so the two agree if NetworkManager ever
+# does start installing one.
+METRIC=${FURIOS_MOBILE_ROUTE_METRIC:-1050}
+
+# One-shot mode exists for the boot unit and for testing: assert once, say what
+# happened, exit. Without it we stay and follow netlink.
+ONCE=0
+QUIET=0
+PRINT_IFACE=0
+for arg in "$@"; do
+    case "$arg" in
+        --once)    ONCE=1 ;;
+        --iface)   PRINT_IFACE=1 ;;
+        --quiet)   QUIET=1 ;;
+        --version) echo "furios-mobile-route $VERSION"; exit 0 ;;
+        -h|--help)
+            cat <<'EOF'
+Usage: furios-mobile-route [--once | --iface] [--quiet]
+
+Keeps a default route on the mobile data interface. Without --once it stays in
+the foreground and follows netlink; that is how the service runs it.
+
+  --once     assert the route once and exit
+  --iface    print the mobile data interface and exit, nothing else. Prints
+             nothing when there is no mobile data. This is how anything else
+             asks the same question without a second copy of the answer -
+             notably "modemctl status", which must not trust NetworkManager:
+             NM reports the cellular device "connected" long after the bearer
+             behind it has gone, and a check built on that cries wolf.
+  --quiet    only complain, do not narrate
+
+Environment:
+  FURIOS_MOBILE_ROUTE_METRIC   route metric (default 1050, must stay > Wi-Fi's)
+EOF
+            exit 0 ;;
+        *) echo "furios-mobile-route: unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+
+log() { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
+err() { printf '%s\n' "$*" >&2; }
+
+# The interface of the connected bearer whose type is "default". Empty when
+# there is no mobile data right now, which is a normal state, not an error.
+#
+# mmcli is asked rather than cached because the bearer is torn down and rebuilt
+# on every cell change worth the name, and it does not always keep the same
+# interface across that.
+default_bearer_iface() {
+    local modem bearer path type connected iface
+
+    modem=$(mmcli -L 2>/dev/null | grep -oE '/org/freedesktop/ModemManager1/Modem/[0-9]+' | head -1)
+    [ -n "$modem" ] || return 0
+
+    for path in $(mmcli -m "$modem" --output-keyvalue 2>/dev/null \
+                  | sed -n 's/^modem\.generic\.bearers\.value\[[0-9]*\] *: *//p'); do
+        bearer=$(mmcli -b "$path" --output-keyvalue 2>/dev/null) || continue
+        type=$(printf '%s\n' "$bearer" | sed -n 's/^bearer\.type *: *//p')
+        connected=$(printf '%s\n' "$bearer" | sed -n 's/^bearer\.status\.connected *: *//p')
+        iface=$(printf '%s\n' "$bearer" | sed -n 's/^bearer\.status\.interface *: *//p')
+        [ "$type" = "default" ] || continue
+        [ "$connected" = "yes" ] || continue
+        [ -n "$iface" ] && [ "$iface" != "--" ] || continue
+        printf '%s\n' "$iface"
+        return 0
+    done
+}
+
+has_global_v4() {
+    ip -4 -o addr show dev "$1" scope global 2>/dev/null | grep -q .
+}
+
+# True when our route is already in the table exactly as we want it. Checking
+# before writing is not politeness: every write of ours comes back as a netlink
+# event, and a watcher that writes on every event it sees is a loop.
+route_present() {
+    ip -4 route show default dev "$1" metric "$METRIC" 2>/dev/null | grep -q .
+}
+
+assert_route() {
+    local iface
+    iface=$(default_bearer_iface)
+
+    if [ -z "$iface" ]; then
+        # No mobile data. Drop any route we left behind; a default route to an
+        # interface with nothing on the other end is worse than no route.
+        local stale
+        stale=$(ip -4 route show default metric "$METRIC" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
+        for s in $stale; do
+            ip route del default dev "$s" metric "$METRIC" 2>/dev/null \
+                && log "mobile data gone - removed default route on $s"
+        done
+        return 0
+    fi
+
+    if ! has_global_v4 "$iface"; then
+        # Bearer says connected but the address is not on the interface yet.
+        # This is a real window on this device: oFono sets the address a moment
+        # after the bearer flips to connected. The next netlink event brings us
+        # back here, so there is nothing to do but wait.
+        return 0
+    fi
+
+    route_present "$iface" && return 0
+
+    if ip route replace default dev "$iface" metric "$METRIC" 2>/dev/null; then
+        log "default route on $iface (metric $METRIC)"
+    else
+        err "furios-mobile-route: could not set default route on $iface"
+        return 1
+    fi
+}
+
+command -v mmcli >/dev/null 2>&1 || { err "furios-mobile-route: mmcli not found"; exit 1; }
+command -v ip    >/dev/null 2>&1 || { err "furios-mobile-route: ip not found"; exit 1; }
+
+# Asking, not acting. Before --once, so a query never writes a route.
+[ "$PRINT_IFACE" -eq 1 ] && { default_bearer_iface; exit 0; }
+
+assert_route
+[ "$ONCE" -eq 1 ] && exit $?
+
+# Event-driven on purpose. This blocks on a netlink socket and costs nothing
+# while nothing happens - no timer, no wakeup, which matters on a phone.
+#
+# Debounced because a bearer coming up is a burst of a dozen events and each
+# one would otherwise mean three mmcli calls.
+ip monitor address route link 2>/dev/null | while read -r _line; do
+    # Swallow whatever else arrives within the settling window.
+    while read -r -t 0.5 _more; do :; done
+    assert_route
+done
+
+# ip monitor only returns if netlink went away under us. Exiting non-zero lets
+# the service's Restart= deal with it rather than leaving a dead watcher.
+err "furios-mobile-route: ip monitor exited"
+exit 1
