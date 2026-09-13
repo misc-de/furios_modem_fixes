@@ -306,4 +306,92 @@ check "both halves together are applied" applied "$(dns_state)"
 printf 'rc-manager=resolvconf\n' > "$NMD/99-furios-modem-resolvconf.conf"
 check "the wrong rc-manager is not applied" missing "$(dns_state)"
 
+# --- upgrading a patch that changed ----------------------------------------
+#
+# The case that cost an hour on 2026-09-13. A released patch gains a hunk. The
+# installed file is now neither what ofono2mm ships nor what the new patch
+# produces, so it applies in NEITHER direction and modemctl rightly refuses to
+# touch it - which means the fix cannot be installed at all onto a phone that
+# already has the package. dpkg's answer is prerm: revert from the OLD package,
+# while its patches still describe the files on disk.
+
+OLDP="$WORK/old-patches"; mkdir -p "$OLDP"
+for f in $FILES; do cp "$ROOT/patches/ofono2mm-$f.patch" "$OLDP/"; done
+
+# The actual previous release of this patch: today's file without the block
+# that defect 11 added. Appending a line at the end would NOT do - a reverse
+# patch still applies around it, and the tree would read as already patched.
+# The difference has to fall inside a hunk, which is what really happens when
+# a patch grows.
+mkdir -p "$WORK/old/ofono2mm"
+awk '/^        if iface == "org.ofono.RadioSettings":$/ { skip = 1 }
+     /^        if iface == "org.ofono.FuriLabs.AT":$/   { skip = 0 }
+     !skip' "$ROOT/patched-files/mm_modem.py" > "$WORK/old/ofono2mm/mm_modem.py"
+TESTS_RUN=$((TESTS_RUN + 1))
+if ! diff -q "$WORK/old/ofono2mm/mm_modem.py" "$ROOT/patched-files/mm_modem.py" >/dev/null; then
+    ok "the stand-in for the previous release really differs"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "the previous release was not reconstructed"
+fi
+diff -u --label a/ofono2mm/mm_modem.py --label b/ofono2mm/mm_modem.py \
+    "$ROOT/original-files/mm_modem.py" "$WORK/old/ofono2mm/mm_modem.py" \
+    > "$OLDP/ofono2mm-mm_modem.patch" || true
+
+sandbox() {
+    env MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+        MODEMCTL_NM_CONF_D="$NMD" MODEMCTL_RESOLV="$RC" \
+        MODEMCTL_NM_RESOLV="$NMRESOLV" MODEMCTL_SHARE="$ROOT" \
+        "$@"
+}
+
+install_old() {
+    reset_tree original 1.6
+    sandbox MODEMCTL_PATCHES="$OLDP" bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+    return 0
+}
+
+install_old
+TESTS_RUN=$((TESTS_RUN + 1))
+if diff -q "$TREE/mm_modem.py" "$WORK/old/ofono2mm/mm_modem.py" >/dev/null; then
+    ok "the previous release installs cleanly"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "the previous release did not install"
+fi
+
+# With today's patches that tree is unrecognisable, and saying so is correct.
+out=$(sandbox bash "$ROOT/modemctl" apply --quiet --no-restart 2>&1)
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out" | grep -q "mm_modem.py: patch does not fit"; then
+    ok "a changed patch is refused rather than forced"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "a changed patch was not refused" "$out"
+fi
+
+# prerm's half: revert with the old patches, which still fit.
+sandbox MODEMCTL_PATCHES="$OLDP" bash "$ROOT/modemctl" revert --patches-only --quiet >/dev/null 2>&1
+TESTS_RUN=$((TESTS_RUN + 1))
+if diff -q "$TREE/mm_modem.py" "$ROOT/original-files/mm_modem.py" >/dev/null; then
+    ok "the old package reverts its own work"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "the old package left its patch behind"
+fi
+
+# ...and radioInterface must survive it, or an upgrade that stops here leaves
+# the phone on the value that brings back the Error-44 loop.
+check "and leaves radioInterface alone" "radioInterface = 1.6" "$(cat "$RADIO")"
+
+# postinst's half: today's patches now apply.
+sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+TESTS_RUN=$((TESTS_RUN + 1))
+if diff -q "$TREE/mm_modem.py" "$ROOT/patched-files/mm_modem.py" >/dev/null; then
+    ok "and the new one applies on top of the shipped file"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "the new patch did not land"
+fi
+
+# The whole point of --patches-only is that it stops there.
+install_old
+sandbox MODEMCTL_PATCHES="$OLDP" bash "$ROOT/modemctl" revert --quiet >/dev/null 2>&1
+check "a full revert does undo radioInterface" "radioInterface = 1.4" "$(cat "$RADIO")"
+
 summary

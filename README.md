@@ -110,6 +110,20 @@ than no patch:
 Two of the eleven are already fixed or half-fixed upstream, so this is expected to
 happen eventually.
 
+The same message used to appear for a much less interesting reason: **a patch
+of ours that changed**. The installed file was then neither what ofono2mm
+ships nor what the new patch produces, so it applied in neither direction -
+and the new fix could not be installed at all onto a phone that already had
+this package. The package now reverts itself on upgrade, from the old version,
+while its patches still describe the files on disk:
+
+    modemctl revert --patches-only     # files back, configuration untouched
+
+which is what `prerm upgrade` calls. Configuration is left alone on purpose: a
+full revert would put `radioInterface` back to 1.4, and an upgrade that stops
+between the two halves would leave the phone on the value that brings back the
+Error-44 loop.
+
 ## Root, cost, and what is checked
 
 `apply` and `revert` write under `/usr/lib` and need root. `status`, `signal`

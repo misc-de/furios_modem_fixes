@@ -228,4 +228,41 @@ else
     fail "apply would restart the modem stack during a call"
 fi
 
+# --- the package can update a patch it already shipped ----------------------
+#
+# dpkg runs prerm from the OLD package before unpacking the new one - the only
+# moment when the patches on disk still describe the files on disk. Without
+# that, a patch that grew a hunk cannot be installed at all onto a phone that
+# already has this package: the file applies in neither direction and the new
+# postinst gives up. It happened once, on 2026-09-13, and the file had to be
+# copied into place by hand.
+PRERM=$(sed -n "/DEBIAN\/prerm/,/^PRE$/p" "$ROOT/packaging/build-deb.sh")
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if printf '%s' "$PRERM" | grep -q "^upgrade)"; then
+    ok "prerm reverts on upgrade, not only on removal"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "prerm ignores upgrade - a changed patch could not be installed"
+fi
+
+# Files only. A full revert here would put radioInterface back to 1.4, and an
+# upgrade that stops between prerm and postinst would leave the phone on the
+# value that brings back the Error-44 loop.
+TESTS_RUN=$((TESTS_RUN + 1))
+if printf '%s' "$PRERM" | grep -q -- "revert --patches-only"; then
+    ok "and touches the files only, not the configuration"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "prerm would undo radioInterface mid-upgrade"
+fi
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q -- "--patches-only" "$ROOT/modemctl"; then
+    ok "and modemctl knows the option the prerm calls it with"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "prerm calls an option modemctl does not have"
+fi
+
 summary

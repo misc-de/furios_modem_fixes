@@ -180,12 +180,29 @@ set -e
 # Put ofono2mm's own code back while the patches are still on disk to do it
 # with. After the files are gone there is nothing left to revert with, and the
 # next ofono2mm update would be the only thing that could repair it.
-if [ "$1" = remove ]; then
+case "$1" in
+remove)
     systemctl disable --now furios-modem-fixes.service >/dev/null 2>&1 || true
     systemctl disable --now furios-mobile-route.service >/dev/null 2>&1 || true
     systemctl disable --now furios-mobile-context.service >/dev/null 2>&1 || true
     /usr/bin/modemctl revert --quiet || true
-fi
+    ;;
+upgrade)
+    # dpkg runs this from the OLD package, before the new one is unpacked -
+    # the only moment when the patches on disk still describe the files on
+    # disk. Without it, a patch that CHANGED reads as "upstream moved": the
+    # installed file is neither the shipped version nor what the new patch
+    # produces, so it applies in neither direction and the new postinst gives
+    # up. That is not hypothetical - on 2026-09-13 the fix for defect 11 could
+    # not be installed onto a phone that already had this package, and the
+    # file had to be copied into place by hand.
+    #
+    # Files only. The configuration is what the new postinst is about to set
+    # again anyway, and radioInterface must not be left at 1.4 if the upgrade
+    # stops between the two halves.
+    /usr/bin/modemctl revert --patches-only --quiet || true
+    ;;
+esac
 exit 0
 PRE
 chmod 755 "$STAGE/DEBIAN/prerm"

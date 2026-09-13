@@ -51,6 +51,7 @@ PATCHES=${MODEMCTL_PATCHES:-$SHARE/patches}
 
 QUIET=0
 NO_RESTART=0
+PATCHES_ONLY=0
 
 # Colour only when someone is watching. A boot unit's journal should not be
 # full of escape codes.
@@ -316,6 +317,18 @@ cmd_revert() {
     done
     rm -rf "$TARGET/__pycache__"
 
+    # An upgrade wants exactly this much and no more: the Python files back to
+    # what ofono2mm ships, while the patches that describe them are still the
+    # ones on disk. Everything below is configuration the new version is about
+    # to set again anyway, and radioInterface in particular must not be left at
+    # 1.4 if the upgrade stops half way - that is the value that brings back
+    # the Error-44 loop on the next start of ofono.
+    if [ "$PATCHES_ONLY" = 1 ]; then
+        say ""
+        say "ofono2mm's own code is back; configuration left alone."
+        return $failed
+    fi
+
     head_ "ofono radioInterface"
     if [ "$(radio_state)" = applied ]; then
         sed -i 's/^radioInterface *= *1\.6$/radioInterface = 1.4/' "$RADIO_CONF"
@@ -553,6 +566,7 @@ modemctl $VERSION - keeps the FuriOS modem fixes applied
 Options
   -q, --quiet              only errors (for boot units and apt hooks)
       --no-restart         change files, leave the services alone
+      --patches-only       revert: ofono2mm's files only, not the config
 
 The fixes live in files owned by the ofono2mm package, so an update of that
 package removes them. A boot unit and an apt hook run "apply" for you; both
@@ -564,8 +578,9 @@ CMD=${1:-status}
 shift 2>/dev/null || true
 for a in "$@"; do
     case "$a" in
-        -q|--quiet)   QUIET=1 ;;
-        --no-restart) NO_RESTART=1 ;;
+        -q|--quiet)     QUIET=1 ;;
+        --no-restart)   NO_RESTART=1 ;;
+        --patches-only) PATCHES_ONLY=1 ;;
     esac
 done
 
