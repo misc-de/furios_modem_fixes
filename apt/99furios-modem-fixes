@@ -14,6 +14,14 @@
 // Post-Invoke also runs after a failed dpkg run, hence the guards: no
 // modemctl, no ofono2mm directory, nothing happens. Never fatal - apt must
 // not fail because of us.
+//
+// --no-restart is deliberate. The ofono2mm package does not restart
+// ModemManager either, so after an update the running daemon still holds our
+// patched code and behaves correctly; only the next start needs the files on
+// disk to be right, and they are by the time this returns. Restarting would
+// buy nothing but the new upstream code - and would cost the mobile data
+// connection, because NetworkManager does not survive a ModemManager restart
+// (see settle_networkmanager in modemctl).
 DPkg::Post-Invoke {
-    "if [ -x /usr/bin/modemctl ] && [ -d /usr/lib/ofono2mm/ofono2mm ]; then /usr/bin/modemctl apply --quiet || true; fi";
+    "if [ -x /usr/bin/modemctl ] && [ -d /usr/lib/ofono2mm/ofono2mm ]; then /usr/bin/modemctl apply --quiet --no-restart || true; fi";
 };

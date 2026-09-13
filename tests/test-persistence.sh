@@ -178,6 +178,47 @@ else
     fail "the signal tool crashed when the fix is absent" "$out"
 fi
 
+# --- what a ModemManager restart costs --------------------------------------
+#
+# Restarting ModemManager leaves NetworkManager holding a proxy for the modem
+# object of the process that just died, and mobile data then sits in
+# "connecting (prepare)" indefinitely. Measured: every restart, no recovery in
+# 80 s, and neither disconnecting the device nor taking it unmanaged and back
+# helps. Two consequences are pinned here.
+TESTS_RUN=$((TESTS_RUN + 1))
+if printf '%s\n' "$directives" | grep -q -- '--no-restart'; then
+    ok "the apt hook does not restart the modem stack"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "the apt hook restarts ModemManager" \
+         "that kills mobile data until NetworkManager is restarted too"
+fi
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -A4 'ok "ModemManager restarted' "$ROOT/modemctl" | grep -q settle_networkmanager; then
+    ok "an interactive restart is followed by settling NetworkManager"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "nothing settles NetworkManager after the restart"
+fi
+
+# The device lookup has to happen inside the wait loop. For a moment after the
+# restart NetworkManager does not list the modem at all, and a single lookup
+# followed by "no device, nothing to do" made this check silently do nothing
+# the first time it ran for real - it returned before the device reappeared,
+# and mobile data stayed down.
+TESTS_RUN=$((TESTS_RUN + 1))
+body=$(sed -n '/^settle_networkmanager()/,/^}/p' "$ROOT/modemctl")
+loop_line=$(printf '%s\n' "$body" | grep -n 'for i in' | cut -d: -f1)
+dev_line=$(printf '%s\n' "$body" | grep -n 'dev=\$(nmcli' | cut -d: -f1)
+if [ -n "$loop_line" ] && [ -n "$dev_line" ] && [ "$dev_line" -gt "$loop_line" ]; then
+    ok "settle looks for the device inside the wait loop"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "settle looks for the device only once, before waiting" \
+         "right after the restart it is not listed yet, so the check does nothing"
+fi
+
 # --- not restarting the stack during a call ---------------------------------
 TESTS_RUN=$((TESTS_RUN + 1))
 if grep -q 'call_in_progress' "$ROOT/modemctl"; then

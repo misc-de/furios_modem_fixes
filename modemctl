@@ -107,6 +107,53 @@ call_in_progress() {
     printf '%s' "$calls" | grep -q 'object path'
 }
 
+# Restarting ModemManager breaks mobile data until NetworkManager is
+# restarted too. NetworkManager keeps the proxy for the modem object of the
+# process that just died - it logs
+#
+#     modem with path /org/freedesktop/ModemManager1/Modem/0 already exists, ignoring
+#
+# and every Connect it then makes goes nowhere, so the device sits in
+# "connecting (prepare)" for ever. Reproduced on every restart, not now and
+# then, and it does not time out on its own. Disconnecting the device, taking
+# it unmanaged and back, and re-activating the profile all fail; only
+# restarting NetworkManager makes it look at the modem again.
+settle_networkmanager() {
+    local dev state i stuck=0
+    for i in $(seq 1 12); do
+        sleep 5
+        # Looked up inside the loop on purpose. For a moment after the restart
+        # the device is not in NetworkManager's list at all, and a single look
+        # followed by "no device, nothing to do" is how this check did exactly
+        # nothing the first time it ran for real - it returned before the
+        # device came back, and mobile data stayed down.
+        dev=$(nmcli -t -f DEVICE,TYPE d 2>/dev/null | sed -n 's/:gsm$//p' | head -1)
+        [ -n "$dev" ] || continue
+
+        state=$(nmcli -t -f DEVICE,STATE d 2>/dev/null | sed -n "s|^$dev:||p")
+        case "$state" in
+            *prepare*|*unavailable*|"") stuck=1 ;;
+            *) ok "mobile data settled: $state"; return 0 ;;
+        esac
+    done
+
+    # Never saw a cellular device: no SIM, no modem, nothing to settle. That
+    # is not the failure this is here for.
+    if [ "$stuck" -eq 0 ]; then
+        skip "no cellular device in NetworkManager - nothing to settle"
+        return 0
+    fi
+
+    warn "NetworkManager is still stuck on $dev - it kept a proxy for the"
+    warn "ModemManager that just went away. Restarting it; Wi-Fi blips."
+    if systemctl restart NetworkManager; then
+        ok "NetworkManager restarted"
+        return 0
+    fi
+    bad "could not restart NetworkManager - mobile data will stay down"
+    return 1
+}
+
 BACKUPS_KEPT=3
 prune_backups() {
     local f=$1 old
@@ -178,6 +225,7 @@ cmd_apply() {
         # restarted - that leaves the modem offline.
         if systemctl restart ModemManager; then
             ok "ModemManager restarted (that is ofono2mm)"
+            settle_networkmanager || failed=1
         else
             bad "could not restart ModemManager"
             failed=1

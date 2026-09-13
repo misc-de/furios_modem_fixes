@@ -355,6 +355,33 @@ first, then exec.
 writes another set. After a day of testing there were 28 of them, 1.1 MB, in a
 directory that is supposed to hold a Python package. Three are kept now.
 
+**NetworkManager does not survive a ModemManager restart.** It keeps the proxy
+for the modem object of the process that just died -
+
+```
+NetworkManager: modem-manager: ModemManager now available
+NetworkManager: <warn> modem with path .../ModemManager1/Modem/0 already exists, ignoring
+```
+
+- and every `Connect` it makes after that goes nowhere. The device sits in
+`connecting (prepare)` indefinitely while oFono is never even asked: activating
+the context by hand through `org.ofono.ConnectionContext` brings the data call
+straight up, which is what proves the modem and the network were fine all
+along. Measured on every restart, not occasionally, with no recovery in 80 s.
+Disconnecting the device, taking it unmanaged and back, and re-activating the
+profile all fail. Only restarting NetworkManager makes it look again.
+
+Two consequences: the apt hook runs `apply --no-restart` (after a package
+update the running daemon still holds our patched code, so a restart buys
+nothing but the new upstream and costs the connection), and an interactive
+`apply` follows its restart with `settle_networkmanager`.
+
+**Wait for the device before deciding it is absent.** For a moment after the
+restart NetworkManager does not list the modem at all. The first version of
+that settle step looked once, found nothing, concluded "no modem, nothing to
+do" and returned - so it did precisely nothing on the one occasion it existed
+for, and mobile data stayed down. Look inside the wait loop, not before it.
+
 **Do not restart the modem stack during a call.** The apt hook runs after every
 package operation, including an unattended upgrade that lands while the phone
 is being used as a phone. `apply` asks `VoiceCallManager.GetCalls` first and
