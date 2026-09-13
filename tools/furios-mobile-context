@@ -262,6 +262,13 @@ command -v dbus-monitor >/dev/null 2>&1 || { err "furios-mobile-context: dbus-mo
 # Anything oFono says about the context, the packet service or registration
 # means "look again", and looking again is one cheap round of dbus-send.
 pass
+# dbus-monitor only attaches when the pipeline below starts, so anything oFono
+# said while this was getting ready is lost - and at boot that is exactly the
+# registration this waits for. Take one more look a few seconds in rather than
+# trusting the idle timer to cover it. Matters more now than it used to: this
+# has to carry the boot on its own once the old activation unit is switched
+# off.
+[ "$NEXT_WAIT" -gt 10 ] && NEXT_WAIT=10
 dbus-monitor --system \
     "type='signal',sender='$OF',interface='org.ofono.ConnectionContext'" \
     "type='signal',sender='$OF',interface='org.ofono.ConnectionManager'" \

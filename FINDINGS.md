@@ -481,14 +481,37 @@ only falls back to a timer while a revive is actually in flight. Healthy, one
 wakeup an hour.
 
 **Watched, and it did nothing - correctly.** Deactivating the context by hand
-brought it back in about two seconds without the supervisor logging a word:
-NetworkManager reconnects a *clean* deactivation on its own. The case this is
-for is the failed data call, where nothing does. That case has not been caught
-live yet; it is reproduced in the tests, not on the radio.
+brings it back in about two seconds without the supervisor logging a word, and
+it is **oFono itself** that does it - checked by switching NetworkManager's
+autoconnect off for the cellular profile and trying again, which changed
+nothing:
 
-**Do not run two.** `furios-mobile-data.service` on this phone activates the
+```
+ofonod: Activating context: 1
+ofonod: setting up data call
+```
+
+Which makes sense: on LTE the default EPS bearer belongs to the attach, and
+tearing the context down leaves the modem re-establishing it. A clean
+deactivation is therefore not the failure mode at all and cannot stand in for
+one.
+
+The failure mode is a data call that fails to *set up* - status 65535 - after
+which nothing retries. That cannot be produced on demand, so the acting path
+is covered by the tests and not yet by the radio. What has been watched live,
+twice, is the supervisor correctly staying quiet.
+
+**Do not run two.** `furios-mobile-data.service` on this phone activated the
 same context at boot. Two things racing on one D-Bus property is a good way
 back into the state above, so `modemctl status` warns when both are enabled.
+It has been switched off here - disabled, not deleted - and the supervisor
+carries the boot instead.
+
+Which put a hole in the loop worth closing: `dbus-monitor` only attaches when
+the pipeline starts, so anything oFono says while the service is still getting
+ready is lost - and at boot that is exactly the registration being waited for.
+Missing it used to mean sitting on the idle timer for an hour. The first wait
+after startup is now capped at ten seconds.
 
 ---
 
