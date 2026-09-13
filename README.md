@@ -1,6 +1,6 @@
 # furios_modem_fixes
 
-Eight defects in the FuriOS modem stack, and a way to keep them fixed.
+Nine defects in the FuriOS modem stack, and a way to keep them fixed.
 
 Out of the box on this phone the data connection often only came up after a
 reboot, the signal icon sat at the emptiest bar regardless of reception, and
@@ -69,7 +69,7 @@ identify the tower you are on, which places you within a kilometre or so. The
 signal levels do not. Nothing is stored or sent - it prints and exits - but a
 bug report is a public place.
 
-## The eight defects
+## The nine defects
 
 | # | What | Where | Symptom |
 |---|---|---|---|
@@ -79,19 +79,22 @@ bug report is a public place.
 | 4 | NM profile asks for IPv6 on an IPv4-only context | `mm_modem_simple.py`, `mm_bearer.py` | `modem IP method unsupported` on every activation |
 | 5 | `active_connect` never cleared on the failure path | `mm_modem_simple.py`, `mm_bearer.py` | NetworkManager waits in `prepare` until you reboot |
 | 6 | No signal strength, and RSRP/RSRQ swapped and unsigned | `mm_modem_signal.py`, `mm_modem.py`, `mm_modem_simple.py` | bar stuck at 0%, `rsrp=+10 dBm` |
-| 7 | Data call's `Gateway` reported as the interface's own address | oFono | no default route on mobile data - Wi-Fi off means offline |
+| 7 | Data call's `Gateway` reported as the interface's own address | oFono | either no default route at all, or one that silently drops every packet |
 | 8 | `resolvconf` is a symlink to `resolvectl` and fails on every network change | FuriOS NM config | `/etc/resolv.conf` points at a resolver that only ever learns Wi-Fi's servers |
+| 9 | Nothing brings the data context back after a failed data call | the system as shipped | mobile data stays down until the next reboot |
 
 Numbers behind each of these, and why they are what they are, in
 [FINDINGS.md](FINDINGS.md).
 
 Numbers 7 and 8 are the ones nobody notices, because everything reports itself
 healthy: the modem is registered, the bearer is connected, the interface has an
-address, `mmcli` is happy, and names resolve. There is simply no way out of the
+address, `mmcli` is happy, names resolve, and `ip route` can even show a
+default route - one measured at 100% packet loss. There is simply no way out of the
 phone, and no resolver that will answer once Wi-Fi is gone. Both only show the
 moment Wi-Fi goes away. `furios-mobile-route` installs the route and keeps it
-installed, `modemctl apply` fixes the DNS wiring, and `modemctl status` calls
-out either one when it is missing.
+installed, `modemctl apply` fixes the DNS wiring, `furios-mobile-context` puts
+the data call back when it dies, and `modemctl status` calls out any of them
+when it is missing.
 
 ## When a patch stops fitting
 
@@ -102,7 +105,7 @@ than no patch:
     FAIL  mm_modem_signal.py: patch does not fit (upstream moved)
           ready-made file in /usr/share/furios-modem/patched-files/... - check by hand
 
-Two of the eight are already fixed or half-fixed upstream, so this is expected to
+Two of the nine are already fixed or half-fixed upstream, so this is expected to
 happen eventually.
 
 ## Root, cost, and what is checked
@@ -126,7 +129,9 @@ byte for byte, and reverts cleanly; that the signal conversions turn real
 readings taken off this phone into the right numbers; that `modemctl`
 recognises a file it must not touch; that the route watcher picks the default
 bearer rather than the IMS one, and writes nothing when there is nothing to
-write; and that half a DNS fix is never reported as a whole one.
+write; that half a DNS fix is never reported as a whole one; and - most of it -
+that the context supervisor refuses to act, on mobile data somebody switched
+off, on a radio that is not registered, and during a call.
 
 What cannot: whether the bar on the screen moves. That is `modemctl check`, on
 the device, with a SIM in it.
@@ -134,7 +139,7 @@ the device, with a SIM in it.
 ## Layout
 
     modemctl             the tool
-    tools/               the honest signal readout, and the mobile route watcher
+    tools/               the signal readout, the route watcher, the context supervisor
     patches/             the fixes, as unified diffs
     patched-files/       the finished files - the rescue path when a patch stops fitting
     original-files/      untouched originals from the package, for the tests

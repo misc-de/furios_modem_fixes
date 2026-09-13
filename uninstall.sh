@@ -11,6 +11,7 @@ sudo /usr/local/bin/modemctl revert || true
 
 sudo systemctl disable --now furios-modem-fixes.service 2>/dev/null || true
 sudo systemctl disable --now furios-mobile-route.service 2>/dev/null || true
+sudo systemctl disable --now furios-mobile-context.service 2>/dev/null || true
 # The watcher's route goes with it. Leaving a default route behind that nothing
 # maintains any more is exactly the half-state this project exists to avoid.
 sudo ip route del default dev "$(ip -4 route show default metric 1050 \
@@ -18,10 +19,12 @@ sudo ip route del default dev "$(ip -4 route show default metric 1050 \
     metric 1050 2>/dev/null || true
 sudo rm -f /etc/systemd/system/furios-modem-fixes.service \
            /etc/systemd/system/furios-mobile-route.service \
+           /etc/systemd/system/furios-mobile-context.service \
            /etc/apt/apt.conf.d/99furios-modem-fixes \
            /usr/local/bin/modemctl \
            /usr/local/bin/furios-modem-signal \
-           /usr/local/bin/furios-mobile-route
+           /usr/local/bin/furios-mobile-route \
+           /usr/local/bin/furios-mobile-context
 sudo rm -rf /usr/local/share/furios-modem
 sudo systemctl daemon-reload
 

@@ -30,6 +30,8 @@ install -Dm755 tools/furios-modem-signal "$STAGE/usr/bin/furios-modem-signal"
 install -Dm755 tools/furios-modem-signal "$STAGE/usr/share/furios-modem/tools/furios-modem-signal"
 install -Dm755 tools/furios-mobile-route "$STAGE/usr/bin/furios-mobile-route"
 install -Dm755 tools/furios-mobile-route "$STAGE/usr/share/furios-modem/tools/furios-mobile-route"
+install -Dm755 tools/furios-mobile-context "$STAGE/usr/bin/furios-mobile-context"
+install -Dm755 tools/furios-mobile-context "$STAGE/usr/share/furios-modem/tools/furios-mobile-context"
 
 for p in patches/*.patch; do
     install -Dm644 "$p" "$STAGE/usr/share/furios-modem/$p"
@@ -47,6 +49,8 @@ install -Dm644 systemd/furios-modem-fixes.service \
     "$STAGE/usr/lib/systemd/system/furios-modem-fixes.service"
 install -Dm644 systemd/furios-mobile-route.service \
     "$STAGE/usr/lib/systemd/system/furios-mobile-route.service"
+install -Dm644 systemd/furios-mobile-context.service \
+    "$STAGE/usr/lib/systemd/system/furios-mobile-context.service"
 install -Dm644 apt/99furios-modem-fixes \
     "$STAGE/etc/apt/apt.conf.d/99furios-modem-fixes"
 
@@ -153,6 +157,7 @@ if [ "$1" = configure ]; then
     # installed but not started leaves the phone without a fallback route
     # until the next reboot, which is exactly the failure it exists to prevent.
     systemctl enable --now furios-mobile-route.service >/dev/null 2>&1 || true
+    systemctl enable --now furios-mobile-context.service >/dev/null 2>&1 || true
     # Apply now rather than at the next boot. Quiet, and never fatal: a
     # package that fails to configure because a patch did not fit would leave
     # dpkg half-done, which is a worse problem than an unpatched modem.
@@ -172,6 +177,7 @@ set -e
 if [ "$1" = remove ]; then
     systemctl disable --now furios-modem-fixes.service >/dev/null 2>&1 || true
     systemctl disable --now furios-mobile-route.service >/dev/null 2>&1 || true
+    systemctl disable --now furios-mobile-context.service >/dev/null 2>&1 || true
     /usr/bin/modemctl revert --quiet || true
 fi
 exit 0

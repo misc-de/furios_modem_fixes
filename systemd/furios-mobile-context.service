@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=Bring mobile data back up when the data context drops
+Documentation=file:/usr/share/doc/furios-modem-fixes/README.md
+# oFono is the one that has to be there: everything here is a call to it. Listed
+# After ModemManager too so the journal reads in the order things happened, not
+# because anything is asked of it.
+After=ofono.service ModemManager.service
+# Not Requires: with the modem stack switched off there is no context to
+# supervise, and this should stay quiet rather than fail in a loop.
+Wants=ofono.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/furios-mobile-context
+# The supervisor going away silently would put the phone back to where it was:
+# mobile data down until somebody notices. RestartSec is generous because the
+# thing it supervises is a radio, and restarting fast helps nothing.
+Restart=always
+RestartSec=10
+
+# Talks to oFono on the system bus and reads addresses. It changes the modem,
+# never the filesystem or the network configuration.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

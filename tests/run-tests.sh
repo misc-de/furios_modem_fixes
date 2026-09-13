@@ -25,6 +25,7 @@ run "modemctl's judgement"               bash "$HERE/test-modemctl.sh"
 run "signal conversions"                 python3 "$HERE/test-signal.py"
 run "what survives a package update"     bash "$HERE/test-persistence.sh"
 run "the mobile fallback route"          bash "$HERE/test-mobile-route.sh"
+run "reviving the data context"          bash "$HERE/test-mobile-context.sh"
 
 # What a file is written in is decided by its shebang, not by the directory it
 # sits in. tools/ held nothing but Python until a shell script moved in there,
@@ -68,8 +69,9 @@ printf '\n\033[1m== systemd unit\033[0m\n'
 # Two complaints are expected off the device and are not defects: units this
 # one is merely ordered against may not exist here, and modemctl is not
 # installed until install.sh has run.
-noise='Unit .* not found|Command /usr/bin/(modemctl|furios-mobile-route) is not executable'
-[ -x /usr/bin/modemctl ] && [ -x /usr/bin/furios-mobile-route ] && noise='Unit .* not found'
+noise='Unit .* not found|Command /usr/bin/(modemctl|furios-mobile-route|furios-mobile-context) is not executable'
+[ -x /usr/bin/modemctl ] && [ -x /usr/bin/furios-mobile-route ] \
+    && [ -x /usr/bin/furios-mobile-context ] && noise='Unit .* not found'
 if ! command -v systemd-analyze >/dev/null 2>&1; then
     printf '  \033[33mskipped\033[0m - systemd-analyze not available\n'
 else

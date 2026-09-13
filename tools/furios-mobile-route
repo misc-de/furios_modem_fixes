@@ -8,10 +8,19 @@
 # Why this is needed at all: oFono reports the data call's Gateway as the
 # interface's *own* address - a MediaTek RIL habit, the link is really
 # point-to-point and has no gateway. ofono2mm passes that through to
-# ModemManager, and NetworkManager will not build a default route out of a
-# next hop that is the local address. What is left is an interface with an
-# address, an on-link route to its own subnet, and no way out. NetworkManager
-# knows it too and reports IP4-CONNECTIVITY "limited" - but it never fixes it.
+# ModemManager, and it ends up in the routing table as a next hop that points
+# at the machine itself. Two ways that goes wrong, and the phone has both:
+#
+#   - When NetworkManager never processes the bearer connect - which is the
+#     normal case here, because the context is activated straight through
+#     oFono - it holds no IPv4 configuration for the device at all and
+#     installs nothing. An address, an on-link route to its own subnet, and no
+#     way out. NetworkManager reports IP4-CONNECTIVITY "limited" and does
+#     nothing about it.
+#   - When it does process the connect, it installs "default via <own
+#     address>", which the kernel accepts and which drops every packet:
+#     measured at 100% loss, with IP4-CONNECTIVITY reporting "full". That one
+#     is worse, because it looks like a working configuration.
 #
 # The link itself is fine. A plain on-link route ("default dev ccmni0", no via)
 # carries traffic and reaches the carrier's DNS - that is exactly what Android
@@ -103,11 +112,26 @@ has_global_v4() {
     ip -4 -o addr show dev "$1" scope global 2>/dev/null | grep -q .
 }
 
-# True when our route is already in the table exactly as we want it. Checking
-# before writing is not politeness: every write of ours comes back as a netlink
-# event, and a watcher that writes on every event it sees is a loop.
+# True when OUR route is already in the table - an on-link route, no next hop.
+#
+# The "no next hop" part is the whole check, not a detail. When NetworkManager
+# does process the bearer connect it installs its own default route at this
+# very metric, "via" the bogus gateway, and that route silently blackholes:
+# measured at 100% packet loss while looking perfectly healthy in ip route. A
+# check that merely asked "is there a default route on this interface at this
+# metric" would answer yes to it and leave the phone with a route that eats
+# every packet. Replacing it is safe - NetworkManager does not put it back
+# (watched for 20 s after each replace).
+#
+# Checking before writing is also not politeness: every write of ours comes
+# back as a netlink event, and a watcher that writes on every event it sees is
+# a loop.
 route_present() {
-    ip -4 route show default dev "$1" metric "$METRIC" 2>/dev/null | grep -q .
+    local r
+    r=$(ip -4 route show default dev "$1" metric "$METRIC" 2>/dev/null)
+    [ -n "$r" ] || return 1
+    case "$r" in *" via "*) return 1 ;; esac
+    return 0
 }
 
 assert_route() {

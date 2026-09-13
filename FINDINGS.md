@@ -16,7 +16,7 @@ Three symptoms started this, on different days:
 - switching Wi-Fi off left the phone with no network at all, although mobile
   data was connected and every component called itself healthy.
 
-None was a radio problem. All eight causes are in software, and only one of
+None was a radio problem. All nine causes are in software, and only one of
 them is in code anybody here wrote.
 
 ---
@@ -270,10 +270,40 @@ Gateway:  10.13.195.47
 
 That is a MediaTek RIL habit and it is not even wrong in spirit - the link is
 point-to-point and genuinely has no gateway. `mm_bearer.py` passes the value
-through unexamined (it is not ofono2mm's to invent), ModemManager republishes
-it, and NetworkManager refuses to build a default route out of a next hop that
-is the local address. Nobody in the chain is doing anything unreasonable, and
-the result is a phone that cannot reach the internet.
+through unexamined (it is not ofono2mm's to invent) and ModemManager
+republishes it.
+
+**Correction.** This section first said NetworkManager refuses to build a
+default route out of a next hop that is the local address. That was wrong, and
+the truth is worse. There are two failure modes and this phone has both:
+
+- **NetworkManager never sees the connect.** The data context is activated
+  straight through oFono here - that is what the shipped
+  `furios-mobile-data.service` does at boot, and what any hand activation
+  does - so `modem-broadband` never processes a bearer, NetworkManager holds
+  no IPv4 configuration for the device at all, and it installs nothing. The
+  interface has an address (oFono put it there), an on-link route to its own
+  subnet, and no way out. `IP4-CONNECTIVITY` reports `3 (limited)` and nothing
+  acts on it. This is the state the phone is in after a normal boot.
+- **NetworkManager does see the connect.** Then it installs the route, using
+  the gateway it was given:
+
+  ```
+  default via 10.10.95.220 dev ccmni1 proto static metric 1050
+  IP4-CONNECTIVITY: 4 (full)
+  ```
+
+  The kernel accepts it. It drops every packet:
+
+  ```
+  ping -I ccmni1 9.9.9.9 -> 3 packets transmitted, 0 received, 100% packet loss
+  ```
+
+  That is the worse one. A blackhole that looks like a working configuration,
+  reported as full connectivity, with a plausible route in `ip route`.
+
+Nobody in the chain is doing anything unreasonable, and the result is a phone
+that cannot reach the internet either way.
 
 **The link itself was never the problem.** With one route added by hand:
 
@@ -284,7 +314,18 @@ dig @61.8.132.52 github.com +short -> 140.82.121.4  # carrier DNS answers
 ```
 
 No gateway, no `via`, just an on-link device route - which is exactly what
-Android installs for these interfaces.
+Android installs for these interfaces. The same interface, the same second,
+carries nothing over NetworkManager's `via` route and everything over this one.
+
+Replacing NetworkManager's route is safe: watched for 20 s after each replace,
+it does not put its own back.
+
+**This is why the watcher checks for `via`.** Its first version asked only
+whether a default route existed on the interface at its metric - which is
+true of NetworkManager's blackhole - and would have left the phone with a
+route that eats every packet while reporting itself healthy. Found by
+measuring rather than by reading, and only because the end-to-end test finally
+had a live bearer to run against.
 
 ### Why a watcher and not a connection profile
 
@@ -388,6 +429,59 @@ oFono clear and re-activate the data context, and on a weak cell that comes
 straight back as `Unexpected data call status 65535` and leaves mobile data
 down. The symlink works immediately; the drop-in can wait for the next reload
 or boot.
+
+## 9. A dropped data call stays dropped
+
+Watched on 13 September, in one hour, on one phone:
+
+```
+13:00:55  ofonod: Unexpected data call status 65535
+13:06     no address on any ccmni, bearer connected=no
+13:12     still down
+```
+
+Nothing brings it back. The context is activated once, at boot, and after that
+the shipped system has no opinion about whether mobile data exists. Every
+recovery that day was a hand-typed `SetProperty Active true`.
+
+That turns fix 7 into half a fix: a fallback route to an interface nobody
+revives is not a fallback.
+
+`furios-mobile-context` supervises it, and almost all of its code is about not
+acting:
+
+- **`Powered=false` is a decision.** Somebody switched mobile data off. A
+  daemon that switches it back on is a bug with a service file.
+- **Not attached, or not registered, means there is nothing to ask.** Retrying
+  into an absent network keeps a struggling radio busy instead of letting it
+  find a cell. `unregistered` contains `registered`, so the match is quoted -
+  a loose one would retry hardest exactly when it helps least.
+- **Never during a call.**
+- **The backoff list is also the attempt limit** (15, 30, 60, 120, 300, 300).
+  When it runs out the supervisor stops and waits for the radio to change
+  state. At -132 dBm no amount of asking helps and asking costs power.
+- **Active=true is not proof.** oFono reports it on a context whose data call
+  is gone, so the test is whether the interface it names carries an address.
+
+The escalation exists because of a state this device really reached: oFono
+answering `SetProperty` with a clean `method return`, logging nothing, doing
+nothing, and swallowing every further request because it already believed
+`Active=true`. `Powered` false, four seconds, true - then it came back. It is
+not the first move, because cycling `Powered` drops data outright.
+
+Woken by oFono's signals, not a clock: the loop blocks on `dbus-monitor` and
+only falls back to a timer while a revive is actually in flight. Healthy, one
+wakeup an hour.
+
+**Watched, and it did nothing - correctly.** Deactivating the context by hand
+brought it back in about two seconds without the supervisor logging a word:
+NetworkManager reconnects a *clean* deactivation on its own. The case this is
+for is the failed data call, where nothing does. That case has not been caught
+live yet; it is reproduced in the tests, not on the radio.
+
+**Do not run two.** `furios-mobile-data.service` on this phone activates the
+same context at boot. Two things racing on one D-Bus property is a good way
+back into the state above, so `modemctl status` warns when both are enabled.
 
 ---
 
@@ -661,6 +755,6 @@ take it: oFono reporting a gateway it does not have, or NetworkManager having
 no way to express "default route, no next hop" for a point-to-point link that
 Android has handled this way for fifteen years.
 
-Two of the eight are already fixed or half-fixed upstream, which matters here:
+Two of the nine are already fixed or half-fixed upstream, which matters here:
 an ofono2mm update brings part of this along by itself and overwrites the rest.
 That is what `modemctl apply` is for.

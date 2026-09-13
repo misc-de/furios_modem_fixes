@@ -1,0 +1,279 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+#
+# Brings the mobile data context back up when it falls over during operation.
+#
+# The phone already activates the context once at boot. Nothing puts it back
+# after that, and it does fall over: on 13 September the data call failed four
+# times in one hour with
+#
+#     ofonod: Unexpected data call status 65535
+#
+# and each time mobile data stayed down until somebody activated it by hand.
+# A fallback route to an interface nobody revives is not a fallback.
+#
+# Restraint is the whole design, not a feature:
+#
+#   - It only ever acts when the system already WANTS mobile data. Powered
+#     false is the user switching mobile data off, and a daemon that switches
+#     it back on is a bug with a service file. Same for a modem that is not
+#     registered, or not attached: there is nothing to retry against, and
+#     retrying is how you keep a weak radio busy instead of letting it find a
+#     cell.
+#   - It backs off, hard, and then gives up and waits for the radio to change
+#     state rather than retrying forever. At -132 dBm no amount of asking
+#     helps, and asking costs power on a phone that is already struggling.
+#   - It never touches the stack during a voice call.
+#
+# Woken by oFono's own signals, not by a clock: the loop blocks on
+# dbus-monitor and only falls back to a timer while a revive is actually in
+# flight. Healthy, it costs one wakeup an hour.
+set -u
+
+VERSION=0.1.0
+
+# Backoff between attempts, in seconds, one per attempt. When the list runs
+# out we stop and wait for the radio to tell us something changed - the list
+# length IS the attempt limit, deliberately.
+BACKOFF=${FURIOS_MOBILE_CONTEXT_BACKOFF:-"15 30 60 120 300 300"}
+# After this many failures in a row, stop merely asking and cycle the data
+# subsystem. oFono can end up answering SetProperty with "method return" while
+# doing nothing at all and logging nothing at all; Powered false/true is what
+# gets it out of that. It is heavier, so it is not the first move.
+ESCALATE_AFTER=${FURIOS_MOBILE_CONTEXT_ESCALATE:-3}
+# Safety net against a signal we never saw. Long on purpose.
+IDLE=${FURIOS_MOBILE_CONTEXT_IDLE:-3600}
+
+ONCE=0
+QUIET=0
+for arg in "$@"; do
+    case "$arg" in
+        --once)    ONCE=1 ;;
+        --quiet)   QUIET=1 ;;
+        --version) echo "furios-mobile-context $VERSION"; exit 0 ;;
+        -h|--help)
+            cat <<'EOF'
+Usage: furios-mobile-context [--once] [--quiet]
+
+Brings the mobile data context back up when it drops. Without --once it stays
+in the foreground and waits on oFono's signals; that is how the service runs
+it.
+
+  --once     judge the situation once, act if it is warranted, exit
+  --quiet    only complain, do not narrate
+
+It does nothing at all unless mobile data is switched on, the modem is
+registered and attached, no call is in progress, and the context is actually
+down. Exit 0 means "the situation is as it should be, or I did what I could".
+
+Environment:
+  FURIOS_MOBILE_CONTEXT_BACKOFF    seconds between attempts, one per attempt;
+                                   the number of entries is the attempt limit
+  FURIOS_MOBILE_CONTEXT_ESCALATE   failures before cycling Powered (default 3)
+  FURIOS_MOBILE_CONTEXT_IDLE       safety-net wakeup while healthy (default 3600)
+EOF
+            exit 0 ;;
+        *) echo "furios-mobile-context: unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+
+log() { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
+err() { printf '%s\n' "$*" >&2; }
+
+OF=org.ofono
+# --print-reply on every call, always. Without it dbus-send exits 0 on an
+# error it never showed anybody, and a daemon built on that reports success
+# while achieving nothing - which is exactly the failure it is here to fix.
+ask() {
+    # ask <object> <interface>.<method> [args...]
+    local obj=$1 method=$2; shift 2
+    timeout 15 dbus-send --system --print-reply --dest="$OF" "$obj" "$method" "$@" 2>/dev/null
+}
+
+# Value of a property out of a GetProperties reply on stdin. dbus-send prints
+# the name and the value on consecutive lines.
+prop() {
+    # prop <name> <stdin: reply>
+    sed -n "/string \"$1\"/{n;s/.*variant *//;s/^ *//;s/ *$//;p;q}"
+}
+
+MODEM=
+CONTEXT=
+# Asked once per pass rather than cached for the life of the process: the
+# modem object survives a lot, but a context can be removed and remade, and a
+# daemon holding a stale path silently stops working.
+discover() {
+    local modems paths p type
+    modems=$(ask / org.ofono.Manager.GetModems | grep -oE '"/[^"]+"' | tr -d '"')
+    MODEM=$(printf '%s\n' "$modems" | head -1)
+    [ -n "$MODEM" ] || return 1
+
+    paths=$(ask "$MODEM" org.ofono.ConnectionManager.GetContexts \
+            | grep -oE '"/[^"]+"' | tr -d '"')
+    for p in $paths; do
+        type=$(ask "$p" org.ofono.ConnectionContext.GetProperties | prop Type)
+        # The internet context, never the MMS one - activating that is defect 2
+        # all over again.
+        case "$type" in *internet*) CONTEXT=$p; return 0 ;; esac
+    done
+    return 1
+}
+
+# --- what the system wants --------------------------------------------------
+
+data_wanted() {
+    local props powered attached
+    props=$(ask "$MODEM" org.ofono.ConnectionManager.GetProperties)
+    powered=$(printf '%s\n' "$props" | prop Powered)
+    attached=$(printf '%s\n' "$props" | prop Attached)
+    # Powered false is a decision somebody made. Attached false means the
+    # network has not given us a packet service yet; there is nothing to
+    # activate against and hammering it does not bring one.
+    #
+    # Matched against the whole rendered value, not a loose substring: these
+    # decide whether a daemon overrides a switch the user threw.
+    case "$powered"  in *"boolean true"*) ;; *) return 1 ;; esac
+    case "$attached" in *"boolean true"*) ;; *) return 1 ;; esac
+    return 0
+}
+
+registered() {
+    local status
+    status=$(ask "$MODEM" org.ofono.NetworkRegistration.GetProperties | prop Status)
+    # Quoted, because oFono's "unregistered" contains "registered" and a loose
+    # match would have this retrying hardest exactly when there is no network.
+    case "$status" in *'"registered"'*|*'"roaming"'*) return 0 ;; esac
+    return 1
+}
+
+call_in_progress() {
+    ask "$MODEM" org.ofono.VoiceCallManager.GetCalls | grep -q 'object path'
+}
+
+# --- what is actually true --------------------------------------------------
+#
+# Active alone is not the truth. oFono reports Active=true on a context whose
+# data call has gone; the honest test is whether the interface it names is
+# carrying an address.
+context_up() {
+    local props active iface
+    props=$(ask "$CONTEXT" org.ofono.ConnectionContext.GetProperties)
+    active=$(printf '%s\n' "$props" | prop Active)
+    case "$active" in *true*) ;; *) return 1 ;; esac
+
+    iface=$(printf '%s\n' "$props" | sed -n '/string "Interface"/{n;s/.*string "//;s/".*//;p;q}')
+    [ -n "$iface" ] || return 1
+    ip -4 -o addr show dev "$iface" scope global 2>/dev/null | grep -q .
+}
+
+# --- acting -----------------------------------------------------------------
+
+activate() {
+    ask "$CONTEXT" org.ofono.ConnectionContext.SetProperty \
+        string:"Active" variant:boolean:true >/dev/null
+}
+
+# oFono answering without acting is a real state, seen on this device: the
+# reply comes back clean, the journal stays empty, no address appears, and
+# every further SetProperty is swallowed because oFono already believes
+# Active=true. Cycling the data subsystem is what breaks that.
+cycle_powered() {
+    log "oFono is answering without acting - cycling mobile data"
+    ask "$MODEM" org.ofono.ConnectionManager.SetProperty \
+        string:"Powered" variant:boolean:false >/dev/null
+    sleep 4
+    ask "$MODEM" org.ofono.ConnectionManager.SetProperty \
+        string:"Powered" variant:boolean:true >/dev/null
+    sleep 2
+}
+
+FAILURES=0
+NEXT_WAIT=$IDLE
+read -ra BACKOFF_STEPS <<< "$BACKOFF"
+
+# One pass. Sets NEXT_WAIT to the seconds to wait before the next one: IDLE
+# when there is nothing to do, the next backoff step while a revive is in
+# flight.
+#
+# NEXT_WAIT is a variable and not something this prints, because the caller
+# would have to run it in a command substitution to read it - and that is a
+# subshell, where every change to FAILURES is thrown away the moment it
+# returns. The backoff would then restart at the first step for ever, which
+# looks exactly like working and is the opposite of restraint.
+pass() {
+    if ! discover; then
+        log "no oFono modem or no internet context - nothing to supervise"
+        FAILURES=0; NEXT_WAIT=$IDLE; return 0
+    fi
+
+    if context_up; then
+        [ "$FAILURES" -gt 0 ] && log "mobile data is back up"
+        FAILURES=0; NEXT_WAIT=$IDLE; return 0
+    fi
+
+    if ! data_wanted; then
+        # Mobile data is off, or the network has not attached us. Either way
+        # this is not ours to override.
+        FAILURES=0; NEXT_WAIT=$IDLE; return 0
+    fi
+
+    if ! registered; then
+        FAILURES=0; NEXT_WAIT=$IDLE; return 0
+    fi
+
+    if call_in_progress; then
+        log "a call is in progress - leaving the modem alone"
+        NEXT_WAIT=60; return 0
+    fi
+
+    # Out of attempts. Stop asking and wait for the radio to change its mind;
+    # a registration or attach change wakes us and starts a fresh round.
+    local steps=${#BACKOFF_STEPS[@]}
+    if [ "$FAILURES" -ge "$steps" ]; then
+        [ "$FAILURES" -eq "$steps" ] && \
+            log "giving up after $steps attempts - waiting for the radio to change state"
+        FAILURES=$((FAILURES + 1))
+        NEXT_WAIT=$IDLE; return 0
+    fi
+
+    FAILURES=$((FAILURES + 1))
+    if [ "$FAILURES" -gt "$ESCALATE_AFTER" ]; then
+        cycle_powered
+    fi
+    log "mobile data is down - activating the context (attempt $FAILURES)"
+    activate
+
+    # The wait for this attempt is the FAILURES-th entry of the list.
+    NEXT_WAIT=${BACKOFF_STEPS[$((FAILURES - 1))]:-$IDLE}
+}
+
+command -v dbus-send >/dev/null 2>&1 || { err "furios-mobile-context: dbus-send not found"; exit 1; }
+command -v ip        >/dev/null 2>&1 || { err "furios-mobile-context: ip not found"; exit 1; }
+
+if [ "$ONCE" -eq 1 ]; then
+    pass
+    exit 0
+fi
+
+command -v dbus-monitor >/dev/null 2>&1 || { err "furios-mobile-context: dbus-monitor not found"; exit 1; }
+
+# dbus-monitor is a wake signal, nothing more - its output is never parsed.
+# Anything oFono says about the context, the packet service or registration
+# means "look again", and looking again is one cheap round of dbus-send.
+pass
+dbus-monitor --system \
+    "type='signal',sender='$OF',interface='org.ofono.ConnectionContext'" \
+    "type='signal',sender='$OF',interface='org.ofono.ConnectionManager'" \
+    "type='signal',sender='$OF',interface='org.ofono.NetworkRegistration'" \
+    2>/dev/null | while :; do
+        # Either something happened, or the backoff ran out. Both mean: look.
+        if read -r -t "$NEXT_WAIT" _line; then
+            # Swallow the burst that comes with any one state change.
+            while read -r -t 1 _more; do :; done
+        fi
+        pass
+    done
+
+err "furios-mobile-context: dbus-monitor exited"
+exit 1

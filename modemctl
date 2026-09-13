@@ -465,6 +465,24 @@ cmd_status() {
         *)       warn "furios-mobile-route.service is '$mobile_state' - the route will not survive a reboot" ;;
     esac
 
+    local ctx_state
+    ctx_state=$(systemctl is-enabled furios-mobile-context.service 2>/dev/null)
+    case "$ctx_state" in
+        enabled) ok "furios-mobile-context.service enabled" ;;
+        "")      skip "furios-mobile-context.service not installed" ;;
+        *)       warn "furios-mobile-context.service is '$ctx_state' - a dropped data call stays dropped" ;;
+    esac
+
+    # A second thing activating the same context is not twice as good. Two of
+    # them racing on one D-Bus property is how oFono ends up answering
+    # SetProperty while doing nothing, which is the state this had to be dug
+    # out of by hand.
+    if [ "$ctx_state" = enabled ] && \
+       [ "$(systemctl is-enabled furios-mobile-data.service 2>/dev/null)" = enabled ]; then
+        warn "furios-mobile-data.service is enabled too - both activate the same"
+        warn "     context. Keep one: 'systemctl disable --now furios-mobile-data'"
+    fi
+
     say ""
     if [ "$bad_count" -eq 0 ]; then
         say "${C_OK}everything in place${C_0}"

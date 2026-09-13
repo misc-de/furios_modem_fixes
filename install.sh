@@ -17,6 +17,8 @@ sudo install -Dm755 tools/furios-modem-signal "$BIN/furios-modem-signal"
 sudo install -Dm755 tools/furios-modem-signal "$SHARE/tools/furios-modem-signal"
 sudo install -Dm755 tools/furios-mobile-route "$BIN/furios-mobile-route"
 sudo install -Dm755 tools/furios-mobile-route "$SHARE/tools/furios-mobile-route"
+sudo install -Dm755 tools/furios-mobile-context "$BIN/furios-mobile-context"
+sudo install -Dm755 tools/furios-mobile-context "$SHARE/tools/furios-mobile-context"
 
 sudo mkdir -p "$SHARE/patches" "$SHARE/patched-files" "$SHARE/networkmanager"
 sudo install -m644 networkmanager/*.conf "$SHARE/networkmanager/"
@@ -38,6 +40,10 @@ sed "s|^ExecStart=/usr/bin/furios-mobile-route|ExecStart=$BIN/furios-mobile-rout
     systemd/furios-mobile-route.service | sudo tee \
     /etc/systemd/system/furios-mobile-route.service >/dev/null
 sudo chmod 644 /etc/systemd/system/furios-mobile-route.service
+sed "s|^ExecStart=/usr/bin/furios-mobile-context|ExecStart=$BIN/furios-mobile-context|" \
+    systemd/furios-mobile-context.service | sudo tee \
+    /etc/systemd/system/furios-mobile-context.service >/dev/null
+sudo chmod 644 /etc/systemd/system/furios-mobile-context.service
 
 sudo systemctl daemon-reload
 # enable, not start: applying happens below, with output you can read.
@@ -46,6 +52,7 @@ sudo systemctl enable furios-modem-fixes.service >/dev/null
 # is running but was never enabled is a fix that disappears at the next boot
 # without telling anybody.
 sudo systemctl enable --now furios-mobile-route.service >/dev/null
+sudo systemctl enable --now furios-mobile-context.service >/dev/null
 
 sudo "$BIN/modemctl" apply
 

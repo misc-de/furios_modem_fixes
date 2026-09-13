@@ -19,11 +19,14 @@ TOOL="$ROOT/tools/furios-mobile-route"
 # The scenario file is what each test rewrites; both stubs read it fresh on
 # every call, so a test is three assignments and a run.
 scenario() {
-    # scenario <bearers> <addr iface> <existing route iface>
+    # scenario <bearers> <addr iface> <existing route iface> [via]
+    # "via" renders the existing route as NetworkManager writes it: a next hop
+    # pointing at the interface's own address.
     cat > "$STUBDIR/scenario" <<EOF
 BEARERS="$1"
 ADDR_IFACE="$2"
 ROUTE_IFACE="$3"
+ROUTE_VIA="${4:-}"
 EOF
 }
 
@@ -64,11 +67,21 @@ case "$*" in
       [ -n "$ADDR_IFACE" ] && [ "$dev" = "$ADDR_IFACE" ] &&
           echo "2: $dev    inet 10.13.195.47/24 scope global $dev" ;;
   "-4 route show default dev "*)
-      [ -n "$ROUTE_IFACE" ] && [ "$dev" = "$ROUTE_IFACE" ] &&
-          echo "default dev $dev scope link metric 1050" ;;
+      [ -n "$ROUTE_IFACE" ] && [ "$dev" = "$ROUTE_IFACE" ] && {
+          if [ -n "$ROUTE_VIA" ]; then
+              echo "default via $ROUTE_VIA dev $dev proto static metric 1050"
+          else
+              echo "default dev $dev scope link metric 1050"
+          fi
+      } ;;
   "-4 route show default metric "*)
-      [ -n "$ROUTE_IFACE" ] &&
-          echo "default dev $ROUTE_IFACE scope link metric 1050" ;;
+      [ -n "$ROUTE_IFACE" ] && {
+          if [ -n "$ROUTE_VIA" ]; then
+              echo "default via $ROUTE_VIA dev $ROUTE_IFACE proto static metric 1050"
+          else
+              echo "default dev $ROUTE_IFACE scope link metric 1050"
+          fi
+      } ;;
 esac
 exit 0
 STUB
@@ -118,6 +131,19 @@ check "no address on the interface yet - no route" "" "$(writes)"
 scenario "default:yes:ccmni0" ccmni0 ccmni0
 run_tool
 check "route already correct - nothing written" "" "$(writes)"
+
+printf '\n\033[1m== NetworkManager own route is not ours\033[0m\n'
+
+# When NetworkManager does process the bearer connect it installs
+# "default via <the interface own address>" at this very metric. The kernel
+# takes it and it drops every packet - measured at 100% loss while ip route
+# looks healthy and NM reports connectivity "full". Treating that as "the route
+# is there" would leave the phone with a black hole and a watcher reporting
+# success.
+scenario "default:yes:ccmni0" ccmni0 ccmni0 10.10.95.220
+run_tool
+check "a via-route at our metric is replaced, not accepted" \
+      "route replace default dev ccmni0 metric 1050;" "$(writes)"
 
 printf '\n\033[1m== cleaning up after itself\033[0m\n'
 
