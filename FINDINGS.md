@@ -384,6 +384,50 @@ the change if its timestamp still looks newer. `modemctl apply` removes it.
 
 ---
 
+## Diagnosing it by hand
+
+`modemctl status` and `modemctl check` cover the usual questions. These are the
+raw commands behind them, for the cases they do not answer.
+
+```bash
+# Are the loops back?  (should be empty)
+journalctl -u ofono --since "-10min" \
+    | grep -E "Error 44|Unexpected data call|Activating context"
+
+# Is the data registration flapping?  (should be empty)
+journalctl -u ofono --since "-10min" | grep "data reg changed"
+
+# Is NetworkManager stuck in prepare?
+nmcli -t device | grep ril_0
+
+# Is the prefix right?  (must be /24 or similar, never /0)
+ip -br addr | grep -E "ccmni[0-9]+ " | grep -v DOWN
+
+# Who is talking to oFono?
+# NOTE: without sudo, dbus-monitor shows NOTHING and does not say so - the
+# system bus does not allow unprivileged eavesdropping. An empty run is not
+# evidence of absence.
+sudo dbus-monitor --system "type='method_call',destination='org.ofono'"
+
+# Is the signal bar alive?  ("recent", not "cached", and not 0%)
+mmcli -m any | grep "signal quality"
+
+# Is ofono2mm really asking every 30 s?  (sudo required, see above)
+sudo timeout 70 dbus-monitor --system \
+  "type='method_call',interface='org.ofono.NetworkMonitor'" \
+  | grep GetServingCellInformation
+
+# What the radio really receives, cross-checked against AT+CESQ
+modemctl signal
+
+# Modem state
+mmcli -m any
+dbus-send --system --print-reply --dest=org.ofono /ril_0 \
+    org.ofono.RadioSettings.GetProperties
+```
+
+---
+
 ## Upstream
 
 Four reports were written against the **current** upstream tree, not just the
