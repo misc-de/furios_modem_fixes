@@ -161,6 +161,25 @@ check "the backoff never shortens" yes "$rising"
 check "there is a limited number of attempts" yes \
       "$([ "$(set -- $steps; echo $#)" -ge 3 ] && echo yes || echo no)"
 
+# The net under the whole thing. Everything else here is woken by a signal;
+# this is the one look taken for no reason, and it is the only thing that would
+# ever notice the state context_up() exists for - oFono reporting Active=true
+# on a context whose data call has gone. Nothing changed, so nothing is
+# announced, and no filter can catch what is never sent.
+#
+# Bounded from both sides. Too long and that state stands for as long as the
+# bound; it was an hour, and survived only because the wake-up filter used to
+# be wide enough to catch oFono's signal strength ten times a minute. Too short
+# and the net becomes the polling this daemon was written not to be: 60 s is
+# 0.145 % of a core for looks that are almost always wasted.
+idle=$(sed -n 's/^IDLE=${FURIOS_MOBILE_CONTEXT_IDLE:-\([0-9]*\)}.*/\1/p' "$TOOL")
+check "there is an idle safety net at all" yes \
+      "$([ -n "$idle" ] && echo yes || echo no)"
+check "the blind window is minutes, not an hour" yes \
+      "$([ -n "$idle" ] && [ "$idle" -le 600 ] && echo yes || echo "no (${idle:-unset} s)")"
+check "and the net is not a poll" yes \
+      "$([ -n "$idle" ] && [ "$idle" -ge 120 ] && echo yes || echo "no (${idle:-unset} s)")"
+
 # The escalation exists because oFono can answer SetProperty cleanly and do
 # nothing. It must not be the first move: cycling Powered drops data outright.
 esc=$(sed -n 's/^ESCALATE_AFTER=${FURIOS_MOBILE_CONTEXT_ESCALATE:-\([0-9]*\)}.*/\1/p' "$TOOL")

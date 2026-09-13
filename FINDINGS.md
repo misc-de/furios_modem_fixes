@@ -550,9 +550,9 @@ nothing, and swallowing every further request because it already believed
 `Active=true`. `Powered` false, four seconds, true - then it came back. It is
 not the first move, because cycling `Powered` drops data outright.
 
-Woken by oFono's signals, not a clock: the loop blocks on `dbus-monitor` and
-only falls back to a timer while a revive is actually in flight. Healthy, one
-wakeup an hour.
+Woken by oFono's signals, not a clock: the loop blocks on `dbus-monitor`, and
+the timer is a net under it rather than the mechanism. Healthy, one look every
+five minutes and nothing at all in between.
 
 **Watched, and it did nothing - correctly.** Deactivating the context by hand
 brings it back in about two seconds without the supervisor logging a word, and
@@ -1097,19 +1097,30 @@ announcement a context that did not exist at startup will ever make. Measured
 again with the new rules: zero oFono wake-ups in 70 s, and a unit whose CPU
 counter does not move at all while the phone sits there.
 
-Worth knowing what that costs in the other direction. The Strength chatter was
-an accidental heartbeat: a state change that matched none of the rules would
-have been picked up within seconds anyway, just because something else woke the
-loop. Now the only fallback is the declared one, `FURIOS_MOBILE_CONTEXT_IDLE`,
-an hour by default. The drop this exists for does announce itself - oFono sets
-`Active` false on the context, which is matched - so this is the design working
-as it was written rather than a new hole. But if a way to lose the data call
-without a matching signal ever turns up, that hour is where it will hide.
+That the filter still hears what matters was measured on a real event rather
+than argued: at 18:01:37 oFono cleared the context and rebuilt it, and the
+unit's CPU counter - motionless for the five minutes before - moved by 219 ms,
+two or three passes. The drop this supervisor was written for announces itself.
+
+What the narrowing did take away was an accident. The Strength chatter had been
+a heartbeat: a state change matching none of the rules was picked up within
+seconds anyway, because something else woke the loop every few seconds. The
+only fallback left is the declared one, and an hour was the wrong length for a
+net that is now load-bearing. The state it has to catch is the one
+`context_up()` exists for - oFono reporting `Active=true` on a context whose
+data call has gone. Nothing changed, so nothing is announced, and no filter can
+catch what is never sent.
+
+`FURIOS_MOBILE_CONTEXT_IDLE` is therefore five minutes, not an hour: 288 looks
+a day, 25 s of CPU, 0.029 % of a core - eighteen times cheaper than the
+heartbeat it replaces, and it bounds that blind window at the same order as
+NetworkManager's own connectivity check. One minute would be 0.145 % for looks
+that are almost always wasted, which is the polling this daemon was written not
+to be.
 
 The route watcher's share is not polling either - it blocks on netlink, and
 `ip monitor address route link` saw no event at all in a 60 s idle sample. What
-it pays
-for is the ~5 minute cadence at which NetworkManager reinstalls its own
+it pays for is the ~5 minute cadence at which NetworkManager reinstalls its own
 `via`-the-own-address default route, which this then removes again; each round
 is three `mmcli` calls. Nothing in any journal says who installs it.
 

@@ -27,8 +27,9 @@
 #   - It never touches the stack during a voice call.
 #
 # Woken by oFono's own signals, not by a clock: the loop blocks on
-# dbus-monitor and only falls back to a timer while a revive is actually in
-# flight. Healthy, it costs one wakeup an hour.
+# dbus-monitor, and the timer is a net under it rather than the mechanism.
+# Healthy, it costs one look every five minutes - 0.029 % of a core - and
+# nothing at all in between.
 set -u
 
 VERSION=0.1.0
@@ -42,8 +43,23 @@ BACKOFF=${FURIOS_MOBILE_CONTEXT_BACKOFF:-"15 30 60 120 300 300"}
 # doing nothing at all and logging nothing at all; Powered false/true is what
 # gets it out of that. It is heavier, so it is not the first move.
 ESCALATE_AFTER=${FURIOS_MOBILE_CONTEXT_ESCALATE:-3}
-# Safety net against a signal we never saw. Long on purpose.
-IDLE=${FURIOS_MOBILE_CONTEXT_IDLE:-3600}
+# Safety net against a drop that announces itself to nobody.
+#
+# The drop this was written for does announce itself - oFono clears the
+# context and the Active it changes is one of the signals below, measured at
+# the device. The one that would not is the state context_up() exists for:
+# oFono reporting Active=true on a context whose data call has gone. Nothing
+# changed, so nothing is announced, and the only thing that would ever notice
+# is a look taken for no reason.
+#
+# This used to be an hour, which was survivable only by accident: the wake-up
+# filter was wide enough to catch oFono's signal strength, ten or more times a
+# minute, so something looked every few seconds whether it had reason to or
+# not. Narrowing that filter took 0.53 % of a core off an idle phone and took
+# the accident with it. Five minutes is what buys the net back honestly - 288
+# looks a day, 25 s of CPU, 0.029 % - and bounds the blind window at the same
+# order as NetworkManager's own connectivity check rather than at an hour.
+IDLE=${FURIOS_MOBILE_CONTEXT_IDLE:-300}
 
 ONCE=0
 QUIET=0
@@ -71,7 +87,7 @@ Environment:
   FURIOS_MOBILE_CONTEXT_BACKOFF    seconds between attempts, one per attempt;
                                    the number of entries is the attempt limit
   FURIOS_MOBILE_CONTEXT_ESCALATE   failures before cycling Powered (default 3)
-  FURIOS_MOBILE_CONTEXT_IDLE       safety-net wakeup while healthy (default 3600)
+  FURIOS_MOBILE_CONTEXT_IDLE       safety-net wakeup while healthy (default 300)
 EOF
             exit 0 ;;
         *) echo "furios-mobile-context: unknown argument: $arg" >&2; exit 2 ;;
