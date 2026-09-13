@@ -212,10 +212,18 @@ cbs_db_edit() {
     return $rc
 }
 
-# Every apply after a package update leaves another set of backups behind.
-# They are all copies of the same shipped file, they never get read again once
-# the next one exists, and after a day of testing there were 28 of them. Keep
-# the newest few - enough to walk back from a bad update - and drop the rest.
+# Every apply that actually patches something leaves another set of backups
+# behind. They are all copies of the same shipped file, they never get read
+# again once the next one exists, and after a day of testing there were 28 of
+# them. Keep the newest few - enough to walk back from a bad update - and drop
+# the rest.
+#
+# Called from the branch that is about to take a backup, and from nowhere else.
+# It used to run before the state was even known, which made an apply with
+# nothing to do delete files anyway: measured at sixteen backups going to
+# eleven on a run whose own output said "Nothing to do". Everything else here
+# looks before it touches, and a no-op has to be a no-op down to the mtime, or
+# the boot unit and the apt hook are not the harmless things they claim to be.
 # A call in progress is the one moment not to restart the modem stack. The
 # apt hook runs after every package operation, including an unattended upgrade
 # that happens to land while the phone is being used as a phone. The patched
@@ -338,7 +346,6 @@ cmd_apply() {
 
     head_ "ofono2mm"
     for f in $FILES; do
-        prune_backups "$f"
         case "$(patch_state "$f")" in
             applied) skip "$f.py already patched" ;;
             absent)  bad "$f.py not found - is ofono2mm installed?"; failed=1 ;;
@@ -347,6 +354,7 @@ cmd_apply() {
                 warn "     ready-made file in $SHARE/patched-files/$f.py - check by hand"
                 failed=1 ;;
             missing)
+                prune_backups "$f"
                 cp -a "$(file_path "$f")" "$(file_path "$f").bak.$ts"
                 if patch -s -f -p1 -d "$TARGET/.." < "$PATCHES/ofono2mm-$f.patch"; then
                     ok "$f.py patched (backup: $f.py.bak.$ts)"

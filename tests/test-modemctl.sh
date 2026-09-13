@@ -661,6 +661,52 @@ rm -f "$CBSDB"
 check "a missing database is not called a fault" absent "$(cbs_verdict)"
 write_cbs_db "$FIXED" "$FIXED"
 
+printf '\n\033[1m== a no-op is a no-op\033[0m\n'
+
+# The boot unit and the apt hook both run apply, the hook after every single
+# package operation on the phone. Their whole claim to being harmless is that
+# apply with nothing to do changes nothing - so it has to be true down to the
+# mtime, not only for the files it patches.
+#
+# It was not. prune_backups ran before the state was even known, so a run whose
+# own output said "Nothing to do" still deleted backups: sixteen went to eleven
+# on the phone, measured.
+#
+# Two things this test got wrong before it got them right. The backlog is faked
+# rather than accumulated, because reset_tree wipes the tree between runs and
+# the backup name carries a one-second timestamp - applying in a loop leaves
+# one backup and nothing to prune, so the broken code passed. And the claim is
+# not "the run prints Nothing to do": the sandbox is shared, an earlier test
+# takes the bus policy away, and a run that puts it back is right to say it
+# did. What has to hold is that the SECOND run of two changes nothing.
+reset_tree patched 1.4
+sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+for n in 1 2 3 4 5; do
+    cp "$TREE/mm_modem.py" "$TREE/mm_modem.py.bak.2026090$n-120000"
+done
+
+snapshot() {
+    find "$WORK/usr" "$DBUSD" -type f -printf '%p %T@ %s\n' 2>/dev/null | sort
+}
+before=$(snapshot)
+backups_before=$(find "$WORK/usr" -name '*.bak.*' 2>/dev/null | wc -l)
+
+out=$(sandbox bash "$ROOT/modemctl" apply --no-restart 2>&1)
+check "a second apply reports no patch work" 6 \
+      "$(printf '%s\n' "$out" | grep -c 'already patched')"
+check "and changes no file at all" "$before" "$(snapshot)"
+check "and deletes none of the 5 backups" "$backups_before" \
+      "$(find "$WORK/usr" -name '*.bak.*' 2>/dev/null | wc -l)"
+
+# And the pruning still happens where it belongs. Same backlog, but this time
+# one file is back to the shipped version, so apply has real work to do - and
+# the backups of THAT file get trimmed while it takes its own.
+cp "$ROOT/original-files/mm_modem.py" "$TREE/mm_modem.py"
+sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+kept=$(find "$TREE" -name 'mm_modem.py.bak.*' 2>/dev/null | wc -l)
+check "a run that patches prunes the backlog it is adding to" yes \
+      "$([ "$kept" -le 3 ] && echo yes || echo "no - $kept backups")"
+
 printf '\n\033[1m== nothing assumed that can be asked\033[0m\n'
 
 # /ril_0 is what oFono calls the modem on THIS phone, and it was written into
