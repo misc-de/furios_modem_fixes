@@ -53,10 +53,54 @@ The consequence is not the log noise. The modem was in permanent RAT
 re-evaluation and never got to a clean cell reselection. **That, not weak
 reception, was the cause of the flapping connection.**
 
-The modem advertises IRadio 1.0 through **1.6**. Only 1.6 has
-`setAllowedNetworkTypesBitmap`, the path this modem expects for NR.
+The modem advertises IRadio 1.0 through **1.6**.
 
-**Fix:** `radioInterface = 1.6`.
+**Fix:** leave `radioInterface` at the shipped `1.4` and stop asking for NR -
+`TechnologyPreference = lte`. Nothing else stops the loop, because the loop is
+the request itself.
+
+### The fix this used to be, and why it was wrong
+
+For one day this said **`radioInterface = 1.6`**, and the loop did stop. Both
+halves of that were wrong.
+
+`1.6` is not a value `ofono-binder-plugin` accepts. Its name table runs `1.0`
+to `1.5` and stops, today's upstream master included, and the parser says
+nothing about a value it does not know:
+
+```c
+for (i = RADIO_INTERFACE_1_0; i < RADIO_INTERFACE_COUNT; i++)
+    if (!g_strcmp0(name, binder_plugin_radio_interface_name(i)))
+        return i;
+return BINDER_DEFAULT_RADIO_INTERFACE;      /* = RADIO_INTERFACE_1_2 */
+```
+
+So the phone ran IRadio **1.2** - two versions *below* the one it shipped with
+- while the config file claimed 1.6. Confirmed against the installed binary:
+the strings `1.0` through `1.5` are in it, `1.6` is not.
+
+And that is also why the loop stopped, which is the part that fooled us. Right
+after the parse comes:
+
+```c
+if (slot->version < RADIO_INTERFACE_1_4)
+    config->techs &= ~OFONO_RADIO_ACCESS_MODE_NR;
+```
+
+At 1.2 the plugin drops NR from the technology list altogether, so oFono never
+asks the modem for NR and the modem never rejects anything. The symptom was
+gone because the request was gone. 5G went with it - see **5G** below.
+
+Measured 2026-09-13, three values, everything else untouched:
+
+| `radioInterface` | modem comes up | `nr` offered | Error 44 while preference is `nr` |
+|---|---|---|---|
+| `1.4` (shipped) | yes, 26 interfaces in 10 s | **yes** | **60 in 60 s** |
+| `1.5` | **no** - stuck at 5 interfaces, `Power request failed` every 30 s | - | - |
+| `1.6` (i.e. 1.2) | yes | no | 0 |
+
+So there is no version of this setting that buys anything: `1.5` does not boot
+the modem, `1.6` does not exist, and `1.4` is what the phone already had.
 
 ## 2. Runaway loop: MMS context with a placeholder APN
 
@@ -1192,46 +1236,70 @@ the change if its timestamp still looks newer. `modemctl apply` removes it.
 
 ## 5G
 
-Not a defect of its own, but the question fault 1 leaves behind: is NR reachable
-once the modem stops rejecting it?
+Not a defect of its own, but the question defect 1 leaves behind: can this
+phone reach NR at all?
 
-`radioInterface = 1.4` made oFono ask for NR through a call this modem refuses,
-so it retried every two seconds - 42,714 rejections in one day, and never a 5G
-connection. A mobile data toggle then left `TechnologyPreference` on LTE, so
-afterwards nothing asked for 5G at all. Both states look identical from the
-outside: no 5G, ever.
+**Measured answer: no, and not because of the radio.** `ofono-binder-plugin`
+cannot speak the interface version that NR needs on this modem, and no setting
+in this repository changes that.
 
-With `radioInterface = 1.6` the modem accepts `TechnologyPreference = nr`.
-Measured after setting it:
+### What is actually in the way
 
-| | result |
-|---|---|
-| 12 min steady state, sampled every 30 s | preference `nr`, no `Error 44`, no registration churn, data connected throughout |
-| mobile data off and on again | preference survives - this is the exact event that reset it under 1.4 |
-| persisted to `/var/lib/ofono/<IMSI>/radiosetting` | `TechnologyPreference=8` |
-| ofonod CPU over 600 s | 0.0717% against 0.0683% on LTE the day before - noise |
+`AvailableTechnologies` is not a question anybody asks the modem. oFono hands
+back whatever the plugin was configured with:
 
-The phone still registers on LTE here, at roughly -120 dBm on band 1. Whether
-that is coverage, provisioning or the NSA anchor cannot be decided from the
-device; it needs a location with known 5G.
-
-**Not verified: a reboot.** The on-disk value is what oFono applies at start,
-and under 1.4 that was where the rejection loop began. Under 1.6 it does not
-reject, but this has not been watched through an actual boot. `modemctl check`
-reports a returning loop, and one command undoes it:
-
-```bash
-dbus-send --system --print-reply --dest=org.ofono /ril_0 \
-    org.ofono.RadioSettings.SetProperty string:"TechnologyPreference" \
-    variant:string:"lte"
+```c
+/* binder_radio_settings.c */
+cbd->cb.available_rats(binder_error_ok(&error), self->settings->techs, cbd->data);
 ```
 
-One more thing oFono does not help with: `AvailableTechnologies` lists only
-gsm, umts and lte, and never nr - yet oFono accepts `nr` as the preference
-without complaint. So `mmcli` reports `supported: gsm-umts, lte` and offers no
-5G modes. That inconsistency is in the binder plugin and is still open. The
-display path itself is fine: `mm_modem.py` maps `nr` to
-`MM_MODEM_ACCESS_TECHNOLOGY_5GNR` correctly.
+and `techs` is `OFONO_RADIO_ACCESS_MODE_ALL` minus NR whenever
+`radioInterface` parses below 1.4. Our invalid `1.6` parsed as 1.2, so `nr`
+never appeared. Back at the shipped `1.4` it appears immediately:
+
+```
+AvailableTechnologies = [ gsm, umts, lte, nr ]
+```
+
+Everything else in the chain is already built for it. FuriOS even patched its
+oFono for NR - upstream masks the driver's answer with `& 0x7`, this build
+uses `& 0xf`, so bit 3 survives (`and w1, w1, #0xf` at `0xf6ab0` in
+`/usr/sbin/ofonod`). `ofono_radio_access_mode_to_string` maps bit 3 to `"nr"`.
+`mm_modem.py` maps `nr` to `MM_MODEM_ACCESS_TECHNOLOGY_5GNR`.
+`gnome-control-center` ships every label up to `2G, 3G, 4G, 5G (Preferred)`.
+
+### And it still does not work
+
+With `radioInterface = 1.4` and `TechnologyPreference = nr`:
+
+```
+Sep 13 15:51:54 ofonod: Error 44 setting pref mode
+```
+
+**60 of them in 60 seconds**, one a second for as long as the preference
+stands, and `NetworkRegistration` reports `lte` throughout. Error 44 is
+`RADIO_ERROR_INVALID_ARGUMENTS` (`radio_types.h`) - the modem refusing the
+argument it was handed, not a coverage problem. The test ran at a location
+with no 5G, which is why nothing could have registered on NR anyway; but an
+invalid-argument rejection of a *set* call does not depend on what is on the
+air.
+
+So FuriOS out of the box offers 5G in the settings, and choosing it buys one
+error a second and LTE.
+
+### What would have to change
+
+The modem advertises `android.hardware.radio@1.6::IRadio/slot1` - the hardware
+is not the limit. `ofono-binder-plugin` is: 1.0 to 1.5, in the installed
+1.1.22 and in today's upstream master alike. Reaching NR means teaching the
+plugin IRadio 1.6, which is a different kind of work from anything else in
+this repository - patching or building someone else's package rather than
+configuring it. Open.
+
+Do **not** reach for `radioInterface = 1.5` on the way there: measured on this
+device, oFono then never gets the modem up at all. It stops at five
+interfaces, `RadioSettings` and `NetworkRegistration` never appear, and the
+log repeats `Power request failed` every 30 seconds.
 
 ---
 

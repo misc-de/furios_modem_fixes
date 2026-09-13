@@ -26,7 +26,7 @@ cat > "$STUBDIR/dbus-send" <<'STUB'
 case "$*" in
   *RadioSettings*)
     echo '         string "TechnologyPreference"'
-    echo '         variant             string "nr"' ;;
+    echo '         variant             string "lte"' ;;
   *)
     echo '      dict entry('
     echo '         string "AccessPointName"'
@@ -68,7 +68,9 @@ run_status() {
 }
 
 # --- nothing applied --------------------------------------------------------
-reset_tree original 1.4
+# 1.6 is not a value the plugin knows. It falls back to 1.2 without a word,
+# which costs NR and two interface versions - so modemctl has to call it out.
+reset_tree original 1.6
 out=$(run_status)
 check_status "shipped tree: status fails" 1 \
     env MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" bash "$ROOT/modemctl" status
@@ -79,14 +81,14 @@ else
     TESTS_FAILED=$((TESTS_FAILED + 1)); fail "shipped tree: did not name the unpatched file" "$out"
 fi
 TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$out" | grep -q "radioInterface not 1.6"; then
-    ok "shipped tree: notices radioInterface 1.4"
+if echo "$out" | grep -q "radioInterface not 1.4"; then
+    ok "shipped tree: notices an unrecognised radioInterface"
 else
     TESTS_FAILED=$((TESTS_FAILED + 1)); fail "shipped tree: missed radioInterface"
 fi
 
 # --- everything applied -----------------------------------------------------
-reset_tree patched 1.6
+reset_tree patched 1.4
 check_status "patched tree: status passes" 0 \
     env MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" bash "$ROOT/modemctl" status
 out=$(run_status)
@@ -97,33 +99,10 @@ else
     TESTS_FAILED=$((TESTS_FAILED + 1)); fail "patched tree: unexpected verdict" "$out"
 fi
 
-# A preference other than nr means nobody is asking for 5G. It is not a
-# failure - it is a legitimate choice - so it warns rather than failing, but it
-# must be visible: this was silently reset once and cost a day of wondering
-# where 5G had gone.
-cat > "$STUBDIR/dbus-send" <<'STUB'
-#!/bin/sh
-case "$*" in
-  *RadioSettings*)
-    echo '         string "TechnologyPreference"'
-    echo '         variant             string "lte"' ;;
-  *)
-    echo '         string "AccessPointName"'
-    echo '         variant             string "web.vodafone.de"' ;;
-esac
-STUB
-chmod +x "$STUBDIR/dbus-send"
-reset_tree patched 1.6
-out=$(run_status)
-TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$out" | grep -q "5G is not being asked for"; then
-    ok "an LTE-only preference is reported"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "a preference of lte passed unmentioned" "$out"
-fi
-check_status "but it is not treated as a failure" 0 \
-    env MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" bash "$ROOT/modemctl" status
-# back to the healthy stub for the rest
+# Asking for NR on this modem is one "Error 44 setting pref mode" a second,
+# for as long as the preference stands, and the phone registers on LTE anyway.
+# That is a failure, not a preference: it has to fail the check, or the noise
+# goes unnoticed the way it did for a day.
 cat > "$STUBDIR/dbus-send" <<'STUB'
 #!/bin/sh
 case "$*" in
@@ -136,13 +115,36 @@ case "$*" in
 esac
 STUB
 chmod +x "$STUBDIR/dbus-send"
+reset_tree patched 1.4
+out=$(run_status)
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out" | grep -q "one Error 44 a second"; then
+    ok "a preference of nr is called out"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "a preference of nr passed unmentioned" "$out"
+fi
+check_status "and it is treated as a failure" 1 \
+    env MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" bash "$ROOT/modemctl" status
+# back to the healthy stub for the rest
+cat > "$STUBDIR/dbus-send" <<'STUB'
+#!/bin/sh
+case "$*" in
+  *RadioSettings*)
+    echo '         string "TechnologyPreference"'
+    echo '         variant             string "lte"' ;;
+  *)
+    echo '         string "AccessPointName"'
+    echo '         variant             string "web.vodafone.de"' ;;
+esac
+STUB
+chmod +x "$STUBDIR/dbus-send"
 
 # --- upstream moved ---------------------------------------------------------
 #
 # The dangerous case. A file that is neither ours nor the one the patch was
 # written against must be reported, never patched: patch(1) would find the
 # context somewhere else and land the change in the wrong place.
-reset_tree original 1.6
+reset_tree original 1.4
 python3 - "$TREE/mm_modem_signal.py" <<'PY'
 import sys
 p = sys.argv[1]
@@ -177,7 +179,7 @@ fi
 # Possible at all because apply asks "can I write these files", not "am I
 # root": the test owns a tree, so the command that does all the work can be
 # exercised without handing a test suite root.
-reset_tree original 1.4
+reset_tree original 1.6
 out=$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
       bash "$ROOT/modemctl" apply --no-restart 2>&1)
 rc=$?
@@ -190,7 +192,7 @@ for f in $FILES; do
         TESTS_FAILED=$((TESTS_FAILED + 1)); fail "apply left $f.py wrong"
     fi
 done
-check "apply sets radioInterface" "radioInterface = 1.6" "$(cat "$RADIO")"
+check "apply sets radioInterface" "radioInterface = 1.4" "$(cat "$RADIO")"
 TESTS_RUN=$((TESTS_RUN + 1))
 if ls "$TREE"/mm_modem.py.bak.* >/dev/null 2>&1; then
     ok "apply keeps a backup"
@@ -224,7 +226,7 @@ check "old backups are pruned" 3 "$kept"
 
 # revert has to put back exactly what the package shipped, or the uninstall
 # path leaves ofono2mm in a state neither side knows about.
-reset_tree patched 1.6
+reset_tree patched 1.4
 MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
     bash "$ROOT/modemctl" revert >/dev/null 2>&1
 for f in $FILES; do
@@ -235,7 +237,8 @@ for f in $FILES; do
         TESTS_FAILED=$((TESTS_FAILED + 1)); fail "revert left $f.py wrong"
     fi
 done
-check "revert puts radioInterface back" "radioInterface = 1.4" "$(cat "$RADIO")"
+check "revert leaves the shipped radioInterface" "radioInterface = 1.4" \
+    "$(cat "$RADIO")"
 
 # --- refusals ---------------------------------------------------------------
 check_status "an unknown command is an error" 2 bash "$ROOT/modemctl" wat
@@ -266,7 +269,7 @@ fi
 #
 # The boot unit and the apt hook run with --quiet. If that still chatters, a
 # healthy boot prints a wall of text every time.
-reset_tree patched 1.6
+reset_tree patched 1.4
 out=$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
       bash "$ROOT/modemctl" status --quiet 2>/dev/null)
 check "quiet status on a healthy tree says nothing" "" "$out"
@@ -354,7 +357,7 @@ sandbox() {
 }
 
 install_old() {
-    reset_tree original 1.6
+    reset_tree original 1.4
     sandbox MODEMCTL_PATCHES="$OLDP" bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
     return 0
 }
@@ -385,9 +388,8 @@ else
     TESTS_FAILED=$((TESTS_FAILED + 1)); fail "the old package left its patch behind"
 fi
 
-# ...and radioInterface must survive it, or an upgrade that stops here leaves
-# the phone on the value that brings back the Error-44 loop.
-check "and leaves radioInterface alone" "radioInterface = 1.6" "$(cat "$RADIO")"
+# ...and radioInterface must survive it untouched.
+check "and leaves radioInterface alone" "radioInterface = 1.4" "$(cat "$RADIO")"
 
 # postinst's half: today's patches now apply.
 sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
@@ -401,6 +403,9 @@ fi
 # The whole point of --patches-only is that it stops there.
 install_old
 sandbox MODEMCTL_PATCHES="$OLDP" bash "$ROOT/modemctl" revert --quiet >/dev/null 2>&1
-check "a full revert does undo radioInterface" "radioInterface = 1.4" "$(cat "$RADIO")"
+# A full revert has nothing to undo here any more: what we want is what the
+# package ships.
+check "a full revert leaves radioInterface at the shipped value" \
+    "radioInterface = 1.4" "$(cat "$RADIO")"
 
 summary

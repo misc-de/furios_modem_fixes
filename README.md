@@ -73,7 +73,7 @@ bug report is a public place.
 
 | # | What | Where | Symptom |
 |---|---|---|---|
-| 1 | `radioInterface` pinned to 1.4, so NR goes through a call this modem rejects | oFono config | RIL error 44 twice a second, no clean cell reselection |
+| 1 | The stored radio preference asks for NR, which this modem rejects outright | oFono state | RIL error 44 once a second, no clean cell reselection |
 | 2 | MMS context with a placeholder APN | oFono state | ~1,700 failed activations an hour |
 | 3 | Netmask never copied into `Ip4Config` | `utils.py`, `mm_bearer.py`, `mm_modem.py` | address configured as a `/0` |
 | 4 | NM profile asks for IPv6 on an IPv4-only context | `mm_modem_simple.py`, `mm_bearer.py` | `modem IP method unsupported` on every activation |
@@ -88,6 +88,15 @@ bug report is a public place.
 
 Numbers behind each of these, and why they are what they are, in
 [FINDINGS.md](FINDINGS.md).
+
+Number 1 carries a correction worth reading before trusting anything else
+here. For a day this repository "fixed" it with `radioInterface = 1.6`, and
+the error loop did stop. But `1.6` is not a value `ofono-binder-plugin`
+accepts - its table ends at `1.5` - and an unrecognised value falls back to
+`1.2` silently. The loop stopped because at 1.2 the plugin drops NR from the
+technology list, so nothing asked for it any more. The phone ran two interface
+versions below the one it shipped with, lost 5G from the settings, and the
+config file said 1.6 the whole time. See [FINDINGS.md](FINDINGS.md#1-runaway-loop-the-modem-rejects-the-preferred-mode).
 
 Numbers 7, 8, 10 and 11 are the ones nobody notices, because everything reports itself
 healthy: the modem is registered, the bearer is connected, the interface has an

@@ -25,6 +25,15 @@ fi
 
 TARGET=${MODEMCTL_TARGET:-/usr/lib/ofono2mm/ofono2mm}
 RADIO_CONF=${MODEMCTL_RADIO_CONF:-/etc/ofono/binder.d/radio-interface-binder.conf}
+# The radio interface oFono speaks to the RIL. FuriOS ships 1.4 and that is
+# where this stays. We had 1.6 here for a day: the plugin's name table ends at
+# 1.5, an unrecognised value falls back to 1.2 WITHOUT A WORD, and from 1.3
+# downwards the plugin strips NR out of the technology list. So the phone ran
+# two interface versions below the one it shipped with and lost 5G from the
+# settings, while the file claimed 1.6. Measured 13.9.: 1.5 does not bring
+# this modem up at all ("Power request failed" every 30 s, oFono stuck at five
+# interfaces), 1.4 comes up in ten seconds with twenty-six.
+RADIO_INTERFACE_WANTED=1.4
 FILES="utils mm_bearer mm_modem mm_modem_simple mm_modem_signal main"
 
 # The DNS half of defect 7. Both halves are needed: the drop-in stops
@@ -110,7 +119,8 @@ patch_state() {
 
 radio_state() {
     [ -f "$RADIO_CONF" ] || { echo absent; return; }
-    grep -q '^radioInterface *= *1\.6' "$RADIO_CONF" && echo applied || echo missing
+    grep -q "^radioInterface *= *$RADIO_INTERFACE_WANTED\$" "$RADIO_CONF" \
+        && echo applied || echo missing
 }
 
 #   applied / missing / absent
@@ -226,13 +236,15 @@ cmd_apply() {
 
     head_ "ofono radioInterface"
     case "$(radio_state)" in
-        applied) skip "radioInterface already 1.6" ;;
+        applied) skip "radioInterface already $RADIO_INTERFACE_WANTED" ;;
         absent)  bad "$RADIO_CONF not found"; failed=1 ;;
         missing)
             cp -a "$RADIO_CONF" "$RADIO_CONF.bak.$ts"
-            sed -i 's/^radioInterface *= *1\.[0-9]$/radioInterface = 1.6/' "$RADIO_CONF"
+            sed -i "s/^radioInterface *= *[0-9.]*\$/radioInterface = \
+$RADIO_INTERFACE_WANTED/" "$RADIO_CONF"
             if [ "$(radio_state)" = applied ]; then
-                ok "radioInterface set to 1.6 (backup: $RADIO_CONF.bak.$ts)"
+                ok "radioInterface set to $RADIO_INTERFACE_WANTED (backup: \
+$RADIO_CONF.bak.$ts)"
                 changed=1
             else
                 bad "could not set radioInterface - check by hand"
@@ -339,14 +351,10 @@ cmd_revert() {
     fi
 
     head_ "ofono radioInterface"
-    if [ "$(radio_state)" = applied ]; then
-        sed -i 's/^radioInterface *= *1\.6$/radioInterface = 1.4/' "$RADIO_CONF"
-        ok "radioInterface back to 1.4"
-        warn "1.4 is what brought back the Error-44 loop and the flapping data"
-        warn "connection. That is the shipped state, not a good state."
-    else
-        skip "radioInterface is not at 1.6"
-    fi
+    # Nothing to undo: what we want here is what the package ships. This used
+    # to put 1.6 back to 1.4; 1.6 was our mistake, not our fix.
+    skip "radioInterface $RADIO_INTERFACE_WANTED is the shipped value"
+
 
     head_ "DNS"
     if [ "$(resolvconf_state)" = applied ]; then
@@ -389,8 +397,9 @@ cmd_status() {
         esac
     done
     case "$(radio_state)" in
-        applied) ok "radioInterface = 1.6" ;;
-        *)       bad "radioInterface not 1.6"; bad_count=$((bad_count+1)) ;;
+        applied) ok "radioInterface = $RADIO_INTERFACE_WANTED" ;;
+        *)       bad "radioInterface not $RADIO_INTERFACE_WANTED"
+                 bad_count=$((bad_count+1)) ;;
     esac
 
     head_ "what the stack says"
@@ -418,18 +427,21 @@ cmd_status() {
         *)     ok "MMS APN: $apn" ;;
     esac
     # The radio technology preference. Not something this project sets - oFono
-    # persists it per SIM - but it is the setting that decides whether 5G is
-    # even asked for, and it has been reset behind our back before: under
-    # radioInterface 1.4 the modem rejected NR outright, and a mobile data
-    # toggle left it on LTE. Worth seeing rather than discovering months later.
+    # persists it per SIM - but on this modem asking for NR is not free.
+    # Measured 13.9. at radioInterface 1.4: sixty "Error 44 setting pref mode"
+    # in sixty seconds, one a second for as long as the preference stands, and
+    # the phone registers on LTE anyway. Error 44 is INVALID_ARGUMENTS - the
+    # modem rejecting the argument, not a coverage problem. So nr is a warning
+    # here, not a goal, until the plugin can speak IRadio 1.6.
     local pref
     pref=$(dbus-send --system --print-reply --dest=org.ofono /ril_0 \
         org.ofono.RadioSettings.GetProperties 2>/dev/null \
         | grep -A1 TechnologyPreference | tail -1 | grep -o '"[a-z]*"$' | tr -d '"')
     case "$pref" in
         "")   skip "radio technology preference unreadable" ;;
-        nr)   ok "radio technology preference: nr (5G asked for)" ;;
-        *)    warn "radio technology preference: $pref - 5G is not being asked for" ;;
+        nr)   bad "radio technology preference: nr - one Error 44 a second, \
+and no 5G"; bad_count=$((bad_count+1)) ;;
+        *)    ok "radio technology preference: $pref" ;;
     esac
 
     # The cellular profile by type, NOT the first one listed - that is the
