@@ -56,8 +56,9 @@ drops. Reversible with `./uninstall.sh` or
     modemctl revert     back to the shipped state
     modemctl check      status plus runtime checks (polling, loops)
     modemctl signal     what the radio really receives, cross-checked
-    modemctl settle     after restarting ModemManager by hand: put back what
-                        that restart knocked over (needs root)
+    modemctl settle     after restarting ModemManager by hand: puts
+                        NetworkManager back in order and says who else lost
+                        the modem (needs root)
 
 `modemctl signal` is the one worth knowing. Neither the icon nor
 `mmcli --signal-get` could be trusted before the fix, so it reads oFono

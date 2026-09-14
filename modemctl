@@ -1237,8 +1237,9 @@ modemctl $VERSION - keeps the FuriOS modem fixes applied
   modemctl signal          what the radio really receives, cross-checked
   modemctl boot            make the phone match the recorded profile
                            (used by the boot unit and the apt hook)
-  modemctl settle          after restarting ModemManager by hand: put back
-                           what that restart knocked over
+  modemctl settle          after restarting ModemManager by hand: put
+                           NetworkManager back in order and say who else
+                           lost the modem
 
 Profiles
   fixed       the repairs in this package, and the units that keep them there
