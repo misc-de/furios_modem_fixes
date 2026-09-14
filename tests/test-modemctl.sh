@@ -856,6 +856,10 @@ settle_stubs() {
         printf '  *"kill --signal=KILL"*) : > "%s" ;;\n' "$SETTLE_KILLED"
         printf '  *"show -p MainPID"*) [ -f "%s" ] && echo 4242 || echo 1111 ;;\n' "$SETTLE_KILLED"
         printf '  *is-active*) echo active ;;\n'
+        # When ModemManager started. The default is "a moment ago", which is
+        # what every test here is about; the one test that wants an old
+        # ModemManager overwrites this stub itself.
+        printf '  *"-p ActiveEnterTimestamp"*) date -d "@$(( $(date +%%s) - 5 ))" ;;\n'
         printf 'esac\nexit 0\n'
     } > "$SETTLEBIN/systemctl"
     {
@@ -864,6 +868,11 @@ settle_stubs() {
         printf 'exit 0\n'
     } > "$SETTLEBIN/ps"
     printf '#!/bin/sh\necho "furios:x:32011:32011::/home/furios:/bin/bash"\n' > "$SETTLEBIN/getent"
+    # A shell that has been running since long before the restart, which is the
+    # case every test here is about. The one about a shell that came back
+    # afterwards overwrites this.
+    printf '#!/bin/sh\necho 4242\n' > "$SETTLEBIN/pgrep"
+    printf '#!/bin/sh\ndate -d "@$(( $(date +%%s) - 3600 ))"\n' > "$SETTLEBIN/ps"
     printf '#!/bin/sh\nexit 0\n' > "$SETTLEBIN/sleep"
     printf '#!/bin/sh\necho 0\n' > "$SETTLEBIN/id"
     {
@@ -957,6 +966,48 @@ settle_stubs "$LOST_SHELL_SU" 32011 no
 out=$(settle_run)
 check "the shell is found whatever error it was given" yes \
       "$(printf '%s\n' "$out" | grep -qi 'signal icon' && echo yes || echo no)"
+
+# Nagging about a fault that has already been repaired is how a check stops
+# being read at all. A shell younger than the restart cannot still be missing
+# what that restart took away.
+settle_stubs "$LOST_SHELL" 32011 no
+printf '#!/bin/sh\ndate\n' > "$SETTLEBIN/ps"; chmod +x "$SETTLEBIN/ps"
+out=$(settle_run)
+check "a shell that came back since is not reported as broken" yes \
+      "$(printf '%s\n' "$out" | grep -q 'restarted since' && echo yes || echo no)"
+check "and the missing icon is not announced again" no \
+      "$(printf '%s\n' "$out" | grep -qi 'signal icon' && echo yes || echo no)"
+
+# A journal that cannot be read is not a phone where nothing happened. Both
+# answers are empty; only one of them is the truth.
+settle_stubs "$LOST_SHELL" 32011 no
+printf '#!/bin/sh\nexit 1\n' > "$SETTLEBIN/journalctl"; chmod +x "$SETTLEBIN/journalctl"
+out=$(settle_run)
+check "an unreadable journal is admitted, not read as silence" yes \
+      "$(printf '%s\n' "$out" | grep -q 'cannot read the journal' && echo yes || echo no)"
+check "and it does not claim nobody lost anything" no \
+      "$(printf '%s\n' "$out" | grep -q 'no client lost ModemManager' && echo yes || echo no)"
+
+# Without a recent restart there is no stale proxy to repair, and restarting
+# NetworkManager over a merely unavailable modem - airplane mode, no SIM -
+# would blink the Wi-Fi for nothing.
+settle_stubs "" 32011 no
+cat > "$SETTLEBIN/systemctl" <<STUB
+#!/bin/sh
+printf "%s\\n" "\$*" >> "$SETTLE_REC"
+case "\$*" in
+  *"-p ActiveEnterTimestamp"*) date -d "@\$(( \$(date +%s) - 4000 ))" ;;
+esac
+exit 0
+STUB
+chmod +x "$SETTLEBIN/systemctl"
+out=$(settle_run)
+check "an old ModemManager means NetworkManager is left alone" yes \
+      "$(printf '%s\n' "$out" | grep -q 'leaving NetworkManager alone' && echo yes || echo no)"
+check "and NetworkManager is really not restarted" no \
+      "$(grep -q 'restart NetworkManager' "$SETTLE_REC" && echo yes || echo no)"
+check "but the journal is still looked at" yes \
+      "$(printf '%s\n' "$out" | grep -q 'no client lost ModemManager' && echo yes || echo no)"
 
 # Root, because it restarts NetworkManager. Saying so is better than half of
 # it failing with systemd's wording.

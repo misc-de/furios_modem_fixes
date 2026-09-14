@@ -368,8 +368,13 @@ SETTLE_WINDOW=120
 # Who was talking to ModemManager when it went away. One syslog identifier per
 # line. Session services log to the system journal too, so root sees gsd-wwan
 # and phosh here as well as chatty.
+#
+# The last filter is not cosmetic: a syslog identifier is whatever the program
+# that logged chose to call itself, so it is text from outside, and it ends up
+# in a message printed by a program running as root. Anything that is not a
+# plain name is dropped rather than passed on.
 clients_that_lost_modemmanager() {
-    local since=$1
+    local since=$1 lines
     # The two shapes of the same moment, and deliberately not the error text.
     # GLib prints "Error calling GetManagedObjects() ... came back" only when
     # the call failed, whatever it failed with - AccessDenied when the name is
@@ -379,7 +384,13 @@ clients_that_lost_modemmanager() {
     # "ModemManager" would have counted the cell broadcast denial of defect 13
     # - a different failure with a different fix, and claiming cellbroadcastd
     # "lost ModemManager" would send the next person after the wrong thing.
-    journalctl --since "@$since" --no-pager -o short 2>/dev/null \
+    #
+    # Read first, filter second: a journalctl that is not there, or that
+    # refuses, must not arrive at the other end of a pipe as "nobody lost
+    # anything". That is the same answer a healthy phone gives, and it would
+    # be the wrong one in the one case where somebody is looking for a fault.
+    lines=$(journalctl --since "@$since" --no-pager -o short 2>/dev/null) || return 2
+    printf '%s\n' "$lines" \
         | grep -E 'Error calling GetManagedObjects\(\) when name owner .* for name org\.freedesktop\.ModemManager1 came back|Error creating ModemManager:' \
         | awk '{print $5}' \
         | sed -E 's/\[[0-9]+\]:?$//; s/:$//' \
@@ -387,9 +398,26 @@ clients_that_lost_modemmanager() {
         | sort -u
 }
 
+# When the shell that is running now started, in seconds since the epoch. A
+# shell younger than the restart cannot still be suffering from it, and saying
+# otherwise turns this into a command that nags for ever about a fault that was
+# repaired an hour ago.
+shell_started_at() {
+    local pid stamp
+    pid=$(pgrep -x phosh 2>/dev/null | head -1)
+    [ -n "$pid" ] || return 1
+    stamp=$(ps -o lstart= -p "$pid" 2>/dev/null)
+    [ -n "$stamp" ] || return 1
+    date -d "$stamp" +%s 2>/dev/null
+}
+
 settle_shell() {
-    local since=$1 clients shell_hit= others= user
-    clients=$(clients_that_lost_modemmanager "$since")
+    local since=$1 clients shell_hit= others= shell_age
+    if ! clients=$(clients_that_lost_modemmanager "$since"); then
+        warn "cannot read the journal - no way to tell who lost ModemManager"
+        warn "if the signal icon is missing, the way back is in FINDINGS, defect 16"
+        return 0
+    fi
     if [ -z "$clients" ]; then
         skip "no client lost ModemManager - nothing to put back"
         return 0
@@ -412,7 +440,14 @@ settle_shell() {
         esac
     fi
 
-    [ -n "$shell_hit" ] || { ok "the shell kept ModemManager"; return 0; }
+    if [ -n "$shell_hit" ]; then
+        shell_age=$(shell_started_at) || shell_age=""
+        if [ -n "$shell_age" ] && [ "$shell_age" -gt "$since" ]; then
+            ok "the shell lost ModemManager back then and has been restarted since"
+            return 0
+        fi
+    fi
+    [ -n "$shell_hit" ] || { ok "the shell has ModemManager"; return 0; }
 
     warn "the shell lost ModemManager - the mobile signal icon is gone and"
     warn "does not come back by itself. Everything else is fine: the modem is"
@@ -912,17 +947,47 @@ cmd_boot() {
 # restart's damage are invisible until you go looking for them: NetworkManager
 # sits in "prepare" for ever, and the shell drops the signal icon. Neither
 # heals, and neither says anything.
+# When ModemManager last started, in seconds since the epoch. systemd knows
+# this exactly, and it is a better answer than "two minutes ago": somebody who
+# notices the missing icon an hour after the restart should still get a look at
+# the right window, not at an empty one.
+modemmanager_started_at() {
+    local t
+    t=$(systemctl show ModemManager -p ActiveEnterTimestamp --value 2>/dev/null)
+    [ -n "$t" ] || return 1
+    date -d "$t" +%s 2>/dev/null
+}
+
 cmd_settle() {
-    local failed=0 since
+    local failed=0 since started age
     if [ "$(id -u)" -ne 0 ]; then
         bad "settle needs root - it restarts services for other users"
         return 1
     fi
-    # Nobody told us when the restart was, so look back a window wide enough
-    # for "I just did it" and no wider.
-    since=$(( $(date +%s) - SETTLE_WINDOW ))
     head_ "settle"
-    settle_networkmanager || failed=1
+
+    started=$(modemmanager_started_at) || started=""
+    if [ -n "$started" ]; then
+        since=$started
+        age=$(( $(date +%s) - started ))
+    else
+        # No answer from systemd: fall back to a window wide enough for
+        # "I just did it" and no wider.
+        since=$(( $(date +%s) - SETTLE_WINDOW ))
+        age=""
+    fi
+
+    # The NetworkManager half repairs one thing only: the proxy it kept for a
+    # ModemManager that has just gone away. Without a recent restart there is
+    # no such proxy, and running it anyway would restart NetworkManager - and
+    # blink the Wi-Fi - because of a cellular device that is merely
+    # unavailable, which is what airplane mode and a missing SIM look like.
+    if [ -n "$age" ] && [ "$age" -gt "$SETTLE_WINDOW" ]; then
+        skip "ModemManager has been up ${age}s - leaving NetworkManager alone"
+    else
+        settle_networkmanager || failed=1
+    fi
+
     settle_shell "$since" || failed=1
     return $failed
 }

@@ -1664,6 +1664,18 @@ broken, and what the command is. It restarts nothing in the session: not the
 shell, for the reason above, and not wireplumber either, because that takes
 the Bluetooth card with it.
 
+It looks at the window of the *last* restart, which systemd knows exactly
+(`ActiveEnterTimestamp`) - not at "the last two minutes", so noticing the
+missing icon an hour later still gets an answer. And without a recent restart
+it leaves NetworkManager alone: the proxy it repairs is one a restart just
+made stale, while a cellular device that is merely `unavailable` - airplane
+mode, no SIM - would otherwise cost a NetworkManager restart and a Wi-Fi blink
+for nothing.
+
+A journal it cannot read is said out loud rather than answered with silence:
+"nothing lost ModemManager" and "I could not look" are the same empty output,
+and only one of them is true.
+
 Measured on 14.9. against the real journal: two clients found from a real
 restart the evening before, both named, nothing touched.
 
