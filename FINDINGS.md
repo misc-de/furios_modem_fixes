@@ -2129,6 +2129,105 @@ answer to an easier question, in the voice of an answer to the real one.
 
 ---
 
+## 21. Announced into an empty room, and the modem stays broken all boot
+
+Reported on 14 September: registered on LTE, full health, and no mobile data.
+NetworkManager said the same thing over and over, once per activation attempt:
+
+```
+modem-broadband[/ril_0]: failed to connect modem: Method "Connect" with
+signature "a{sv}" on interface "org.freedesktop.ModemManager1.Modem.Simple"
+doesn't exist
+```
+
+The method exists. Asked by hand, at the same instant, the daemon answers:
+
+```
+Introspect /Modem/0        all fifteen interfaces, Modem.Simple among them
+                           <method name="Connect"> in a{sv}, out o
+Simple.GetStatus           returns, state 9
+GetManagedObjects          one modem, fifteen interfaces, Simple included
+```
+
+So the complaint is not about the daemon. It is about what NetworkManager
+believes, and it never asks again: **with `dbus-monitor --system` running
+unfiltered across a failing activation, not one message goes to
+ModemManager**. The error is raised inside NetworkManager, out of a proxy it
+built once.
+
+### What it built it from, and when
+
+Earlier in the same boot NetworkManager says something that looks like noise:
+
+```
+13:37:36.2305  device (/ril_0): state change: failed -> disconnected
+13:37:36.2607  failed to connect modem: Method "Connect" ... doesn't exist
+13:37:36.2896  modem-manager: ModemManager now available          <- 59 ms LATER
+13:37:36.2897  modem with path .../Modem/0 already exists, ignoring
+```
+
+It was connecting to a modem 59 milliseconds *before* it learned ModemManager
+existed. It had heard our `InterfacesAdded` and built the modem from it -
+correctly, that is what the signal is for - at a moment when nobody owned
+`org.freedesktop.ModemManager1`. A proxy built against an unowned name has no
+name owner, so it has nothing to send to: it fails every call locally, which
+is exactly the silence on the bus. And the modem it built is one it keeps
+(`already exists, ignoring`), so the phone has no mobile data for the rest of
+the boot with the radio registered on LTE the whole time.
+
+The order was not bad luck. It was the arrangement:
+
+```
+announce_modem()   sends InterfacesAdded, and sets something_to_show
+main()             waits for something_to_show, and only then asks for the name
+```
+
+The event that releases the bus name is set by the announcement itself, so
+every announcement went out before the name existed, by construction. Measured
+14.9. 13:41:04: announced at `.8245`, the name became ours at `.8261` - one and
+a half milliseconds, and NetworkManager was inside them. Which is why it only
+bit sometimes.
+
+This is [defect 16](#16-the-restart-that-takes-the-signal-icon-with-it) once
+more, from the other end. There the name went away and a client that asked
+during the gap was refused for good. Here the name has not arrived yet and a
+client that listens during the gap is poisoned for good. Both are the same
+rule: **nothing may be said about a modem before the name it has to be reached
+by is ours.**
+
+### The fix
+
+`ModemManagerBus` holds every announcement back until the name is taken, and
+`main()` says so once `take_bus_name` returns:
+
+```python
+def _announce(self, path, interfaces):
+    if not self._name_is_ours:
+        if path not in self._held_back:
+            self._held_back.append(path)
+        return
+```
+
+The path is remembered, not the interfaces: by the time the name is ours more
+have been exported, and an announcement has to carry the whole modem or
+NetworkManager throws the object away (defect 12). `something_to_show` is
+still set at the old moment - holding *that* back would leave `main()` waiting
+ten seconds for an event that only it can release.
+
+Measured after the fix, on the bus: `RequestName` at `…337.792`, the
+announcement at `…338.132`. 340 ms later, where it used to be 1.5 ms early.
+
+### What it does not do
+
+It cannot repair a NetworkManager that already holds a poisoned modem. That
+object survives a ModemManager restart - NM answers its own re-enumeration
+with `already exists, ignoring` and never rebuilds it - so a phone that has
+already lost this race needs `systemctl restart NetworkManager`, or a reboot.
+Only a cold boot proves the fix; a warm ModemManager restart proves nothing,
+because the client state is what was broken.
+
+---
+
 ## What it costs, measured
 
 Numbers from the phone, not estimates. Three things here run all the time -

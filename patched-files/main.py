@@ -45,7 +45,8 @@ class ModemManagerBus(MessageBus):
     ModemManager does it.
     """
 
-    __slots__ = ('_ready_modems', 'something_to_show')
+    __slots__ = ('_ready_modems', 'something_to_show', '_name_is_ours',
+                 '_held_back')
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -55,6 +56,55 @@ class ModemManagerBus(MessageBus):
         # Set once there is either a modem worth showing or nothing to wait
         # for. main() holds the bus name back until then.
         self.something_to_show = asyncio.Event()
+        # Whether org.freedesktop.ModemManager1 is ours yet. Nothing is
+        # announced before it is - see name_acquired.
+        self._name_is_ours = False
+        # Paths that wanted to be announced while the name was still unowned,
+        # in the order they asked.
+        self._held_back = []
+
+    def name_acquired(self):
+        """The bus name is ours; say everything that was waiting on it.
+
+        An announcement made before the name is owned is worse than no
+        announcement at all. NetworkManager hears the InterfacesAdded - it
+        watches the bus, not the name - and builds its modem from it right
+        away, but everything it then calls goes to org.freedesktop.
+        ModemManager1, which at that instant belongs to nobody. The bus
+        answers UnknownMethod for every one of them, and the phone ends up
+        with a Modem whose Modem interface has no methods:
+
+            modem-broadband[/ril_0]: failed to retrieve SIM object: No SIM
+            object available
+            modem-broadband[/ril_0]: failed to enable modem: Method "Enable"
+            with signature "b" on interface "org.freedesktop.ModemManager1
+            .Modem" doesn't exist
+            modem-broadband[/ril_0]: failed to connect modem: Method
+            "Connect" with signature "a{sv}" on interface "...Modem.Simple"
+            doesn't exist
+
+        and it stays that way, because the modem NetworkManager built is one
+        it keeps: eighty milliseconds later it learns ModemManager exists and
+        answers itself "modem with path .../Modem/0 already exists, ignoring".
+        No mobile data for the rest of the boot, with oFono registered on LTE
+        the whole time and mmcli showing a healthy modem.
+
+        Measured 14.9. 13:41:04: "Announcing the modem" at .8245, the name
+        became ours at .8261 - one and a half milliseconds later, and NM was
+        inside them. The order was not bad luck: announce_modem is what sets
+        something_to_show, and main() waits for that event before it so much
+        as asks for the name. Every announcement went out into an empty room
+        by construction. This is defect 16 over again - a client that asks
+        while nobody owns the name is refused once and never asks again - and
+        the fix is the same shape: do not let anyone hear about the modem
+        until the name it has to be reached by is ours.
+        """
+        self._name_is_ours = True
+        held_back, self._held_back = self._held_back, []
+        for path in held_back:
+            interfaces = list(self._path_exports.get(path, {}).values())
+            if interfaces:
+                self._announce(path, interfaces)
 
     def announce_modem(self, path):
         """Say that the modem at this path is ready to be looked at.
@@ -191,6 +241,15 @@ class ModemManagerBus(MessageBus):
         self._announce(path, [interface])
 
     def _announce(self, path, interfaces):
+        if not self._name_is_ours:
+            # Too early for anybody to hear it - see name_acquired. Remember
+            # the path, not the interfaces: by the time the name is ours there
+            # will be more of them, and the announcement has to carry the
+            # whole modem or NetworkManager throws it away.
+            if path not in self._held_back:
+                self._held_back.append(path)
+            return
+
         body = {iface.name: None for iface in interfaces}
 
         def collected(iface, values, _user_data, error):
@@ -564,6 +623,12 @@ async def main():
               flush=True)
 
     await take_bus_name(bus)
+
+    # Only now can anyone act on what they hear. Until this line every
+    # announcement was held back, because a client that builds its modem from
+    # one and then calls a name nobody owns gets UnknownMethod for every
+    # method the modem has - and keeps that modem. See name_acquired.
+    bus.name_acquired()
 
     try:
         await bus.wait_for_disconnect()

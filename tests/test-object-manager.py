@@ -192,17 +192,24 @@ def load_class():
 Bus, MM_ROOT = load_class()
 
 
-def make_bus(paths, interfaces=None, ready=True):
+def make_bus(paths, interfaces=None, ready=True, named=True):
     """A bus holding these paths, with the modems among them ready by default.
 
     Ready is the normal case: a modem is handed out and announced once it has
     reported itself built, and almost every check below is about what happens
     after that. The class fills _ready_modems in its own __init__, so it is
     filled in here afterwards and not in the stand-in base.
+
+    Named is the normal case for the same reason: nothing is announced before
+    the daemon owns org.freedesktop.ModemManager1, so a test about the shape
+    of an announcement has to be past that point. The block that is about the
+    holding back itself passes named=False.
     """
     bus = Bus(paths, interfaces)
     if ready:
         bus._ready_modems.update(paths)
+    if named:
+        bus._name_is_ours = True
     return bus
 
 MODEM = f"{MM_ROOT}/Modem/0"
@@ -389,8 +396,78 @@ bus._emit_interface_added(MM_ROOT, FakeServiceInterface(VOICE))
 check("the manager object itself is announced without that rule", [VOICE],
       list(bus.sent[0].body[1]))
 
+print("\n  nothing is announced before the bus name is ours")
+# An announcement made while org.freedesktop.ModemManager1 belongs to nobody
+# is worse than none at all. NetworkManager watches the bus rather than the
+# name, so it hears it and builds its modem straight away - and every method
+# it then calls on that name is answered UnknownMethod by the bus itself:
+#
+#   failed to enable modem: Method "Enable" with signature "b" on interface
+#   "org.freedesktop.ModemManager1.Modem" doesn't exist
+#
+# It keeps the modem it built ("already exists, ignoring") and the phone has
+# no mobile data for the rest of the boot, with oFono registered on LTE the
+# whole time. Measured 14.9. 13:41:04: announced at .8245, the name became
+# ours at .8261, NetworkManager was inside those one and a half milliseconds.
+bus = make_bus([MODEM], interfaces=[FakeServiceInterface.name], ready=False,
+               named=False)
+bus.announce_modem(MODEM)
+check("an unnamed bus announces nothing", [], bus.sent)
+# But it must still say there is something to show, or main() waits for that
+# event for ten seconds before it even asks for the name - holding the
+# announcement back would then hold the whole daemon back.
+check("it does say there is something worth showing", True,
+      bus.something_to_show.is_set_)
+check("and the modem is handed out to whoever enumerates", [MODEM],
+      managed(bus, MM_ROOT))
+
+# The interfaces that were still being exported while the name was unowned are
+# the whole point: Simple was one of them, which is why NetworkManager had a
+# modem it could not call Connect on.
+bus._path_exports[MODEM][SIMPLE] = FakeServiceInterface(SIMPLE)
+bus.name_acquired()
+check("taking the name announces what was held back", [MODEM],
+      [m.body[0] for m in bus.sent])
+check("and it carries the interfaces exported since, not the ones it had then",
+      sorted([FakeServiceInterface.name, SIMPLE]), sorted(bus.sent[0].body[1]))
+
+# Held back twice - announce_modem and an interface exported after it - is
+# still one modem and must not become two announcements.
+bus = make_bus([MODEM], interfaces=[FakeServiceInterface.name], ready=False,
+               named=False)
+bus.announce_modem(MODEM)
+bus._emit_interface_added(MODEM, FakeServiceInterface())
+bus.name_acquired()
+check("a path held back twice is announced once", 1, len(bus.sent))
+
+# After the name is ours the holding back is over; anything else would be a
+# modem nobody hears about.
+bus = make_bus([MODEM], interfaces=[FakeServiceInterface.name], ready=False,
+               named=False)
+bus.name_acquired()
+bus.announce_modem(MODEM)
+check("once the name is ours announcements go out as they happen", [MODEM],
+      [m.body[0] for m in bus.sent])
+
+# Nothing was waiting: taking the name must not invent an announcement.
+bus = make_bus([SIM], interfaces=[FakeServiceInterface.name], named=False)
+bus.name_acquired()
+check("with nothing held back it announces nothing", [], bus.sent)
+
 print("\n  the daemon actually uses it")
 shipped = open(SOURCE).read()
+check(
+    "the daemon says the name is ours once it has it",
+    True,
+    "bus.name_acquired()" in shipped,
+)
+# Order is the fix. Calling it before take_bus_name returns would announce
+# into the same empty room this is here to close.
+check(
+    "and it says so after taking the name, not before",
+    True,
+    shipped.index("await take_bus_name(bus)") < shipped.index("bus.name_acquired()"),
+)
 check(
     "the system bus is a ModemManagerBus",
     True,
