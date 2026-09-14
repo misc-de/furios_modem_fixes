@@ -8,7 +8,7 @@ from argparse import ArgumentParser
 from dbus_fast.aio import MessageBus
 from dbus_fast.service import (ServiceInterface,
                                method, dbus_property)
-from dbus_fast.constants import PropertyAccess
+from dbus_fast.constants import PropertyAccess, RequestNameReply
 from dbus_fast import DBusError, BusType, Message, Variant
 
 from ofono2mm import MMModemInterface, Ofono, DBus
@@ -18,6 +18,7 @@ from typing import Dict
 def get_version():
     return "1.24.0"
 
+MM_BUS_NAME = 'org.freedesktop.ModemManager1'
 MM_ROOT = '/org/freedesktop/ModemManager1'
 MM_MODEM_PREFIX = MM_ROOT + '/Modem/'
 MM_MODEM_IFACE = 'org.freedesktop.ModemManager1.Modem'
@@ -448,6 +449,47 @@ def custom_help(parser):
     parser.print_help()
     print("\nDBus system service to control mobile broadband modems through oFono.")
 
+async def take_bus_name(bus, name=MM_BUS_NAME):
+    """Own the bus name, out loud, and do not come back without it.
+
+    This one step decides whether the phone has a ModemManager at all, so it
+    is neither quiet nor optional:
+
+    * It says what happened. The first version of this reported failure
+      through ofono2mm_print, which without -v prints nothing whatsoever - a
+      phone that boots with no mobile data and a journal with not one word
+      about why. Measured 14.9.: ModemManager.service logged its "Started"
+      line and then nothing for two minutes while nobody owned the name.
+    * It reads the answer. request_name returns which of the four outcomes
+      happened, and only two of them mean the name is ours. Dropping that
+      return value made IN_QUEUE - somebody else holds it, we are second in
+      line - look exactly like success.
+    * It keeps trying. Returning early leaves asyncio.run() waiting on the
+      background tasks that outlive main(): the process stays up and the
+      event loop keeps running, so systemd sees a healthy service, while
+      nothing on the bus answers for ModemManager. Restart= cannot help with
+      a failure that never exits.
+    """
+    delay = 1
+    while True:
+        try:
+            reply = await asyncio.wait_for(bus.request_name(name), timeout=10)
+        except asyncio.TimeoutError:
+            trouble = "the bus did not answer within ten seconds"
+        except Exception as e:
+            trouble = f"{type(e).__name__}: {e}"
+        else:
+            if reply in (RequestNameReply.PRIMARY_OWNER,
+                         RequestNameReply.ALREADY_OWNER):
+                print(f"ofono2mm: {name} is ours ({reply.name})", flush=True)
+                return
+            trouble = f"the bus said {reply.name} - somebody else owns it"
+
+        print(f"ofono2mm: could not take {name}: {trouble}; "
+              f"trying again in {delay}s", flush=True)
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 30)
+
 async def main():
     # Disable buffering for stdout and stderr so that logs are written immediately
     sys.stdout.reconfigure(line_buffering=True)
@@ -497,13 +539,10 @@ async def main():
     try:
         await asyncio.wait_for(bus.something_to_show.wait(), timeout=10)
     except asyncio.TimeoutError:
-        ofono2mm_print("No modem after ten seconds - taking the bus name anyway", verbose)
+        print("ofono2mm: no modem after ten seconds - taking the bus name anyway",
+              flush=True)
 
-    try:
-        await bus.request_name('org.freedesktop.ModemManager1')
-    except Exception as e:
-        ofono2mm_print(f"Failed to request org.freedesktop.ModemManager1 bus name: {e}", verbose)
-        return
+    await take_bus_name(bus)
 
     try:
         await bus.wait_for_disconnect()

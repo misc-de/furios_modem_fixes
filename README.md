@@ -1,6 +1,6 @@
 # furios_modem_fixes
 
-Fifteen defects in the FuriOS modem stack, and a way to keep them fixed.
+Seventeen defects in the FuriOS modem stack, and a way to keep them fixed.
 
 Out of the box on this phone the data connection often only came up after a
 reboot, the signal icon sat at the emptiest bar regardless of reception, and
@@ -84,7 +84,7 @@ identify the tower you are on, which places you within a kilometre or so. The
 signal levels do not. Nothing is stored or sent - it prints and exits - but a
 bug report is a public place.
 
-## The sixteen defects
+## The seventeen defects
 
 | # | What | Where | Symptom |
 |---|---|---|---|
@@ -104,6 +104,7 @@ bug report is a public place.
 | 14 | The alert channel database lists EU-Alert level 2 for `de` and `nl` without channel 4372, while listing its local-language counterpart | `serviceproviders.xml` | **"extreme, immediate, likely" warnings sent on 4372 go unheard** |
 | 15 | The one of three places that builds a bearer for `Simple.Connect` never subscribes to its oFono context | `mm_modem.py` | bearer stays `connected: no` with no interface, NM fails every activation with `missing data port` - **no mobile data for the whole boot** |
 | 16 | While ModemManager hands its bus name over, a client's `GetManagedObjects` matches no `<allow>` rule and is denied | the system bus, and clients that do not retry | the **signal icon disappears for good** after a restart of ModemManager - phosh, chatty and wireplumber all give up at once |
+| 17 | Failing to take the bus name is reported through a logger that is off, the reply saying somebody else owns it is never read, and giving up leaves the daemon running | `main.py`, our own fix for 16 | ofono2mm is `active (running)` with nothing owning `org.freedesktop.ModemManager1` - **a whole boot with no mobile data**, and one line in the journal |
 
 Numbers behind each of these, and why they are what they are, in
 [FINDINGS.md](FINDINGS.md).
@@ -143,6 +144,18 @@ keyed on that name cannot match - so a client asking in that gap is denied,
 and none of them ever asks again. The gap is not systemd's: ofono2mm gives the
 name up and takes it back twice a moment after it starts, on purpose, to make
 clients notice the modem. It is what makes them blind instead.
+
+Number 17 is what the fix for 16 cost before it was found. Holding the bus
+name back until there is a modem to show is right, but the code that took it
+afterwards reported failure through `ofono2mm_print` - silent without `-v`,
+which the service does not use - ignored `request_name`'s answer, and on
+failure returned from `main()`. That does not end the process: `asyncio.run`
+waits on the tasks that outlive it, so systemd sees a healthy service while
+nothing on the bus answers for ModemManager. Measured after the reboot on
+14.9.: two minutes up, oFono online, `mmcli -L` saying "couldn't find the
+ModemManager process in the bus". A restart by hand always fixed it, because
+by then oFono is already there - at boot ofono2mm starts seventeen seconds
+first, waiting on `binder-wait` for the radio.
 
 `modemctl` will not restart the shell for you, and the reason is worth
 knowing: `mobi.phosh.Shell.service` answers a kill with

@@ -1695,6 +1695,96 @@ same caveat attached to it.
 
 ---
 
+## 17. The fix for 16, booting a phone with no ModemManager at all
+
+Defect 16 moved the bus name: instead of taking
+`org.freedesktop.ModemManager1` at once, ofono2mm now waits until a modem is
+built and ready to be shown, with a ten second timeout so that a phone with no
+modem still gets a ModemManager on the bus. The phone was rebooted on 14.9. to
+prove it.
+
+It came up without mobile data. Two minutes in:
+
+```
+$ mmcli -L
+error: couldn't find the ModemManager process in the bus
+$ nmcli -t -f DEVICE,TYPE,STATE d | grep ril      # nothing
+$ systemctl status ModemManager
+     Active: active (running) since Mon 2026-09-14 08:26:09 CEST
+   Main PID: 1254 (ofono2mm)
+$ journalctl -b -u ModemManager
+Sep 14 08:26:09 FuriS systemd[1]: Started ModemManager.service - Modem Manager.
+```
+
+One line in the journal, and that was all of it. The process was up, the event
+loop was running - it was opening new sockets minutes after start - oFono had
+`/ril_0` online and powered, and nobody owned the bus name.
+
+Restarting the service by hand fixed it every time: the name appeared after
+about five seconds. That difference is the whole finding. At boot ofono2mm
+starts **seventeen seconds before oFono**, which spends nine of them in
+`binder-wait` for `android.hardware.radio@1.0::IRadio/slot1`:
+
+```
+08:26:09  ModemManager.service (ofono2mm) started
+08:26:17  ofono.service starting, binder-wait waiting for IRadio/slot1
+08:26:26  "IRadio/slot1" appeared, oFono 1.29 up
+```
+
+By hand, oFono is always already there. The boot path is the one nobody tests
+and the only one that matters.
+
+### Three mistakes, and the third one hides the other two
+
+```python
+try:
+    await bus.request_name('org.freedesktop.ModemManager1')
+except Exception as e:
+    ofono2mm_print(f"Failed to request ... bus name: {e}", verbose)
+    return
+```
+
+**It cannot be heard.** `ofono2mm_print` returns immediately when `verbose` is
+false, and the service does not run with `-v`. The one failure that decides
+whether the phone has mobile data reports itself into nothing. That is why the
+journal had a single line: not because nothing went wrong, but because the
+only thing that would have said so was switched off.
+
+**It does not read the answer.** `request_name` returns one of four outcomes,
+and only `PRIMARY_OWNER` and `ALREADY_OWNER` mean the name is ours. `IN_QUEUE`
+- somebody else holds it and we are second in line - raises nothing and was
+indistinguishable from success.
+
+**And it gives up in a way systemd cannot see.** `return` from `main()` does
+not end the process: `asyncio.run` then waits for the background tasks that
+outlive it. The daemon stays up, the loop keeps turning, `Restart=` never
+fires, and nothing on the bus answers for ModemManager. A crash would have
+been better; this is a service that is healthy by every measure systemd has
+and does not exist as far as the rest of the system is concerned.
+
+**Fix:** `take_bus_name` in `main.py`. Every outcome is printed with `print`,
+not `ofono2mm_print`, so it is in the journal whether or not anyone asked for
+verbose output. The return value is read, and only the two owning answers
+count. And it does not come back without the name: it retries, waiting 1, 2,
+4, 8, 16 and then 30 seconds, for ever. There is no situation in which a phone
+is better off with a daemon that has quietly stopped trying.
+
+`tests/test-bus-name.py`, 35 checks: each of the four replies, a bus that
+refuses, a bus that does not answer, the doubling and its ceiling, that every
+failed attempt says something, and that the shipped `main.py` still routes
+through it.
+
+**The wait, and why it is not a retry loop around the waiting:** the ten
+second timeout is still there and still does what it was for. What changed is
+only what happens after, when the name is asked for.
+
+**Trap for the next one:** a warm restart of the service proves nothing about
+any of this. oFono is up by then, the modem is ready in about 150 ms, and
+every path that only runs when it is *not* goes untested. The same warning
+already applies to defects 11 and 12 - it is the third time in this file.
+
+---
+
 ## What it costs, measured
 
 Numbers from the phone, not estimates. Three things here run all the time -
