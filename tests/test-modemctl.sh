@@ -947,20 +947,54 @@ check "but it is named, because nothing else will notice" yes \
 check "and wireplumber is left alone on purpose, out loud" yes \
       "$(printf '%s\n' "$out" | grep -qi 'Bluetooth card' && echo yes || echo no)"
 
+# An empty journal used to end it: "no client lost ModemManager - nothing to
+# put back". Measured 14.9.: that is also exactly what a shell which never
+# found a ModemManager at all looks like, because a client only logs when a
+# call fails and this one never made one. So the age of the shell decides.
 settle_stubs "" 32011 no
 out=$(settle_run)
-check "nothing in the journal means nothing to put back" yes \
-      "$(printf '%s\n' "$out" | grep -q 'no client lost ModemManager' && echo yes || echo no)"
+check "a shell older than this ModemManager is not called healthy" no \
+      "$(printf '%s\n' "$out" | grep -q 'the shell is younger' && echo yes || echo no)"
+check "the silence itself is explained" yes \
+      "$(printf '%s\n' "$out" | grep -q 'says nothing at all' && echo yes || echo no)"
+check "and it is about the icon, not about the modem" yes \
+      "$(printf '%s\n' "$out" | grep -q 'nothing else is affected' && echo yes || echo no)"
+check "the way back is offered, not taken" no "$(shell_was_killed)"
+check "and it is the shell unit that is named" yes \
+      "$(printf '%s\n' "$out" | grep -q 'kill --signal=KILL mobi.phosh.Shell.service' && echo yes || echo no)"
 
+# The healthy boot: ModemManager comes up first, the shell after it. Nothing
+# to warn about, and warning anyway is how a check stops being read.
+settle_stubs "" 32011 no
+printf '#!/bin/sh\ndate\n' > "$SETTLEBIN/ps"; chmod +x "$SETTLEBIN/ps"
+out=$(settle_run)
+check "a shell younger than ModemManager has it" yes \
+      "$(printf '%s\n' "$out" | grep -q 'the shell is younger than it' && echo yes || echo no)"
+check "and nothing is said about the icon" no \
+      "$(printf '%s\n' "$out" | grep -qi 'signal icon' && echo yes || echo no)"
+
+# No shell at all - a phone in SSH, or one whose session has not started yet.
+settle_stubs "" 32011 no
+printf '#!/bin/sh\nexit 1\n' > "$SETTLEBIN/pgrep"; chmod +x "$SETTLEBIN/pgrep"
+out=$(settle_run)
+check "no shell running is said plainly" yes \
+      "$(printf '%s\n' "$out" | grep -q 'no shell is running' && echo yes || echo no)"
+
+# Neither of these is a client that lost ModemManager, so neither may be named
+# as one - what is left is the age question, which is asked of every phone.
 settle_stubs "$CBS_DENIED" 32011 no
 out=$(settle_run)
-check "the cell broadcast denial is not mistaken for this one" yes \
-      "$(printf '%s\n' "$out" | grep -q 'no client lost ModemManager' && echo yes || echo no)"
+check "the cell broadcast denial is not mistaken for this one" no \
+      "$(printf '%s\n' "$out" | grep -q 'cellbroadcastd' && echo yes || echo no)"
+check "and it is not reported as the shell losing anything" no \
+      "$(printf '%s\n' "$out" | grep -q 'the shell lost ModemManager' && echo yes || echo no)"
 
 settle_stubs "$CBS_GONE" 32011 no
 out=$(settle_run)
-check "nor is cellbroadcastd losing the old name" yes \
-      "$(printf '%s\n' "$out" | grep -q 'no client lost ModemManager' && echo yes || echo no)"
+check "nor is cellbroadcastd losing the old name" no \
+      "$(printf '%s\n' "$out" | grep -q 'cellbroadcastd' && echo yes || echo no)"
+check "that one is not the shell either" no \
+      "$(printf '%s\n' "$out" | grep -q 'the shell lost ModemManager' && echo yes || echo no)"
 
 settle_stubs "$LOST_SHELL_SU" 32011 no
 out=$(settle_run)

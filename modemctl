@@ -419,7 +419,32 @@ settle_shell() {
         return 0
     fi
     if [ -z "$clients" ]; then
-        skip "no client lost ModemManager - nothing to put back"
+        # An empty journal is not proof that the shell has a modem. A client
+        # only logs when a call FAILS, and a client that started while nobody
+        # owned the name never makes one: GLib's name watcher has nothing to
+        # fire on, so there is no call, no error, and no line. Measured 14.9.:
+        # phosh started 19 s into the gap left by defect 18 and still had no
+        # signal icon twenty minutes later, with a journal that said nothing.
+        #
+        # So ask the other question, which has an answer either way: is the
+        # shell older than the ModemManager that is on the bus now? If it is,
+        # it has lived through at least one ModemManager going away, and on
+        # this phone it never gets the icon back by itself.
+        shell_age=$(shell_started_at) || shell_age=""
+        if [ -z "$shell_age" ]; then
+            skip "no client lost ModemManager, and no shell is running"
+            return 0
+        fi
+        if [ "$shell_age" -gt "$since" ]; then
+            ok "no client lost ModemManager, and the shell is younger than it"
+            return 0
+        fi
+        warn "no client said it lost ModemManager - but the shell has been up"
+        warn "since before this ModemManager started, and a shell that never"
+        warn "found one says nothing at all. If the mobile signal icon is"
+        warn "missing, that is why; nothing else is affected. The way back,"
+        warn "when it suits you (see FINDINGS, defects 16 and 18):"
+        warn "    systemctl --user kill --signal=KILL $SHELL_UNIT"
         return 0
     fi
     while IFS= read -r c; do

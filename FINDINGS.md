@@ -1885,6 +1885,31 @@ forgotten, the oFono interface dropped, and nothing is released, queued, or
 allowed to cut `main()`'s wait short. Against the previous `main.py` three of
 them fail, which is the only thing that makes them worth having.
 
+### The icon was gone, and nothing in the journal said so
+
+Asked afterwards whether the phone showed a signal icon, the answer was no -
+and `modemctl settle` had just said `no client lost ModemManager - nothing to
+put back`. Both were right, which is the finding.
+
+phosh started at 08:52:52, nineteen seconds into the gap. The journal from
+that boot has no `Error calling GetManagedObjects()` line for it, because
+there was no call to fail: with nobody owning `org.freedesktop.ModemManager1`,
+GLib's name watcher has nothing to fire on. Defect 16 leaves a trail because
+the name is *changing hands* and the call lands in the middle; this leaves
+none, because the client never asks at all. gsd-wwan, which was already
+running, logged its `object_removed_cb: should not be reached` on every
+restart - it saw ModemManager go. phosh, which started inside the gap, saw
+nothing and had nothing to see.
+
+So `settle` asked the wrong question. An empty journal is not evidence that
+the shell has a modem; it is also exactly what a shell that never found one
+looks like. It now asks a question that has an answer either way: **is the
+shell older than the ModemManager currently on the bus?** If it is, it has
+lived through at least one ModemManager going away, and on this phone it never
+gets the icon back by itself - whether or not it left a line behind. If it is
+younger, it started after this ModemManager and has it. A phone that boots
+normally takes the second path: ModemManager is up long before the session.
+
 **Trap, and it cost half an hour:** changing one of our *own* patches leaves
 the phone in a state both halves of `modemctl` refuse to touch - the file on
 disk is our previous patched version, so the new patch does not fit
