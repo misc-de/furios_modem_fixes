@@ -1921,6 +1921,128 @@ before it overwrites it.
 
 ---
 
+## 19. The car park: the radio comes back, the connection does not
+
+Reported on 14 September, from the road. Wi-Fi was gone, the phone had
+switched to LTE and that worked. Then an underground car park took the cell
+away, and on the way out the signal came back - but mobile data did not, until
+the connection was switched on by hand.
+
+The journal of that minute, on one boot, with every timestamp real:
+
+```
+09:28:14  ofonod: Clearing active context
+09:28:14  dnsmasq: setting upstream servers from DBus / cleared cache
+09:28:15  NetworkManager: failed to connect modem: missing data port
+09:28:15  NetworkManager: state change: prepare -> failed (reason 'config-failed')
+09:28:15  ofonod: Unexpected data call status 65535
+          ... three more, all within two seconds ...
+09:28:17  NetworkManager: Activation: failed for connection 'Willkommen'
+          (and then nothing from NetworkManager, for two minutes)
+09:28:30  furios-mobile-context: mobile data is down - activating (attempt 2)
+09:28:31  furios-mobile-context: mobile data is back up
+09:29:42  dnsmasq: using nameserver 192.168.0.1 (via wlan0)     <- Wi-Fi, at home
+09:30:04  NetworkManager: op="connection-activate" ... uid=32011 <- by hand
+```
+
+Two separate things went wrong, and the second one is ours.
+
+**NetworkManager gave up, in three seconds.** A cellular profile gets four
+autoconnect attempts by default (`connection.autoconnect-retries` is `-1`,
+which means the global default of 4). A cell that has just gone away fails all
+four of them in about two seconds - there is no back-off between them, because
+they are not meant to wait for a radio. After the fourth, the profile is
+blocked and NetworkManager waits. On a phone whose data context is activated
+through oFono, what it is waiting for does not arrive, so the block outlives
+the outage by as long as nobody notices.
+
+**And this repository's own supervisor declared victory over half a repair.**
+`furios-mobile-context` brought the oFono context back up 13 seconds later,
+correctly, and logged *mobile data is back up* - because up, to it, meant an
+active context with an address on its interface. It was not wrong about that.
+It was answering a smaller question than the one that mattered.
+
+What the phone actually had between 09:28:31 and 09:29:42 was an interface
+with an address, a default route on it (defect 7 put it there), and **not one
+DNS server**. The resolver is filled from NetworkManager's IP configuration -
+that is defects 8 and 10 - and NetworkManager held no IP configuration for a
+device it was not connected to. `dnsmasq` cleared its upstreams at 09:28:14 and
+got the next one from Wi-Fi, at home, seventy seconds later. A route to a
+carrier nobody can look a name up through is not a connection, and the UI was
+right to say so.
+
+**Fix: the supervisor now supervises both halves.** With the data call up it
+asks NetworkManager whether it is using it, and activates the cellular
+connection if it is not - the same `connection-activate` the user reached for
+at 09:30:04, made by the daemon instead. The oFono half is untouched and still
+runs first: asking NetworkManager to activate over a cell that is not there
+just spends the four attempts that caused this.
+
+Its own restraint is the same three switches NetworkManager itself checks
+before autoconnecting, because anything else would be a daemon overriding a
+decision:
+
+- the **WWAN radio switch** - what the phone's mobile-data toggle throws;
+- the **device's autoconnect flag**, which NetworkManager clears when a
+  connection is taken down by hand. That is "stay disconnected" in switch
+  form, and it is the one an unasked-for activation would be rudest about;
+- a **cellular profile allowed to autoconnect**. With that off, a connection
+  coming up is something the user asks for.
+
+Plus one it checks for a different reason: a NetworkManager activation already
+in flight (`connecting`, `prepare`, `config`) means NetworkManager is bringing
+the context up *itself*, through ModemManager and ofono2mm. Setting `Active`
+underneath it at that moment is two things racing on one D-Bus property, which
+is the state defect 9 had to be dug out of by hand - reached, this time, by
+being helpful.
+
+**What was not done: raising `autoconnect-retries`.** Four attempts in two
+seconds do not fail because four is too few; they fail because all four land
+inside the same dead second. Setting it to `0` makes that unlimited, which on
+a phone in a car park is a retry loop with no upper bound on a radio that is
+trying to find a cell - the opposite of what defect 9 was careful about. A
+supervisor that backs off (10 s, 30 s, 60 s, then stops) answers the actual
+shape of the problem.
+
+**Measured at the device, 14 September:**
+
+- All four NetworkManager questions answer correctly under the service's own
+  hardening (`ProtectSystem=strict`, `ProtectHome=yes`, empty
+  `CapabilityBoundingSet`) - checked by running them through `systemd-run`
+  with those settings, not by assuming.
+- A healthy phone: one pass, nothing said, nothing touched.
+- The race guard, live: `Powered` false and back to true put NetworkManager
+  into `connecting (prepare)` for about ten seconds, and the supervisor logged
+  *NetworkManager is activating mobile data - letting it finish* and kept its
+  hands off. On the old code that window was a `SetProperty Active true`
+  against an activation already in progress.
+- The restraint that matters most, live: after `nmcli device disconnect`, the
+  phone sat for 45 seconds with the oFono context **up** and NetworkManager
+  **disconnected** - the car park state exactly, except that the device's
+  autoconnect flag was `no`. The supervisor did not touch NetworkManager once.
+- The repair itself: `nmcli device connect /ril_0` as root, from that same
+  state, brings the connection back - so the call the daemon makes does work
+  from where the daemon stands. What is **not** reproduced at the desk is the
+  blocked-profile state that made it necessary: that needs four real
+  activation failures, which needs a real dead cell. The acting path is
+  covered by the tests; the radio will have to confirm it in a car park.
+
+**A trap worth writing down.** `nmcli device connect` prints
+
+```
+Error: Connection activation failed: New connection activation was enqueued.
+```
+
+and exits non-zero on an activation that succeeds a second later - seen here,
+with the connection up afterwards. A daemon that believed the exit status
+would back off from something that worked. Whether it worked is a question for
+the next pass, asked of NetworkManager.
+
+`modemctl status` reports this state too now, because it was invisible: mobile
+data up on an interface, and NetworkManager not carrying it.
+
+---
+
 ## What it costs, measured
 
 Numbers from the phone, not estimates. Three things here run all the time -

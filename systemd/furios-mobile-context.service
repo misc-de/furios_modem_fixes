@@ -1,11 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
 # SPDX-License-Identifier: MIT
 [Unit]
-Description=Bring mobile data back up when the data context drops
+Description=Keep mobile data up - the data call, and NetworkManager using it
 Documentation=file:/usr/share/doc/furios-modem-fixes/README.md
 # oFono is the one that has to be there: everything here is a call to it. Listed
 # After ModemManager too so the journal reads in the order things happened, not
 # because anything is asked of it.
+#
+# NetworkManager is deliberately NOT ordered against, although this now asks it
+# things. It is asked through nmcli, one question at a time, and a missing
+# answer means "not ours to act on" rather than an error - so the worst a race
+# at boot can do is one quiet pass. An ordering edge would buy nothing and
+# costs a way for the boot to go wrong.
 After=ofono.service ModemManager.service
 # Not Requires: with the modem stack switched off there is no context to
 # supervise, and this should stay quiet rather than fail in a loop.

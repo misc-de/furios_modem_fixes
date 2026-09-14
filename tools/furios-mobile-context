@@ -13,6 +13,25 @@
 # and each time mobile data stayed down until somebody activated it by hand.
 # A fallback route to an interface nobody revives is not a fallback.
 #
+# There is a second half to that, found on 14 September on the way out of an
+# underground car park. The radio came back, the data call came back - and the
+# phone still had no internet until the connection was switched on by hand.
+# While the cell was gone NetworkManager had spent its four autoconnect
+# attempts in three seconds, each one failing with "missing data port", and
+# after the fourth it stopped and waited for something that never came. This
+# daemon then brought the oFono context back up, correctly, and reported
+# itself happy - with NetworkManager still holding no configuration for the
+# device, which on this phone means no DNS servers at all:
+#
+#     09:28:14  dnsmasq: setting upstream servers from DBus / cleared cache
+#     09:28:31  furios-mobile-context: mobile data is back up
+#     09:29:42  dnsmasq: using nameserver 192.168.0.1 (via wlan0)
+#
+# Seventy seconds of a default route to a carrier nobody could look anything
+# up through. So "up" is not a question for oFono alone: the data call is one
+# half, NetworkManager actually using it is the other, and this supervises
+# both.
+#
 # Restraint is the whole design, not a feature:
 #
 #   - It only ever acts when the system already WANTS mobile data. Powered
@@ -32,7 +51,7 @@
 # nothing at all in between.
 set -u
 
-VERSION=0.1.0
+VERSION=0.2.0
 
 # Backoff between attempts, in seconds, one per attempt. When the list runs
 # out we stop and wait for the radio to tell us something changed - the list
@@ -62,6 +81,14 @@ ESCALATE_AFTER=${FURIOS_MOBILE_CONTEXT_ESCALATE:-3}
 # than at an hour.
 IDLE=${FURIOS_MOBILE_CONTEXT_IDLE:-300}
 
+# The same idea for the NetworkManager half, and a shorter list: by the time
+# this runs the radio is already carrying a data call, so an attempt that
+# fails is NetworkManager refusing something it can do, not a cell that is not
+# there. Three tries and then leave it alone - a supervisor that keeps
+# re-activating a profile NetworkManager will not hold would tear the data
+# call down and rebuild it every minute, for ever.
+NM_BACKOFF=${FURIOS_MOBILE_CONTEXT_NM_BACKOFF:-"10 30 60"}
+
 ONCE=0
 QUIET=0
 for arg in "$@"; do
@@ -84,9 +111,16 @@ It does nothing at all unless mobile data is switched on, the modem is
 registered and attached, no call is in progress, and the context is actually
 down. Exit 0 means "the situation is as it should be, or I did what I could".
 
+With the data call up it also checks that NetworkManager is using it, and
+activates the cellular connection if it has given up on it - but never while
+the WWAN switch is off, the device is set to stay disconnected, or no
+cellular profile is allowed to autoconnect.
+
 Environment:
   FURIOS_MOBILE_CONTEXT_BACKOFF    seconds between attempts, one per attempt;
                                    the number of entries is the attempt limit
+  FURIOS_MOBILE_CONTEXT_NM_BACKOFF the same, for activating the NetworkManager
+                                   connection (default "10 30 60")
   FURIOS_MOBILE_CONTEXT_ESCALATE   failures before cycling Powered (default 3)
   FURIOS_MOBILE_CONTEXT_IDLE       safety-net wakeup while healthy (default 300)
 EOF
@@ -184,6 +218,97 @@ context_up() {
     ip -4 -o addr show dev "$iface" scope global 2>/dev/null | grep -q .
 }
 
+# --- the other half: NetworkManager -----------------------------------------
+#
+# A data call oFono is carrying and mobile data the phone can use are two
+# different things. NetworkManager owns the address, the DNS servers and the
+# state the UI shows; when it is not holding the cellular connection, what is
+# left is an interface with an address and nothing that resolves a name.
+#
+# It ends up there on its own. Four failed autoconnect attempts - which a
+# cell that has just gone away produces in about three seconds - and
+# NetworkManager blocks the profile and waits. What it waits for does not
+# come back on a phone whose context is activated through oFono, so the state
+# survives the radio recovering, and it survived this daemon's own repair
+# right up to the point somebody flipped the switch by hand.
+#
+# Asked through nmcli rather than the bus, unlike everything else here.
+# Activating a connection over D-Bus means finding the device, choosing a
+# profile and building an ActivateConnection call by object path; nmcli does
+# that, it ships with NetworkManager, and this daemon already depends on the
+# package.
+NM_DEV=
+NM_STATE=
+# Empty when there is no nmcli or no cellular device - NetworkManager is not
+# running, or has no modem. Then this stays the oFono-only supervisor it was
+# and nothing below ever runs.
+nm_look() {
+    NM_DEV=; NM_STATE=
+    command -v nmcli >/dev/null 2>&1 || return 1
+    local line
+    line=$(timeout 10 nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null \
+           | grep -m1 ':gsm:')
+    [ -n "$line" ] || return 1
+    NM_DEV=${line%%:gsm:*}
+    NM_STATE=${line#*:gsm:}
+    return 0
+}
+
+# Whether NetworkManager is meant to be carrying mobile data at all. Three
+# switches, and every one of them is somebody's decision rather than a fault:
+#
+#   - the WWAN radio switch, which is what the phone's own mobile-data toggle
+#     throws;
+#   - the device's autoconnect flag, which NetworkManager clears when a
+#     connection is taken down by hand - "stay off" in switch form, and the
+#     one an unasked-for activation would be rudest about;
+#   - and a cellular profile that is allowed to come up on its own. With
+#     autoconnect off on the profile, a connection coming up is something the
+#     user asks for, not something a daemon decides.
+nm_wants_data() {
+    local wwan auto
+    wwan=$(timeout 10 nmcli -t -f WWAN radio 2>/dev/null)
+    [ "$wwan" = enabled ] || return 1
+
+    auto=$(timeout 10 nmcli -t -f GENERAL.AUTOCONNECT device show "$NM_DEV" 2>/dev/null)
+    case "$auto" in *:yes) ;; *) return 1 ;; esac
+
+    timeout 10 nmcli -t -f TYPE,AUTOCONNECT connection show 2>/dev/null \
+        | grep -q '^gsm:yes$' || return 1
+    return 0
+}
+
+# NetworkManager is mid-activation. It brings the context up itself on that
+# path, through ModemManager and ofono2mm, so reaching past it into oFono at
+# the same moment is two things racing on one property - which is the state
+# defect 9 warns about, reached by being helpful.
+nm_busy() {
+    nm_look || return 1
+    # "connecting", not "connect*": that would match "connected" too, and a
+    # device already carrying the connection would read as one still building
+    # it - so a data call that dropped under a connected device would never be
+    # revived at all.
+    case "$NM_STATE" in connecting*|prepar*|config*|deactivating*) return 0 ;; esac
+    return 1
+}
+
+# Which connection: NetworkManager's own choice. It knows which profile
+# belongs to this device and this SIM, and a daemon picking one out of the
+# list would be guessing at exactly the moment it matters.
+#
+# The exit status is deliberately not read. nmcli reports
+#
+#     Error: Connection activation failed: New connection activation was enqueued.
+#
+# on an activation that then succeeds a second later - measured here, on this
+# device, with the connection up afterwards. Believing that would have this
+# backing off from something that worked. Whether it worked is a question for
+# the next pass, which asks NetworkManager rather than the client that talked
+# to it.
+nm_activate() {
+    timeout 30 nmcli -w 25 device connect "$NM_DEV" >/dev/null 2>&1 || true
+}
+
 # --- acting -----------------------------------------------------------------
 
 activate() {
@@ -206,8 +331,50 @@ cycle_powered() {
 }
 
 FAILURES=0
+NM_FAILURES=0
 NEXT_WAIT=$IDLE
 read -ra BACKOFF_STEPS <<< "$BACKOFF"
+read -ra NM_BACKOFF_STEPS <<< "$NM_BACKOFF"
+
+# The NetworkManager half of a pass, and it only ever runs with the data call
+# actually up. That order is the point: the radio is the thing to fix first,
+# and asking NetworkManager to activate over a cell that is not there just
+# spends the four autoconnect attempts that got us here.
+#
+# Counted separately from FAILURES because the two failures mean different
+# things and one of the answers to the oFono one is cycling Powered, which
+# would throw away a working data call to fix a NetworkManager that is merely
+# sulking.
+nm_pass() {
+    NEXT_WAIT=$IDLE
+
+    nm_look || { NM_FAILURES=0; return 0; }
+
+    case "$NM_STATE" in
+        connected*)
+            [ "$NM_FAILURES" -gt 0 ] && log "NetworkManager is carrying mobile data again"
+            NM_FAILURES=0; return 0 ;;
+        disconnected*|failed*) ;;
+        # connecting, deactivating, unavailable, unmanaged. In flight, or not
+        # ours. Either way the answer is to wait rather than to push.
+        *) NM_FAILURES=0; return 0 ;;
+    esac
+
+    nm_wants_data || { NM_FAILURES=0; return 0; }
+
+    local steps=${#NM_BACKOFF_STEPS[@]}
+    if [ "$NM_FAILURES" -ge "$steps" ]; then
+        [ "$NM_FAILURES" -eq "$steps" ] && \
+            log "NetworkManager will not take the data call after $steps attempts - leaving it alone"
+        NM_FAILURES=$((NM_FAILURES + 1))
+        return 0
+    fi
+
+    NM_FAILURES=$((NM_FAILURES + 1))
+    log "the data call is up but NetworkManager is not using it - activating it (attempt $NM_FAILURES)"
+    nm_activate
+    NEXT_WAIT=${NM_BACKOFF_STEPS[$((NM_FAILURES - 1))]:-$IDLE}
+}
 
 # One pass. Sets NEXT_WAIT to the seconds to wait before the next one: IDLE
 # when there is nothing to do, the next backoff step while a revive is in
@@ -226,7 +393,11 @@ pass() {
 
     if context_up; then
         [ "$FAILURES" -gt 0 ] && log "mobile data is back up"
-        FAILURES=0; NEXT_WAIT=$IDLE; return 0
+        FAILURES=0
+        # The data call is up. Whether the phone can use it is a second
+        # question, and nm_pass sets NEXT_WAIT for both of us.
+        nm_pass
+        return 0
     fi
 
     if ! data_wanted; then
@@ -242,6 +413,14 @@ pass() {
     if call_in_progress; then
         log "a call is in progress - leaving the modem alone"
         NEXT_WAIT=60; return 0
+    fi
+
+    if nm_busy; then
+        # NetworkManager is bringing this up itself, and it brings the context
+        # with it. Two things setting Active on one context is how oFono ends
+        # up answering without acting.
+        log "NetworkManager is activating mobile data - letting it finish"
+        NEXT_WAIT=15; return 0
     fi
 
     # Out of attempts. Stop asking and wait for the radio to change its mind;

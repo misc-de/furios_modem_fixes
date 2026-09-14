@@ -1,6 +1,6 @@
 # furios_modem_fixes
 
-Eighteen defects in the FuriOS modem stack, and a way to keep them fixed.
+Nineteen defects in the FuriOS modem stack, and a way to keep them fixed.
 
 Out of the box on this phone the data connection often only came up after a
 reboot, the signal icon sat at the emptiest bar regardless of reception, and
@@ -10,14 +10,17 @@ configuration, and one is in the state oFono keeps between boots - and one of
 those eight, the signal bar, has a second cause inside oFono itself, where LTE
 RSRP and RSRQ arrive swapped.
 
-The remaining five are different in kind: nothing gets patched, because there
+The remaining six are different in kind: nothing gets patched, because there
 is no code of anybody's to patch. Number 7 is about what oFono *says* about the
 data call - it reports the interface's own address as the gateway - and the fix
 is to install the route that claim prevents. Number 8 is a resolver that is
 filled correctly and asked by nobody, which is how FuriOS wires up DNS.
 Together those two are why switching Wi-Fi off left this phone with no network
 at all. Number 9 is a data call that stays down once it drops, so something has
-to be watching. Number 13 is a permission that was never written down:
+to be watching. Number 19 is what that watch turned out to be missing: a data
+call the phone cannot use, because NetworkManager spent its four autoconnect
+attempts inside the same dead second and stayed blocked long after the cell
+came back. Number 13 is a permission that was never written down:
 ModemManager grew a Cell Broadcast interface and a polkit action to guard it,
 but no rule in its bus policy, so the bus turns the call away before polkit is
 ever asked - and the channels a phone must listen on to receive a public
@@ -106,6 +109,7 @@ bug report is a public place.
 | 16 | While ModemManager hands its bus name over, a client's `GetManagedObjects` matches no `<allow>` rule and is denied | the system bus, and clients that do not retry | the **signal icon disappears for good** after a restart of ModemManager - phosh, chatty and wireplumber all give up at once |
 | 17 | Failing to take the bus name is reported through a logger that is off, the reply saying somebody else owns it is never read, and giving up leaves the daemon running | `main.py`, our own fix for 16 | ofono2mm is `active (running)` with nothing owning `org.freedesktop.ModemManager1` - **a whole boot with no mobile data**, and one line in the journal |
 | 18 | oFono not being on the bus yet is reported as oFono having left, and that path gives the bus name back - after `take_bus_name` has just taken it | `main.py`, our own fix for 16 | the name is ours one second after boot and gone the next, and nothing ever asks for it again - **another whole boot with no mobile data** |
+| 19 | A cell that drops burns NetworkManager's four autoconnect attempts in two seconds, and the blocked profile outlives the outage | NetworkManager's defaults, and our own supervisor answering a smaller question | the radio comes back and **mobile data does not** - an interface with an address, a default route and no DNS server at all, until somebody switches the connection on by hand |
 
 Numbers behind each of these, and why they are what they are, in
 [FINDINGS.md](FINDINGS.md).
@@ -128,6 +132,13 @@ the moment Wi-Fi goes away. `furios-mobile-route` installs the route and keeps i
 installed, `modemctl apply` fixes the DNS wiring, `furios-mobile-context` puts
 the data call back when it dies, and `modemctl status` calls out any of them
 when it is missing.
+
+Number 19 is the same trap one layer up, and it caught this repository's own
+supervisor. Putting the data call back is not the same as the phone having
+mobile data: NetworkManager owns the address, the DNS servers and what the UI
+shows, and after a cell drops it blocks the cellular profile and stays blocked.
+A phone in that state has a route to the carrier and not one server to resolve
+a name through. `furios-mobile-context` now watches both halves.
 
 Number 12 is the same kind of trap seen from the other side. There the stack
 lied and the phone worked; here the stack is right about everything - modem

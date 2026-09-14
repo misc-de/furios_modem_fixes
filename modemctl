@@ -1173,6 +1173,30 @@ and no 5G"; bad_count=$((bad_count+1)) ;;
         *)       warn "furios-mobile-route.service is '$mobile_state' - the route will not survive a reboot" ;;
     esac
 
+    # The other half of the same outage, and hidden the same way. When
+    # NetworkManager is not holding the cellular connection, the phone still
+    # has an address and - thanks to the route above - still has a way out;
+    # what it does not have is a single DNS server, because the resolver is
+    # filled from NetworkManager's IP configuration and there is none. Wi-Fi
+    # covers that up completely until the moment it is gone.
+    #
+    # Asked only when there IS mobile data. NetworkManager calling the device
+    # disconnected while the modem has no data call is not a fault, it is a
+    # description.
+    if [ -n "$mobile_iface" ] && command -v nmcli >/dev/null 2>&1; then
+        local nm_line nm_dev nm_state
+        nm_line=$(nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null | grep -m1 ':gsm:')
+        nm_dev=${nm_line%%:gsm:*}
+        nm_state=${nm_line#*:gsm:}
+        case "$nm_state" in
+            connected*|"") ;;
+            *) warn "mobile data is up on $mobile_iface, but NetworkManager says '$nm_state'"
+               warn "     - it holds no DNS servers for it; with Wi-Fi off nothing resolves"
+               warn "     - furios-mobile-context repairs this; to do it now:"
+               warn "       nmcli device connect $nm_dev" ;;
+        esac
+    fi
+
     local ctx_state
     ctx_state=$(systemctl is-enabled furios-mobile-context.service 2>/dev/null)
     case "$ctx_state" in

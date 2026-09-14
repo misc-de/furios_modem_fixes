@@ -17,6 +17,10 @@ TOOL="$ROOT/tools/furios-mobile-context"
 
 scenario() {
     # scenario <powered> <attached> <status> <active> <has address> <calls>
+    #
+    # NetworkManager defaults to the healthy case - carrying the connection,
+    # everything switched on - so every test written before that half existed
+    # still describes what it meant to describe. nm_scenario changes it.
     cat > "$STUBDIR/scenario" <<EOF
 POWERED="$1"
 ATTACHED="$2"
@@ -24,6 +28,21 @@ STATUS="$3"
 ACTIVE="$4"
 HAS_ADDR="$5"
 CALLS="$6"
+NM_STATE="connected"
+NM_WWAN="enabled"
+NM_DEV_AUTO="yes"
+NM_PROFILE="yes"
+EOF
+}
+
+nm_scenario() {
+    # nm_scenario <device state> <wwan radio> <device autoconnect> <profile autoconnect>
+    # Appended, so it has to follow the scenario call it belongs to.
+    cat >> "$STUBDIR/scenario" <<EOF
+NM_STATE="$1"
+NM_WWAN="$2"
+NM_DEV_AUTO="$3"
+NM_PROFILE="$4"
 EOF
 }
 
@@ -73,8 +92,25 @@ exit 0
 STUB
 chmod +x "$STUBDIR/ip"
 
+# Enough nmcli to answer the four questions the tool asks, in nmcli -t shape:
+# colon-separated, one record a line, no headers.
+cat > "$STUBDIR/nmcli" <<'STUB'
+#!/bin/sh
+. "$(dirname "$0")/scenario"
+printf '%s\n' "$*" >> "$(dirname "$0")/nmcli.args"
+case "$*" in
+  *"device status"*)   echo "/ril_0:gsm:$NM_STATE" ;;
+  *"radio"*)           echo "$NM_WWAN" ;;
+  *"device show"*)     echo "GENERAL.AUTOCONNECT:$NM_DEV_AUTO" ;;
+  *"connection show"*) [ "$NM_PROFILE" = yes ] && echo "gsm:yes" ;;
+  *"device connect"*)  ;;
+esac
+exit 0
+STUB
+chmod +x "$STUBDIR/nmcli"
+
 run_tool() {
-    rm -f "$STUBDIR/dbus.args"
+    rm -f "$STUBDIR/dbus.args" "$STUBDIR/nmcli.args"
     PATH="$STUBDIR:$PATH" bash "$TOOL" --once --quiet 2>/dev/null
 }
 # grep -c prints 0 AND exits 1 when nothing matches, so "|| echo 0" appends a
@@ -87,6 +123,13 @@ count() {
 # Only the calls that change the modem count. Everything else is looking.
 acted()     { count 'SetProperty'; }
 activated() { count 'string:Active variant:boolean:true'; }
+# The only nmcli call that changes anything. Everything else it asks is a
+# question.
+nm_acted() {
+    local n
+    n=$(grep -c 'device connect' "$STUBDIR/nmcli.args" 2>/dev/null)
+    echo "${n:-0}"
+}
 
 printf '\033[1m== when it must keep its hands off\033[0m\n'
 
@@ -146,6 +189,117 @@ run_tool
 check "acts on the internet context, not the MMS one" 0 \
       "$(count 'context2.*SetProperty')"
 
+printf '\n\033[1m== the half NetworkManager holds\033[0m\n'
+
+# The car park, 14 September. The cell goes away, NetworkManager spends its
+# four autoconnect attempts in three seconds and blocks the profile, the cell
+# comes back, this daemon puts the data call back - and the phone still has an
+# interface with an address, no DNS servers and a UI that says mobile data is
+# off. Nothing in the old tool ever looked at that, because the context was up
+# and up was the whole question.
+scenario true true registered true yes no
+nm_scenario disconnected enabled yes yes
+run_tool
+check "data call up, NetworkManager not using it - activates it" 1 "$(nm_acted)"
+# And it fixes that through NetworkManager, not by poking oFono again. The
+# context is already up; setting Active on it a second time achieves nothing
+# and is how oFono ends up answering without acting.
+check "and does not touch the context that is already up" 0 "$(acted)"
+
+scenario true true registered true yes no
+run_tool
+check "NetworkManager already carrying it - left alone" 0 "$(nm_acted)"
+
+# Same three switches as the oFono half, and the same rule: a switch somebody
+# threw is not a fault to repair.
+scenario true true registered true yes no
+nm_scenario disconnected disabled yes yes
+run_tool
+check "WWAN switched off stays off" 0 "$(nm_acted)"
+
+# NetworkManager clears the device's autoconnect flag when a connection is
+# taken down by hand. That is "stay disconnected" in switch form, and it is
+# the one an unasked-for activation would be rudest about.
+scenario true true registered true yes no
+nm_scenario disconnected enabled no yes
+run_tool
+check "a device told to stay disconnected is left that way" 0 "$(nm_acted)"
+
+scenario true true registered true yes no
+nm_scenario disconnected enabled yes no
+run_tool
+check "no profile allowed to autoconnect - nothing to activate" 0 "$(nm_acted)"
+
+# Mid-activation. NetworkManager gets there on its own in a second or two, and
+# a second activation on top of the first tears down what it just built.
+scenario true true registered true yes no
+nm_scenario connecting enabled yes yes
+run_tool
+check "an activation in flight is not interrupted" 0 "$(nm_acted)"
+
+printf '\n\033[1m== which half first\033[0m\n'
+
+# With the data call down, the radio is the thing to fix. Asking
+# NetworkManager to activate over a cell that is not there spends the four
+# autoconnect attempts that caused the outage in the first place.
+scenario true true registered false no no
+nm_scenario disconnected enabled yes yes
+run_tool
+check "context down - the radio is fixed first, not NetworkManager" 0 "$(nm_acted)"
+check "and the context is what gets activated" 1 "$(activated)"
+
+# The other order of the same rule. NetworkManager activating brings the
+# context up itself, through ModemManager and ofono2mm; setting Active
+# underneath it at that moment is two things racing on one property, which is
+# exactly the state that made cycling Powered necessary.
+scenario true true registered false no no
+nm_scenario connecting enabled yes yes
+run_tool
+check "does not reach past a NetworkManager activation into oFono" 0 "$(acted)"
+
+# Mobile data switched off outranks both halves. Nothing here may put it back.
+scenario false true registered false no no
+nm_scenario disconnected enabled yes yes
+run_tool
+check "mobile data off - neither half acts" 0 "$(( $(acted) + $(nm_acted) ))"
+
+printf '\n\033[1m== without NetworkManager at all\033[0m\n'
+
+# nmcli missing means NetworkManager is not installed, not running, or has no
+# modem. The oFono half is older than the NetworkManager half and must keep
+# working exactly as it did - a daemon that stops reviving data calls because
+# it cannot find nmcli would have traded a fixed defect for a new one.
+NONM="$WORK/nonm"; mkdir -p "$NONM"
+cp "$STUBDIR/dbus-send" "$STUBDIR/ip" "$NONM/"
+ln -sf "$STUBDIR/scenario" "$NONM/scenario"
+for t in timeout grep sed tr head dirname cat; do
+    ln -sf "$(command -v "$t")" "$NONM/$t"
+done
+
+# The stub writes its transcript next to itself, so here that is $NONM. Bring
+# it back where count() looks - without this the counts are taken from a file
+# that was never written, every one of them comes out 0, and a test that
+# expects 0 passes while testing nothing.
+run_tool_nonm() {
+    rm -f "$STUBDIR/dbus.args" "$STUBDIR/nmcli.args" "$NONM/dbus.args"
+    PATH="$NONM" /bin/bash "$TOOL" --once --quiet 2>/dev/null
+    [ -f "$NONM/dbus.args" ] && cp "$NONM/dbus.args" "$STUBDIR/dbus.args"
+    return 0
+}
+
+scenario true true registered false no no
+run_tool_nonm
+check "no nmcli - the oFono half still revives the data call" 1 "$(activated)"
+
+scenario true true registered true yes no
+run_tool_nonm
+check "no nmcli - and a healthy context is still left alone" 0 "$(acted)"
+# Proof the two checks above are reading anything at all: a pass that looked
+# at the modem leaves a transcript behind. Without this, "no nmcli" failing
+# open would look exactly like "no nmcli, nothing done wrong".
+check "and it did look, rather than fall over" yes \
+      "$([ -s "$STUBDIR/dbus.args" ] && echo yes || echo no)"
+
 printf '\n\033[1m== restraint over time\033[0m\n'
 
 # Each attempt waits longer than the last, and the list of waits is also the
@@ -160,6 +314,20 @@ done
 check "the backoff never shortens" yes "$rising"
 check "there is a limited number of attempts" yes \
       "$([ "$(set -- $steps; echo $#)" -ge 3 ] && echo yes || echo no)"
+
+# The same for the NetworkManager half, and it matters more there, not less:
+# every activation tears the data call down and rebuilds it. A list without an
+# end would be a phone that drops its own connection on a timer.
+nm_steps=$(sed -n 's/^NM_BACKOFF=${FURIOS_MOBILE_CONTEXT_NM_BACKOFF:-"\(.*\)"}.*/\1/p' "$TOOL")
+rising=yes; prev=0
+for w in $nm_steps; do
+    [ "$w" -lt "$prev" ] && rising=no
+    prev=$w
+done
+check "the NetworkManager backoff never shortens either" yes "$rising"
+check "and it gives up too" yes \
+      "$([ -n "$nm_steps" ] && [ "$(set -- $nm_steps; echo $#)" -le 5 ] && echo yes \
+        || echo "no (${nm_steps:-unset})")"
 
 # The net under the whole thing. Everything else here is woken by a signal;
 # this is the one look taken for no reason, and it is the only thing that would
