@@ -339,6 +339,90 @@ settle_networkmanager() {
     return 1
 }
 
+# Restarting ModemManager also takes the mobile signal icon away, and that one
+# does not come back on its own - not in an hour, not in five, on a stack that
+# is otherwise perfectly healthy. Measured 14.9.
+#
+# The old process gives up the bus name a moment before the new one takes it.
+# A GDBus client whose object manager notices the owner disappear re-sends
+# GetManagedObjects to the unique name it last knew, and in that gap no
+# <allow send_destination="org.freedesktop.ModemManager1"> rule can match any
+# more - a rule keyed on a well-known name matches nothing while nobody owns
+# it - so the bus answers with the catch-all deny:
+#
+#   Error calling GetManagedObjects() when name owner (null) for name
+#   org.freedesktop.ModemManager1 came back: ...AccessDenied ... 1 matched
+#   rules ... destination=":1.3188" (uid=0 comm="/usr/sbin/ofono2mm")
+#
+# and the client gives up for good. It is not a permission problem of ours:
+# upstream lets anyone call ObjectManager, and the only policy that would
+# cover this gap is one that allows the call to any destination whatsoever.
+# The clients have no retry. So the honest repair is to find out who was hit
+# and put back the one that the user can see.
+SHELL_UNIT=mobi.phosh.Shell.service
+# How far back "modemctl settle" looks when nobody told it when the restart
+# was. Two minutes: long enough for a restart the user did by hand a moment
+# ago, short enough not to drag in the one from this morning.
+SETTLE_WINDOW=120
+
+# Who was talking to ModemManager when it went away. One syslog identifier per
+# line. Session services log to the system journal too, so root sees gsd-wwan
+# and phosh here as well as chatty.
+clients_that_lost_modemmanager() {
+    local since=$1
+    # The two shapes of the same moment, and deliberately not the error text.
+    # GLib prints "Error calling GetManagedObjects() ... came back" only when
+    # the call failed, whatever it failed with - AccessDenied when the name is
+    # unowned at send time, ServiceUnknown a moment later when the old unique
+    # name is gone, a timeout if it hangs. Matching on the error instead would
+    # have missed two of the three, and matching on AccessDenied plus
+    # "ModemManager" would have counted the cell broadcast denial of defect 13
+    # - a different failure with a different fix, and claiming cellbroadcastd
+    # "lost ModemManager" would send the next person after the wrong thing.
+    journalctl --since "@$since" --no-pager -o short 2>/dev/null \
+        | grep -E 'Error calling GetManagedObjects\(\) when name owner .* for name org\.freedesktop\.ModemManager1 came back|Error creating ModemManager:' \
+        | awk '{print $5}' \
+        | sed -E 's/\[[0-9]+\]:?$//; s/:$//' \
+        | grep -E '^[A-Za-z][A-Za-z0-9._-]*$' \
+        | sort -u
+}
+
+settle_shell() {
+    local since=$1 clients shell_hit= others= user
+    clients=$(clients_that_lost_modemmanager "$since")
+    if [ -z "$clients" ]; then
+        skip "no client lost ModemManager - nothing to put back"
+        return 0
+    fi
+    while IFS= read -r c; do
+        case "$c" in
+            phosh|phoc|gsd-wwan) shell_hit=1 ;;
+            *) others="${others:+$others }$c" ;;
+        esac
+    done <<< "$clients"
+
+    if [ -n "$others" ]; then
+        warn "also lost ModemManager and will not notice: $others"
+        case " $others " in
+            *" wireplumber "*)
+                # Left alone on purpose: restarting wireplumber takes the
+                # Bluetooth card away with it, which is a worse thing to do to
+                # a phone than whatever wireplumber wanted from ModemManager.
+                warn "wireplumber is left alone - restarting it costs the Bluetooth card" ;;
+        esac
+    fi
+
+    [ -n "$shell_hit" ] || { ok "the shell kept ModemManager"; return 0; }
+
+    warn "the shell lost ModemManager - the mobile signal icon is gone and"
+    warn "does not come back by itself. Everything else is fine: the modem is"
+    warn "registered, data works, only the drawing of the icon is dead."
+    warn "The way back, when it suits you - it takes the screen with it for a"
+    warn "moment and can end the session outright (see FINDINGS, defect 16):"
+    warn "    systemctl --user kill --signal=KILL $SHELL_UNIT"
+    return 0
+}
+
 BACKUPS_KEPT=3
 prune_backups() {
     local f=$1 old
@@ -423,7 +507,7 @@ set_watchers() {
 
 cmd_apply() {
     need_write apply
-    local ts changed=0 touched=0 failed=0
+    local ts restarted_at changed=0 touched=0 failed=0
     ts=$(date +%Y%m%d-%H%M%S)
 
     head_ "ofono2mm"
@@ -587,9 +671,11 @@ inc && lvl && /<channels start="4371" end="4371"\/>/ {
         # ModemManager.service is ofono2mm here (drop-in 10-ofono2mm.conf);
         # there is no ofono2mm.service. ofono itself is deliberately NOT
         # restarted - that leaves the modem offline.
+        restarted_at=$(date +%s)
         if systemctl restart ModemManager; then
             ok "ModemManager restarted (that is ofono2mm)"
             settle_networkmanager || failed=1
+            settle_shell "$restarted_at" || failed=1
         else
             bad "could not restart ModemManager"
             failed=1
@@ -613,7 +699,7 @@ inc && lvl && /<channels start="4371" end="4371"\/>/ {
 
 cmd_revert() {
     need_write revert
-    local failed=0
+    local restarted_at failed=0
     head_ "ofono2mm"
     for f in $FILES; do
         case "$(patch_state "$f")" in
@@ -713,12 +799,16 @@ $0 ~ mark {
             # the modem stack away mid-sentence ends the call.
             warn "a call is in progress - not restarting the modem stack now"
             warn "the shipped files are on disk; they take effect at the next restart"
-        elif systemctl restart ModemManager; then
-            ok "ModemManager restarted (that is ofono2mm)"
-            settle_networkmanager || failed=1
         else
-            bad "could not restart ModemManager"
-            failed=1
+            restarted_at=$(date +%s)
+            if systemctl restart ModemManager; then
+                ok "ModemManager restarted (that is ofono2mm)"
+                settle_networkmanager || failed=1
+                settle_shell "$restarted_at" || failed=1
+            else
+                bad "could not restart ModemManager"
+                failed=1
+            fi
         fi
         say ""
         say "Shipped state restored."
@@ -816,6 +906,25 @@ cmd_boot() {
             cmd_apply
             return $? ;;
     esac
+}
+
+# What to run after restarting ModemManager by hand. Both halves of that
+# restart's damage are invisible until you go looking for them: NetworkManager
+# sits in "prepare" for ever, and the shell drops the signal icon. Neither
+# heals, and neither says anything.
+cmd_settle() {
+    local failed=0 since
+    if [ "$(id -u)" -ne 0 ]; then
+        bad "settle needs root - it restarts services for other users"
+        return 1
+    fi
+    # Nobody told us when the restart was, so look back a window wide enough
+    # for "I just did it" and no wider.
+    since=$(( $(date +%s) - SETTLE_WINDOW ))
+    head_ "settle"
+    settle_networkmanager || failed=1
+    settle_shell "$since" || failed=1
+    return $failed
 }
 
 cmd_status() {
@@ -1063,6 +1172,8 @@ modemctl $VERSION - keeps the FuriOS modem fixes applied
   modemctl signal          what the radio really receives, cross-checked
   modemctl boot            make the phone match the recorded profile
                            (used by the boot unit and the apt hook)
+  modemctl settle          after restarting ModemManager by hand: put back
+                           what that restart knocked over
 
 Profiles
   fixed       the repairs in this package, and the units that keep them there
@@ -1101,6 +1212,7 @@ case "$CMD" in
     set)          cmd_switch "${1:-}" 1 ;;
     try)          cmd_switch "${1:-}" "" ;;
     boot)         cmd_boot ;;
+    settle)       cmd_settle ;;
     check)        cmd_check ;;
     signal)       cmd_signal ;;
     version|-V|--version)

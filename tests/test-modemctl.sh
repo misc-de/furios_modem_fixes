@@ -828,6 +828,144 @@ kept=$(find "$TREE" -name 'mm_modem.py.bak.*' 2>/dev/null | wc -l)
 check "a run that patches prunes the backlog it is adding to" yes \
       "$([ "$kept" -le 3 ] && echo yes || echo "no - $kept backups")"
 
+printf '\n\033[1m== settling what a ModemManager restart knocked over\033[0m\n'
+
+# "settle" runs as root and restarts a service in somebody else's session.
+# Every one of these tests therefore lies to modemctl about all three: who it
+# is, what the journal saw, and what systemd did about it. What is being
+# tested is the decision, not systemd.
+SETTLEBIN="$WORK/settle-bin"; mkdir -p "$SETTLEBIN"
+SETTLE_REC="$WORK/settle-systemctl.args"
+SETTLE_KILLED="$WORK/settle-killed"
+
+settle_stubs() {
+    # settle_stubs <journal lines> <phosh uid, empty for none> <call: yes/no>
+    local journal=$1 uid=$2 call=$3
+    rm -f "$SETTLE_REC" "$SETTLE_KILLED"
+    {
+        printf '#!/bin/sh\n'
+        [ -n "$journal" ] && printf "cat <<'OUT'\n%s\nOUT\n" "$journal"
+        printf 'exit 0\n'
+    } > "$SETTLEBIN/journalctl"
+    {
+        printf '#!/bin/sh\n'
+        printf 'printf "%%s\\n" "$*" >> "%s"\n' "$SETTLE_REC"
+        printf 'case "$*" in\n'
+        # A new MainPID only after the kill: that is the whole difference
+        # between "the shell is back" and "the shell has not died yet".
+        printf '  *"kill --signal=KILL"*) : > "%s" ;;\n' "$SETTLE_KILLED"
+        printf '  *"show -p MainPID"*) [ -f "%s" ] && echo 4242 || echo 1111 ;;\n' "$SETTLE_KILLED"
+        printf '  *is-active*) echo active ;;\n'
+        printf 'esac\nexit 0\n'
+    } > "$SETTLEBIN/systemctl"
+    {
+        printf '#!/bin/sh\n'
+        [ -n "$uid" ] && printf 'echo %s\n' "$uid"
+        printf 'exit 0\n'
+    } > "$SETTLEBIN/ps"
+    printf '#!/bin/sh\necho "furios:x:32011:32011::/home/furios:/bin/bash"\n' > "$SETTLEBIN/getent"
+    printf '#!/bin/sh\nexit 0\n' > "$SETTLEBIN/sleep"
+    printf '#!/bin/sh\necho 0\n' > "$SETTLEBIN/id"
+    {
+        printf '#!/bin/sh\n'
+        printf 'case "$*" in\n'
+        printf '  *"-f DEVICE,TYPE"*) echo "ril_0:gsm" ;;\n'
+        printf '  *"-f DEVICE,STATE"*) echo "ril_0:connected" ;;\n'
+        printf 'esac\nexit 0\n'
+    } > "$SETTLEBIN/nmcli"
+    {
+        printf '#!/bin/sh\n'
+        printf 'case "$*" in\n'
+        printf '  *GetCalls*) %s ;;\n' \
+            "$([ "$call" = yes ] && echo 'echo "   object path \"/ril_0/voicecall01\""' || echo ':')"
+        printf '  *GetModems*) echo "   object path \\"/ril_0\\"" ;;\n'
+        printf 'esac\nexit 0\n'
+    } > "$SETTLEBIN/dbus-send"
+    chmod +x "$SETTLEBIN"/*
+}
+
+settle_run() {
+    # With no MODEMCTL_* in the environment, because these runs claim to be
+    # root and root refuses to honour them - on purpose, as root they would be
+    # an arbitrary-file patch. settle touches no file of ours anyway.
+    PATH="$SETTLEBIN:$PATH" env -u MODEMCTL_DBUS_CONF_D -u MODEMCTL_CBS_DB \
+        bash "$ROOT/modemctl" settle 2>&1
+}
+shell_was_killed() {
+    grep -q -- 'kill --signal=KILL mobi.phosh.Shell.service' "$SETTLE_REC" 2>/dev/null \
+        && echo yes || echo no
+}
+
+# The line that started all this, 14.9. The identifier is what the journal
+# really prints, PID and all.
+LOST_SHELL='Sep 14 06:47:04 FuriS gsd-wwan[4154]: Error calling GetManagedObjects() when name owner (null) for name org.freedesktop.ModemManager1 came back: GDBus.Error:org.freedesktop.DBus.Error.AccessDenied: Rejected send message, 1 matched rules; type="method_call", sender=":1.72" (uid=32011 pid=4154 comm="/usr/libexec/gsd-wwan" label="kernel") interface="org.freedesktop.DBus.ObjectManager" member="GetManagedObjects" error name="(unset)" requested_reply="0" destination=":1.3188" (uid=0 pid=294265 comm="/usr/bin/python3 /usr/sbin/ofono2mm" label="kernel")'
+LOST_WP='Sep 14 06:47:04 FuriS wireplumber[66701]: GLib-GIO: Error calling GetManagedObjects() when name owner (null) for name org.freedesktop.ModemManager1 came back: GDBus.Error:org.freedesktop.DBus.Error.AccessDenied: Rejected send message, 1 matched rules; type="method_call" destination=":1.3188" (uid=0 pid=294265 comm="/usr/bin/python3 /usr/sbin/ofono2mm" label="kernel")'
+# Defect 13 in the journal: also AccessDenied, also ModemManager, and nothing
+# to do with a restart. Counting it would send the next person after the wrong
+# failure.
+CBS_DENIED='Sep 14 06:47:04 FuriS cellbroadcastd[1234]: GDBus.Error:org.freedesktop.DBus.Error.AccessDenied: Rejected send message, 1 matched rules; interface="org.freedesktop.ModemManager1.Modem.CellBroadcast" member="SetChannels"'
+# The same restart, seen by cellbroadcastd a moment later: the old unique name
+# is gone now. It is not a client that gave up - oFono keeps the channels, and
+# measured on 14.9. they were all still there afterwards.
+CBS_GONE="Sep 14 06:47:04 FuriS cellbroadcastd[1234]: Failed to set channel list in '/org/freedesktop/ModemManager1/Modem/0': GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: The name :1.20 was not provided by any .service files"
+# And the shell losing it with a different error than the first time. Measured
+# 14.9.: the same restart hands out AccessDenied, ServiceUnknown or nothing at
+# all depending on where in the gap the client's call lands, so the error text
+# is exactly the wrong thing to key on.
+LOST_SHELL_SU='Sep 14 06:47:04 FuriS gsd-wwan[4154]: Error calling GetManagedObjects() when name owner (null) for name org.freedesktop.ModemManager1 came back: GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: The name :1.20 was not provided by any .service files'
+
+settle_stubs "$LOST_SHELL" 32011 no
+out=$(settle_run)
+# The one thing this must never do on its own. mobi.phosh.Shell.service has
+# OnFailure=gnome-session-shutdown.target with OnFailureJobMode=
+# replace-irreversibly, so killing it is a coin toss between "back in two
+# seconds" and "no shell until somebody starts the target by hand" - measured
+# both ways on 14.9., ten minutes apart, on this phone.
+check "the shell is never killed to repair an icon" no "$(shell_was_killed)"
+check "but the loss is reported in terms of what the user can see" yes \
+      "$(printf '%s\n' "$out" | grep -qi 'signal icon' && echo yes || echo no)"
+check "and the way back is printed, with the unit name" yes \
+      "$(printf '%s\n' "$out" | grep -q 'kill --signal=KILL mobi.phosh.Shell.service' && echo yes || echo no)"
+check "and the rest of the stack is not made to sound broken" yes \
+      "$(printf '%s\n' "$out" | grep -qi 'Everything else is fine' && echo yes || echo no)"
+
+settle_stubs "$LOST_WP" 32011 no
+out=$(settle_run)
+check "a client that is not the shell is not confused with it" no \
+      "$(printf '%s\n' "$out" | grep -qi 'signal icon' && echo yes || echo no)"
+check "but it is named, because nothing else will notice" yes \
+      "$(printf '%s\n' "$out" | grep -q 'wireplumber' && echo yes || echo no)"
+check "and wireplumber is left alone on purpose, out loud" yes \
+      "$(printf '%s\n' "$out" | grep -qi 'Bluetooth card' && echo yes || echo no)"
+
+settle_stubs "" 32011 no
+out=$(settle_run)
+check "nothing in the journal means nothing to put back" yes \
+      "$(printf '%s\n' "$out" | grep -q 'no client lost ModemManager' && echo yes || echo no)"
+
+settle_stubs "$CBS_DENIED" 32011 no
+out=$(settle_run)
+check "the cell broadcast denial is not mistaken for this one" yes \
+      "$(printf '%s\n' "$out" | grep -q 'no client lost ModemManager' && echo yes || echo no)"
+
+settle_stubs "$CBS_GONE" 32011 no
+out=$(settle_run)
+check "nor is cellbroadcastd losing the old name" yes \
+      "$(printf '%s\n' "$out" | grep -q 'no client lost ModemManager' && echo yes || echo no)"
+
+settle_stubs "$LOST_SHELL_SU" 32011 no
+out=$(settle_run)
+check "the shell is found whatever error it was given" yes \
+      "$(printf '%s\n' "$out" | grep -qi 'signal icon' && echo yes || echo no)"
+
+# Root, because it restarts NetworkManager. Saying so is better than half of
+# it failing with systemd's wording.
+settle_stubs "$LOST_SHELL" 32011 no
+printf '#!/bin/sh\necho 32011\n' > "$SETTLEBIN/id"; chmod +x "$SETTLEBIN/id"
+out=$(settle_run)
+check "settle without root refuses instead of half-working" yes \
+      "$(printf '%s\n' "$out" | grep -q 'needs root' && echo yes || echo no)"
+
 printf '\n\033[1m== nothing assumed that can be asked\033[0m\n'
 
 # /ril_0 is what oFono calls the modem on THIS phone, and it was written into

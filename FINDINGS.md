@@ -1497,6 +1497,192 @@ added later fails the test instead of failing a boot.
 
 ---
 
+## 16. The restart that takes the signal icon with it
+
+`systemctl restart ModemManager` and the mobile signal icon is gone. Not for a
+moment - for good. Measured on 14.9.: hours later the status bar still showed
+nothing where the technology and the bars belong, on a stack where every
+measurable thing was right:
+
+```
+modemctl status        everything in place
+mmcli -m any           registered, attached, lte, signal 3% (recent)
+ObjectManager          1 object
+rfkill                 no block, WWAN on
+phosh wwan backend     modemmanager
+```
+
+Nothing in `mmcli`, `modemctl` or NetworkManager notices, because nothing is
+wrong with any of them. What is wrong is in the clients, and exactly one line
+in the journal says so:
+
+```
+gsd-wwan[4154]: Error calling GetManagedObjects() when name owner (null)
+  for name org.freedesktop.ModemManager1 came back:
+  GDBus.Error:org.freedesktop.DBus.Error.AccessDenied: Rejected send message,
+  1 matched rules; ... member="GetManagedObjects" ...
+  destination=":1.3188" (uid=0 comm="/usr/bin/python3 /usr/sbin/ofono2mm")
+```
+
+### Why a permission error, for a call that is allowed
+
+Restarting the service means the old process gives up the well-known name and
+the new one takes it, and between those two moments nobody owns it. A GDBus
+object manager client watching the name sees the owner disappear and re-sends
+`GetManagedObjects` to the unique name it last knew - and in that gap no
+
+```xml
+<allow send_destination="org.freedesktop.ModemManager1"/>
+```
+
+can match, because a rule keyed on a well-known name matches nothing while
+nobody owns it. What is left is the catch-all `<deny>` at the top of the
+policy: *1 matched rules*. A moment later the same call gets
+`ServiceUnknown: The name :1.20 was not provided by any .service files`
+instead, once the old unique name is gone for good.
+
+So it is not a permission problem, and there is nothing here to grant:
+upstream lets anyone call `ObjectManager`, and the only policy that would
+cover this gap is one that allows the call to **any** destination on the bus.
+It is a handover gap, and the clients' own answer to it is to give up.
+
+Hit at the same moment, on the same restart: `phosh` (the icon), `chatty`
+(SMS), `wireplumber`. None of them retries when the name comes back.
+
+### Where the gap comes from: ofono2mm drops its own name, on purpose
+
+The handover is not systemd's. Measured on 14.9. with `dbus-monitor` on
+`NameOwnerChanged` and on the bus driver's own method calls, across a restart:
+
+```
+t+0.000  :1.211 -> ""        old process stops
+t+0.418  ""     -> :1.356    new process takes the name
+t+0.564  :1.356 -> ""        ReleaseName   <- from :1.356 itself
+t+0.569  ""     -> :1.356    RequestName
+t+0.578  :1.356 -> ""        ReleaseName
+t+0.587  ""     -> :1.356    RequestName
+```
+
+The same connection gives the name up and takes it back twice, 150 ms after
+it first got it. With `MODEM_DEBUG=true` ofono2mm says so itself:
+
+```
+MMModemInterface(/ril_0).release_request_modemmanager: Releasing and requesting the bus name
+```
+
+`mm_modem.py`, called from `init_ofono_interfaces`, from `sim_unlocked`, and
+from `set_props` when the modem is brought online:
+
+```python
+async def release_request_modemmanager(self):
+    # Release and request the name so other apps realize we're here.
+    # TODO: this feels like it shouldn't be necessary. We are signaling InterfacesAdded, so... why?
+    await self.bus.release_name('org.freedesktop.ModemManager1')
+    await self.bus.request_name('org.freedesktop.ModemManager1')
+```
+
+The comment is upstream's own. The poke is meant to make clients notice the
+modem - and it is the thing that makes them blind, because every client that
+connected during the second between "ModemManager is back" and "the modem is
+ready" is holding a proxy that fires `GetManagedObjects` straight into a
+release. It also explains the timing: the clients are not hit while systemd
+swaps the processes, they are hit a moment *after*, all of them at once.
+
+### It is a race, not a certainty
+
+The second measurement on 14.9. is the one that decided the shape of the fix.
+Ten minutes after the first, the same command on the same phone: not one
+`GetManagedObjects` error in the journal, and **the icon stayed**. NetworkManager
+still logged its own half of the damage (`modem with path ... already exists,
+ignoring`), wireplumber still tripped over an assertion in its own bluez5
+ModemManager code, and the shell was fine.
+
+Whether a client is hit depends on where in the handover gap its call happens
+to land. That rules out repairing unconditionally: killing the shell after
+every restart would blink the screen of a phone whose icon was never gone.
+
+Also in the journal at that moment, and deliberately **not** counted:
+
+```
+cellbroadcastd: Failed to set channel list in '/org/.../Modem/0':
+  ServiceUnknown: The name :1.20 was not provided by any .service files
+```
+
+Same race, same restart - but the channel list lives in oFono, which was not
+restarted. Measured immediately afterwards: all 26 channels still set. Naming
+it as a casualty would send the next person after a failure that did not
+happen. Neither is the `AccessDenied` of defect 13 counted, which is a
+different failure with a different fix and matches on the same two words.
+
+### Putting it back, and why `modemctl` does not do it for you
+
+Restarting `gsd-wwan` alone does not do it - tried; phosh holds a proxy of its
+own and logs nothing at all about it. Restarting the session target does
+nothing either: the unit hangs off `gnome-session-initialized.target` and comes
+straight back up in the state it was in. What does work is killing the unit:
+
+```
+systemctl --user kill --signal=KILL mobi.phosh.Shell.service
+```
+
+and that is where the first version of this fix went wrong. It killed the
+shell automatically after every restart that cost the icon, and on 14.9. it
+did exactly that, twice. The first time the shell was back in two seconds.
+The second time the phone had no shell at all until it was started by hand,
+because of what is in `mobi.phosh.Shell.service`:
+
+```
+OnFailure=gnome-session-shutdown.target
+OnFailureJobMode=replace-irreversibly
+RefuseManualStart=on
+RefuseManualStop=on
+```
+
+A killed shell is a *failed* shell, so it drags the session shutdown in with
+it, irreversibly - and `Restart=on-failure` then loses the race against that
+job:
+
+```
+mobi.phosh.Shell.service: Failed to schedule restart job: Transaction for
+  mobi.phosh.Shell.service/start is destructive (mobi.phosh.Shell.target has
+  'stop' job queued, but 'restart' is included in transaction)
+```
+
+Nor can it be put back the obvious way: `systemctl --user start
+mobi.phosh.Shell.service` is refused, the unit may only be pulled in by its
+target. A repair that sometimes logs the user out is worse than the missing
+icon it repairs.
+
+**Fix:** `settle_shell` runs after every ModemManager restart `modemctl` itself
+does, next to `settle_networkmanager`, which repairs the other half of the same
+restart. For a restart by hand there is `modemctl settle`, which does both. It
+reads the journal from the moment of the restart, on the failure signature
+rather than the error text - GLib prints that line only when the call failed,
+and the same restart hands out `AccessDenied`, `ServiceUnknown` or nothing at
+all. Then it *says* what was lost, whose icon it is, that nothing else is
+broken, and what the command is. It restarts nothing in the session: not the
+shell, for the reason above, and not wireplumber either, because that takes
+the Bluetooth card with it.
+
+Measured on 14.9. against the real journal: two clients found from a real
+restart the evening before, both named, nothing touched.
+
+**Still open:** whether the shell can be cycled safely at all - a `SIGTERM`
+that lets phosh exit cleanly would not trigger `OnFailure`, and the target
+could then be started normally. Untested, because the way to test it is to
+take the phone's screen away again.
+
+**The better fix is upstream:** stop releasing the name. Nothing here needs a
+client to re-enumerate; `InterfacesAdded` is already being signalled, which is
+what upstream's own TODO says.
+
+**What this does not catch:** a client that gives up without logging. Then
+`modemctl settle` says "no client lost ModemManager" and means it - and the
+icon is still gone anyway. The kill above is still the way back, with the
+same caveat attached to it.
+
+---
+
 ## What it costs, measured
 
 Numbers from the phone, not estimates. Three things here run all the time -

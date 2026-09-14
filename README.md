@@ -56,6 +56,8 @@ drops. Reversible with `./uninstall.sh` or
     modemctl revert     back to the shipped state
     modemctl check      status plus runtime checks (polling, loops)
     modemctl signal     what the radio really receives, cross-checked
+    modemctl settle     after restarting ModemManager by hand: put back what
+                        that restart knocked over (needs root)
 
 `modemctl signal` is the one worth knowing. Neither the icon nor
 `mmcli --signal-get` could be trusted before the fix, so it reads oFono
@@ -81,7 +83,7 @@ identify the tower you are on, which places you within a kilometre or so. The
 signal levels do not. Nothing is stored or sent - it prints and exits - but a
 bug report is a public place.
 
-## The fifteen defects
+## The sixteen defects
 
 | # | What | Where | Symptom |
 |---|---|---|---|
@@ -100,6 +102,7 @@ bug report is a public place.
 | 13 | ModemManager's bus policy has no rule for the CellBroadcast interface it gained in 1.24 | `/etc/dbus-1/system.d` | the system bus rejects `SetChannels`, so **emergency alert channels never reach the modem** |
 | 14 | The alert channel database lists EU-Alert level 2 for `de` and `nl` without channel 4372, while listing its local-language counterpart | `serviceproviders.xml` | **"extreme, immediate, likely" warnings sent on 4372 go unheard** |
 | 15 | The one of three places that builds a bearer for `Simple.Connect` never subscribes to its oFono context | `mm_modem.py` | bearer stays `connected: no` with no interface, NM fails every activation with `missing data port` - **no mobile data for the whole boot** |
+| 16 | While ModemManager hands its bus name over, a client's `GetManagedObjects` matches no `<allow>` rule and is denied | the system bus, and clients that do not retry | the **signal icon disappears for good** after a restart of ModemManager - phosh, chatty and wireplumber all give up at once |
 
 Numbers behind each of these, and why they are what they are, in
 [FINDINGS.md](FINDINGS.md).
@@ -132,6 +135,22 @@ expected a modem. Nothing in `mmcli`, `ip`, or `ping` can see it. Only
 
     phosh: mm_object_get_modem: runtime check failed: (MM_IS_MODEM (modem))
     phosh: modem_init_modem: assertion 'self->modem' failed
+
+Number 16 is the third way to lose the same icon. While the ModemManager bus
+name passes from one process to the next, nobody owns it, and a policy rule
+keyed on that name cannot match - so a client asking in that gap is denied,
+and none of them ever asks again. The gap is not systemd's: ofono2mm gives the
+name up and takes it back twice a moment after it starts, on purpose, to make
+clients notice the modem. It is what makes them blind instead.
+
+`modemctl` will not restart the shell for you, and the reason is worth
+knowing: `mobi.phosh.Shell.service` answers a kill with
+`OnFailure=gnome-session-shutdown.target`, `replace-irreversibly`. Measured
+twice on 14.9.: once the shell was back in two seconds, once the phone had no
+shell at all until it was started by hand. So `settle_shell` reports - who lost
+ModemManager, that the icon is the only casualty, and what the command is -
+after every restart `modemctl` does itself, and on demand with `modemctl
+settle` after one you did by hand.
 
 ## When a patch stops fitting
 
