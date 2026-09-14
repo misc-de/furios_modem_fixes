@@ -11,7 +11,7 @@
  
  from ofono2mm import MMModemInterface, Ofono, DBus
  from ofono2mm.logging import ofono2mm_print
-@@ -18,6 +18,278 @@
+@@ -18,6 +18,273 @@
  def get_version():
      return "1.24.0"
  
@@ -21,151 +21,168 @@
 +MM_MODEM_IFACE = 'org.freedesktop.ModemManager1.Modem'
 +
 +class ModemManagerBus(MessageBus):
-+    """A bus whose ObjectManager announces modems and nothing else.
++    """The ObjectManager at /org/freedesktop/ModemManager1: finished modems, and
++    nothing else, and not one word before the bus name is ours.
 +
-+    ModemManager puts its SIM and bearer objects on the bus under
-+    /org/freedesktop/ModemManager1/SIM/n and /Bearer/n, but it does not
-+    hand them out through the ObjectManager at /org/freedesktop/ModemManager1
-+    -- that one carries modems only. dbus_fast has no such distinction: it
-+    answers GetManagedObjects from every exported sub-path, so ours announces
-+    the SIM and every bearer as well.
++    Everything a client learns about a modem arrives through one of two doors:
++    the GetManagedObjects it calls when it starts, and the InterfacesAdded it
++    hears afterwards. Both doors have to agree, both have to be shut until the
++    modem is built, and both have to stay shut for every object that is not a
++    modem. Six defects in this tree came from one of them standing open:
 +
-+    libmm-glib wraps each entry in an MMObject, and a client that takes one
-+    and asks for its Modem interface gets NULL. phosh takes the first entry
-+    of the list ("Modem interface is always present"), remembers it, and
-+    never looks at another object -- so when a bearer happens to come first,
-+    the phone shows no signal at all until something restarts. Which entry
-+    comes first is hash order, which is why it looked intermittent.
++      12  the SIM and every bearer were handed out as managed objects. phosh
++          takes the first entry of the list on the documented assumption that
++          "Modem interface is always present", remembers it, and never looks at
++          another object - so a bearer in first place meant no signal icon at
++          all. First place is hash order, which is why it came and went.
++      16  the modem was announced by throwing the bus name away and taking it
++          back, because the automatic announcement goes out from the object's
++          own path and reaches nobody. In the moment nobody owns the name a
++          client's call is refused by the catch-all deny and GLib never asks
++          again.
++      21  the modem was announced before the name was ours. NetworkManager
++          built its modem from it and every method it then called went to a
++          name belonging to nobody; it keeps that modem for the rest of the
++          boot.
++      22  the manager object itself was announced as a managed object.
++          NetworkManager wrapped it, found no Modem interface in it and logged
++          `doesn't have the Modem interface, ignoring` - and on that same boot
++          built /ril_0 from a modem whose State and Sim were not filled in yet.
 +
-+    So keep the non-modem paths off the ObjectManager. They stay exported and
-+    reachable at their own paths; they are simply not announced, exactly as
-+    ModemManager does it.
++    The first three were each fixed by narrowing a predicate over path strings.
++    That is what kept failing: `_is_announced` answered True for
++    /org/freedesktop/ModemManager1, because the manager path is not below
++    itself, and the boot of 14.9. 14:18 came up with no mobile data.
++
++    So this class does not decide. It keeps a list.
++
++    `_published` is the set of modem paths a client may see. A path is in it
++    because `modem_ready` put it there and the bus name was ours at that
++    moment - never because a rule about its spelling said it belonged there.
++    GetManagedObjects answers from that set and the announcement is sent for
++    its members only, so the two doors cannot disagree and neither can be
++    opened by an object nobody published: not the manager, not a SIM, not a
++    bearer, not a half-built modem.
 +    """
 +
-+    __slots__ = ('_ready_modems', 'something_to_show', '_name_is_ours',
-+                 '_held_back')
++    __slots__ = ('_published', '_waiting', '_name_is_ours', 'something_to_show')
 +
 +    def __init__(self, *args, **kwargs):
 +        super().__init__(*args, **kwargs)
-+        # Modems that have finished coming up. Until a modem is in here it is
-+        # not handed out and not announced - see _is_complete.
-+        self._ready_modems = set()
-+        # Set once there is either a modem worth showing or nothing to wait
-+        # for. main() holds the bus name back until then.
-+        self.something_to_show = asyncio.Event()
-+        # Whether org.freedesktop.ModemManager1 is ours yet. Nothing is
-+        # announced before it is - see name_acquired.
++        # The managed objects, named one by one. See the class docstring: this
++        # is the whole mechanism.
++        self._published = set()
++        # Modems that reported themselves built while the bus name was still
++        # unowned, in the order they reported it.
++        self._waiting = []
 +        self._name_is_ours = False
-+        # Paths that wanted to be announced while the name was still unowned,
-+        # in the order they asked.
-+        self._held_back = []
++        # Set once there is either a modem worth showing or nothing left to
++        # wait for. main() holds the bus name back until then.
++        self.something_to_show = asyncio.Event()
 +
-+    def name_acquired(self):
-+        """The bus name is ours; say everything that was waiting on it.
++    def modem_ready(self, path):
++        """The modem at this path is built; a client may be told about it.
 +
-+        An announcement made before the name is owned is worse than no
-+        announcement at all. NetworkManager hears the InterfacesAdded - it
-+        watches the bus, not the name - and builds its modem from it right
-+        away, but everything it then calls goes to org.freedesktop.
-+        ModemManager1, which at that instant belongs to nobody. The bus
-+        answers UnknownMethod for every one of them, and the phone ends up
-+        with a Modem whose Modem interface has no methods:
++        This is the only way anything becomes visible, and it is called from
++        one place: the end of the modem's own build. It used to be called from
++        the middle of `set_props` as well, right after the modem is switched
++        online and long before `State` and `Sim` are filled in. On the boot of
++        14.9. 14:18 that is the call that won, and NetworkManager read the
++        modem it produced:
 +
++            device (/ril_0): modem state 'failed'
 +            modem-broadband[/ril_0]: failed to retrieve SIM object: No SIM
 +            object available
-+            modem-broadband[/ril_0]: failed to enable modem: Method "Enable"
-+            with signature "b" on interface "org.freedesktop.ModemManager1
-+            .Modem" doesn't exist
-+            modem-broadband[/ril_0]: failed to connect modem: Method
-+            "Connect" with signature "a{sv}" on interface "...Modem.Simple"
-+            doesn't exist
 +
-+        and it stays that way, because the modem NetworkManager built is one
-+        it keeps: eighty milliseconds later it learns ModemManager exists and
-+        answers itself "modem with path .../Modem/0 already exists, ignoring".
-+        No mobile data for the rest of the boot, with oFono registered on LTE
-+        the whole time and mmcli showing a healthy modem.
++        `State` was still -1 and `Sim` still '/', which is what those two lines
++        say. Twenty milliseconds later both were right, and it made no
++        difference: NetworkManager keeps the modem it built
++        (`already exists, ignoring`) and the phone had no mobile data for the
++        rest of the boot.
++        """
++        self.something_to_show.set()
 +
-+        Measured 14.9. 13:41:04: "Announcing the modem" at .8245, the name
-+        became ours at .8261 - one and a half milliseconds later, and NM was
-+        inside them. The order was not bad luck: announce_modem is what sets
-+        something_to_show, and main() waits for that event before it so much
-+        as asks for the name. Every announcement went out into an empty room
-+        by construction. This is defect 16 over again - a client that asks
-+        while nobody owns the name is refused once and never asks again - and
-+        the fix is the same shape: do not let anyone hear about the modem
-+        until the name it has to be reached by is ours.
++        if not self._name_is_ours:
++            # Nobody could act on it yet - see name_acquired.
++            if path not in self._waiting:
++                self._waiting.append(path)
++            return
++
++        self._publish(path)
++
++    def name_acquired(self):
++        """org.freedesktop.ModemManager1 is ours; release what was waiting.
++
++        An announcement made before the name is owned is worse than no
++        announcement at all. NetworkManager watches the bus, not the name: it
++        hears the InterfacesAdded and builds its modem from it at once, and
++        every method it then calls goes to a name that belongs to nobody. The
++        bus answers UnknownMethod for each of them and the phone is left with
++        a modem whose Modem interface has no methods, which it then keeps.
 +        """
 +        self._name_is_ours = True
-+        held_back, self._held_back = self._held_back, []
-+        for path in held_back:
-+            interfaces = list(self._path_exports.get(path, {}).values())
-+            if interfaces:
-+                self._announce(path, interfaces)
++        waiting, self._waiting = self._waiting, []
++        for path in waiting:
++            self._publish(path)
 +
-+    def announce_modem(self, path):
-+        """Say that the modem at this path is ready to be looked at.
++    def _publish(self, path):
++        """Put the modem in the managed set and say so, once."""
++        if not path.startswith(MM_MODEM_PREFIX):
++            # Only modems are managed objects, and this is where that is
++            # guaranteed rather than assumed of the caller. ModemManager
++            # exports SIMs and bearers on the bus at their own paths but keeps
++            # them out of the ObjectManager; a client that finds one there
++            # wraps it, asks for its Modem interface, gets NULL and drops it.
++            # That is defect 12 for a bearer and defect 22 for the manager
++            # object itself.
++            return
 +
-+        This is what upstream's release-and-request of the bus name was for:
-+        the modem is built, the interfaces are exported, now tell everyone.
-+        Losing the bus name made every client enumerate again, which is one way
-+        to be noticed and a very expensive one - see FINDINGS.md, defect 16.
-+        An InterfacesAdded says the same thing to the same clients, and costs
-+        nobody their signal icon.
-+        """
-+        self._ready_modems.add(path)
-+        self.something_to_show.set()
++        if path in self._published:
++            # Announced once, with everything it has, the way ModemManager
++            # itself does it. Clients that want to know about later changes
++            # have PropertiesChanged for that.
++            return
++
 +        interfaces = list(self._path_exports.get(path, {}).values())
-+        if interfaces:
-+            self._announce(path, interfaces)
++        if not interfaces:
++            # Nothing exported at that path: there is no object to announce,
++            # and putting the path in the set would make GetManagedObjects
++            # promise one.
++            return
 +
-+    def _announce_modem_eventually(self, path, delay=10):
-+        # A modem that never reports itself ready would otherwise stay
-+        # invisible for ever - a worse failure than the one this fixes. Every
-+        # path into MMModemInterface ends in announce_modem, so this net should
-+        # never catch anything; it is here because "should" is not a guarantee
-+        # and a phone without a modem is not an acceptable way to find out.
++        self._published.add(path)
++        self._announce(path, interfaces)
++
++    def _arm_fallback(self, path, delay=10):
++        # A modem that never reports itself built would otherwise stay
++        # invisible for ever - a worse failure than the one this class exists
++        # for. Every path through MMModemInterface ends in modem_ready, so
++        # this net should never catch anything; it is here because "should" is
++        # not a guarantee and a phone with no modem is not an acceptable way
++        # to find out.
 +        try:
 +            loop = asyncio.get_running_loop()
 +        except RuntimeError:
 +            return
-+        loop.call_later(delay, self.announce_modem, path)
-+
-+    @staticmethod
-+    def _is_announced(path):
-+        if not path.startswith(MM_ROOT + '/'):
-+            return True
-+        return path.startswith(MM_MODEM_PREFIX)
-+
-+    def _is_complete(self, path):
-+        """Whether a modem path is worth showing to anybody yet.
-+
-+        ofono2mm builds a modem in pieces: the Modem interface is exported
-+        before the bus name is even requested, the other fourteen follow one at
-+        a time, and the SIM, the bands and the capabilities are filled in after
-+        that. A client that looks in the middle of it gets something that
-+        cannot be used and does not get a second chance:
-+
-+            mm_object_peek_modem: runtime check failed: (MM_IS_MODEM (modem))
-+            modem with path .../Modem/0 doesn't have the Modem interface, ignoring
-+
-+            modem-broadband[/ril_0]: failed to retrieve SIM object: No SIM
-+            object available
-+
-+        Both measured on 14.9., twenty milliseconds after the bus name
-+        appeared. ModemManager itself never shows a half-built modem: it
-+        exports the object when it is finished. So this one waits for the
-+        modem to say it is ready, which is the moment upstream chose too - it
-+        just said so by throwing its bus name away.
-+        """
-+        if not path.startswith(MM_MODEM_PREFIX):
-+            return True
-+        return path in self._ready_modems
++        loop.call_later(delay, self.modem_ready, path)
 +
 +    def _default_get_managed_objects_handler(self, msg, send_reply):
 +        if msg.path != MM_ROOT:
 +            return super()._default_get_managed_objects_handler(msg, send_reply)
 +
++        # dbus_fast synthesises the reply from its export table, which is every
++        # path below this one - the SIM, every bearer, every modem whether it
++        # is finished or not:
++        #
++        #     nodes = [node for node in self._path_exports
++        #              if msg.path == "/" or node.startswith(msg.path + "/")]
++        #
++        # Real ModemManager builds its ObjectManager from modem skeletons
++        # alone and a client reaches a bearer through the modem's `Bearers`
++        # property, never by enumeration. So the table is narrowed to the
++        # published set for the length of the call: the reply is upstream's,
++        # the guest list is ours.
++        #
 +        # The handler reads _path_exports synchronously to pick its nodes and
 +        # their interfaces; the property callbacks that finish the reply later
 +        # never touch it. Narrowing it for the length of the call is therefore
@@ -174,77 +191,70 @@
 +        self._path_exports = {
 +            path: interfaces
 +            for path, interfaces in every.items()
-+            if self._is_announced(path) and self._is_complete(path)
++            if path in self._published
 +        }
 +        try:
 +            return super()._default_get_managed_objects_handler(msg, send_reply)
 +        finally:
 +            self._path_exports = every
 +
-+    # Both announcements go out from the object manager's own path, and not
-+    # from the path of the object that changed, which is where dbus_fast sends
-+    # them. The specification is explicit: InterfacesAdded and
-+    # InterfacesRemoved belong on the manager's path, with the object path as
-+    # the first argument - and that is where every client is listening,
-+    # because that is where it subscribed. Sent from the object's own path
-+    # they reach nobody at all: NetworkManager, phosh and chatty all watch
-+    # /org/freedesktop/ModemManager1 and never hear that a modem appeared.
-+    #
-+    # This is what release_request_modemmanager in mm_modem.py was working
-+    # around - with a TODO beside it asking why it should be necessary. With
-+    # no announcement that arrives, the only way a client learns about the
-+    # modem is to enumerate all over again, and taking the bus name away
-+    # forces it to. That trick also costs the phone its signal icon, because
-+    # in the moment nobody owns the name a client's GetManagedObjects is
-+    # refused and GLib never asks again. See FINDINGS.md, defect 16.
-+    # And a modem is announced once, with everything it has, the way
-+    # ModemManager itself does it. libmm-glib builds its MMObject from the
-+    # first announcement that names the object, and NetworkManager throws that
-+    # object away for good when the Modem interface is not in it:
-+    #
-+    #   mm_object_peek_modem: runtime check failed: (MM_IS_MODEM (modem))
-+    #   modem with path .../Modem/0 doesn't have the Modem interface, ignoring
-+    #
-+    # dbus_fast announces one interface per export call and ofono2mm exports
-+    # fifteen of them in a row, so which one happened to go first decided
-+    # whether the phone had mobile data at all. Measured 14.9.: with the
-+    # announcements corrected but still one at a time, NetworkManager dropped
-+    # the modem on every restart.
 +    def _emit_interface_added(self, path, interface):
-+        if self._disconnected or not self._is_announced(path):
++        """Export nothing, announce nothing - publishing is `modem_ready`.
++
++        dbus_fast announces every single export, and both halves of that are
++        wrong here. It sends the signal from the path of the object that
++        changed; the specification puts InterfacesAdded on the manager's path
++        with the object path as its first argument, and that is where every
++        client subscribes - NetworkManager, phosh and chatty all watch
++        /org/freedesktop/ModemManager1 and hear nothing otherwise. And it
++        sends one per interface, while ofono2mm exports fifteen of them in a
++        row: libmm-glib builds its MMObject from the first announcement that
++        names the object, and NetworkManager throws that object away for good
++        when the Modem interface is not in it.
++
++        Suppressing it here is what leaves `modem_ready` as the only door.
++        """
++        if self._disconnected:
 +            return
 +
-+        exported = self._path_exports.get(path, {})
-+        if path.startswith(MM_MODEM_PREFIX):
-+            if not self._is_complete(path):
-+                # Too early to say anything: a half-built modem is one a client
-+                # is entitled to believe in. Everything exported so far goes
-+                # out together when the modem reports itself ready.
-+                if interface.name == MM_MODEM_IFACE:
-+                    self._announce_modem_eventually(path)
-+                return
-+            # Every announcement carries the whole modem, not just the
-+            # interface that was added. The Modem interface is exported before
-+            # the bus name is even requested, so its own announcement is made
-+            # to an empty room; the first one a client actually hears is
-+            # whichever interface happened to be exported next. Measured 14.9.:
-+            # that was Modem3gpp, NetworkManager built an object with no Modem
-+            # interface in it and ignored the modem for the rest of the boot.
-+            # Repeating the interfaces a client already has costs nothing - it
-+            # updates them - while leaving one out costs the phone its
-+            # connection.
-+            self._announce(path, list(exported.values()))
++        if path in self._published:
++            # An object a client already knows about, gaining an interface.
++            # That is what InterfacesAdded is for and there is nothing unsafe
++            # about it any more: the modem is whole, the name is ours, and the
++            # client can act on what it hears. It still goes out from the
++            # manager's path rather than the object's.
++            self._announce(path, [interface])
 +            return
-+        self._announce(path, [interface])
++
++        if path.startswith(MM_MODEM_PREFIX) and interface.name == MM_MODEM_IFACE:
++            self._arm_fallback(path)
++
++    def _emit_interface_removed(self, path, removed_interfaces):
++        # Only a published modem was ever announced, so only a published modem
++        # can be withdrawn - and only once its last interface is gone. A modem
++        # that merely loses one of the fifteen is still a modem; saying it
++        # disappeared would make NetworkManager drop a working connection.
++        if self._disconnected or path not in self._published:
++            return
++        if path in self._path_exports:
++            return
++
++        self._published.discard(path)
++        self.send(Message.new_signal(
++            path=MM_ROOT,
++            interface='org.freedesktop.DBus.ObjectManager',
++            member='InterfacesRemoved',
++            signature='oas',
++            body=[path, removed_interfaces],
++        ))
 +
 +    def _announce(self, path, interfaces):
-+        if not self._name_is_ours:
-+            # Too early for anybody to hear it - see name_acquired. Remember
-+            # the path, not the interfaces: by the time the name is ours there
-+            # will be more of them, and the announcement has to carry the
-+            # whole modem or NetworkManager throws it away.
-+            if path not in self._held_back:
-+                self._held_back.append(path)
++        """Send one InterfacesAdded from the manager's path, with everything.
++
++        Every announcement in this class goes out through here, so this is
++        where a bus on its way out stops talking.
++        """
++        if self._disconnected:
 +            return
 +
 +        body = {iface.name: None for iface in interfaces}
@@ -272,25 +282,10 @@
 +        for iface in interfaces:
 +            ServiceInterface._get_all_property_values(iface, collected)
 +
-+    def _emit_interface_removed(self, path, removed_interfaces):
-+        if path not in self._path_exports:
-+            # The modem is gone; the next one at this path has to earn its
-+            # announcement again.
-+            self._ready_modems.discard(path)
-+        if self._disconnected or not self._is_announced(path):
-+            return
-+        self.send(Message.new_signal(
-+            path=MM_ROOT,
-+            interface='org.freedesktop.DBus.ObjectManager',
-+            member='InterfacesRemoved',
-+            signature='oas',
-+            body=[path, removed_interfaces],
-+        ))
-+
  class MMInterface(ServiceInterface):
      def __init__(self, loop, bus, verbose=False):
          super().__init__('org.freedesktop.ModemManager1')
-@@ -63,6 +335,30 @@
+@@ -63,6 +330,30 @@
          self.ofono_manager_interface.on_modem_removed(self.ofono_modem_removed)
          self.loop.create_task(self.find_ofono_modems())
  
@@ -314,14 +309,14 @@
 +    # ModemManager on the bus.
 +    #
 +    # Releasing the name was upstream's way to make clients enumerate again
-+    # (defect 16) - announce_modem says the same thing without costing anyone
++    # (defect 16) - modem_ready says the same thing without costing anyone
 +    # their signal icon. A modem that disappears is announced as removed; the
 +    # name stays, the way ModemManager itself keeps it when a modem is
 +    # unplugged, and is there for oFono coming back.
      def ofono_removed(self):
          ofono2mm_print("oFono removed", self.verbose)
          self.ofono_manager_interface = None
-@@ -71,8 +367,6 @@
+@@ -71,8 +362,6 @@
              modem.unexport_mm_interface_objects()
          self.modems.clear()
  
@@ -330,7 +325,7 @@
      async def find_ofono_modems(self, retry_counter=5):
          ofono2mm_print("Finding oFono modems", self.verbose)
  
-@@ -94,6 +388,9 @@
+@@ -94,6 +383,9 @@
              # Seriously though, that's fucking stupid.
              if retry_counter <= 0:
                  ofono2mm_print("No ril modems found after retries, giving up", self.verbose)
@@ -340,7 +335,7 @@
                  return
  
              ofono2mm_print("No ril modems found, retrying", self.verbose)
-@@ -232,6 +529,47 @@
+@@ -232,6 +524,47 @@
      parser.print_help()
      print("\nDBus system service to control mobile broadband modems through oFono.")
  
@@ -388,7 +383,7 @@
  async def main():
      # Disable buffering for stdout and stderr so that logs are written immediately
      sys.stdout.reconfigure(line_buffering=True)
-@@ -257,18 +595,40 @@
+@@ -257,18 +590,40 @@
      else:
          verbose = args.verbose
  

@@ -773,7 +773,7 @@ class MMModemInterface(ServiceInterface):
         # it - NetworkManager asked one for its SIM twenty milliseconds in and
         # gave up on it for the rest of the boot.
         ofono2mm_print("Announcing the modem", self.verbose)
-        self.bus.announce_modem(f'/org/freedesktop/ModemManager1/Modem/{self.index}')
+        self.bus.modem_ready(f'/org/freedesktop/ModemManager1/Modem/{self.index}')
 
     async def set_props(self):
         ofono2mm_print("Setting properties", self.verbose)
@@ -789,7 +789,16 @@ class MMModemInterface(ServiceInterface):
                     try:
                         await self.ofono_proxy['org.ofono.Modem'].call_set_property('Online', Variant('b', True))
                         self.was_powered = True
-                        await self.release_request_modemmanager()
+                        # Upstream announced the modem here, the moment it was
+                        # switched online. That is thirty lines before `State`
+                        # and `Sim` are worked out, and on the boot of 14.9.
+                        # 14:18 it was the announcement that won: NetworkManager
+                        # read `state: failed` and `No SIM object available`,
+                        # built /ril_0 from it and kept it - no mobile data for
+                        # the whole boot, with the modem registered on LTE
+                        # throughout. set_props finishes a few lines down and
+                        # init_ofono_interfaces announces there, with the modem
+                        # actually built. See FINDINGS.md, defect 22.
                     except Exception as e:
                         # Might happen in airplane mode although powered should be false. Just coverin' our bases.
                         ofono2mm_print(f"Failed to set Online to True: {e}", self.verbose)

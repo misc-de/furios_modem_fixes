@@ -18,8 +18,10 @@ Four symptoms started this, on different days:
 - and finally the signal icon disappeared altogether, on a boot where every
   measurable thing about the modem was correct.
 
-None was a radio problem. All twelve causes are in software, and only one of
-them is in code anybody here wrote.
+None was a radio problem. All twenty-two causes are in software. Fifteen are
+in code that shipped with the phone, two are a shipped fault our own fix only
+half covered, and five we introduced ourselves while fixing the others. The
+five are marked as such where they appear.
 
 ---
 
@@ -2225,6 +2227,165 @@ with `already exists, ignoring` and never rebuilds it - so a phone that has
 already lost this race needs `systemctl restart NetworkManager`, or a reboot.
 Only a cold boot proves the fix; a warm ModemManager restart proves nothing,
 because the client state is what was broken.
+
+---
+
+## 22. The manager announced as one of its own objects
+
+The reboot on 14.9. at 14:18 was the cold start meant to prove defects 20 and
+21. Both signatures were gone from the journal - no `taking the bus name
+anyway`, no `Connect ... doesn't exist` - and the phone still came up with no
+mobile data. `nmcli` said `/ril_0: unavailable` and NetworkManager held no DNS
+servers for it, so with Wi-Fi off nothing would have resolved. The modem was
+in perfect health the whole time:
+
+```
+state: registered   access tech: lte   packet service state: attached
+operator: Willkommen   SIM/0 present   signal quality 19%
+```
+
+The journal of that boot, to the microsecond:
+
+```
+14:19:34.480104  NM: modem-manager: ModemManager not available
+14:19:34.487845  NM: (../libmm-glib/mm-object.c:135):mm_object_peek_modem:
+                     runtime check failed: (MM_IS_MODEM (modem))
+14:19:34.487845  NM: modem with path /org/freedesktop/ModemManager1
+                     doesn't have the Modem interface, ignoring
+14:19:34.488047  ofono2mm: org.freedesktop.ModemManager1 is ours
+14:19:34.508400  NM: manager: (/ril_0): new Broadband device
+14:19:34.509094  NM: device (/ril_0): modem state 'failed'
+14:19:34.509248  NM: modem-broadband[/ril_0]: failed to retrieve SIM object:
+                     No SIM object available
+14:19:34.536258  NM: modem-manager: ModemManager now available
+14:19:34.536316  NM: modem with path .../Modem/0 already exists, ignoring
+```
+
+Two separate faults in that one second, and both of them ours.
+
+### The manager is not one of its own managed objects
+
+The path in the second line is `/org/freedesktop/ModemManager1` - the object
+manager itself, not a modem. NetworkManager wrapped it in an `MMObject`, asked
+for its Modem interface, got NULL and threw it away.
+
+It did not come from `GetManagedObjects`: dbus_fast picks the nodes *below*
+the path it was asked about,
+
+```python
+nodes = [node for node in self._path_exports
+         if msg.path == "/" or node.startswith(msg.path + "/")]
+```
+
+and a path is not below itself. It came from our own `InterfacesAdded`, and
+the reason is one line of the filter that was supposed to prevent exactly
+this:
+
+```python
+@staticmethod
+def _is_announced(path):
+    if not path.startswith(MM_ROOT + '/'):
+        return True                       # <- MM_ROOT lands here
+    return path.startswith(MM_MODEM_PREFIX)
+```
+
+`/org/freedesktop/ModemManager1` does not start with
+`/org/freedesktop/ModemManager1/`, so the guard clause meant for foreign paths
+- another daemon's objects, which are none of our business - waved the manager
+object through. `main()` exports it before the bus name is requested, so it
+was first in the held-back queue and first out of it: the very first thing any
+client heard about ModemManager was an object with no modem in it.
+
+### And the modem was announced before it was filled in
+
+`modem state 'failed'` is `MM_MODEM_STATE_FAILED`, which is `-1`; `No SIM
+object available` is what libmm-glib returns when the `Sim` property is still
+the default `/`. Both are the state of a modem in the middle of `set_props`,
+which announced itself there:
+
+```python
+await self.ofono_proxy['org.ofono.Modem'].call_set_property('Online', ...)
+self.was_powered = True
+await self.release_request_modemmanager()     # <- thirty lines too early
+...
+self.props['State'] = Variant('i', 8)         # registered
+self.props['Sim'] = self.sim                  # /SIM/0
+```
+
+Twenty milliseconds later both were right and it made no difference.
+NetworkManager keeps the modem it built - `already exists, ignoring` - so the
+phone had no mobile data for the rest of the boot.
+
+### Why the test suite was green
+
+`tests/test-object-manager.py` asked the class what it thought, and its table
+of expected answers began:
+
+```python
+for path, want in [
+    (MM_ROOT, True),        # <- the defect, written down as correct
+    (MODEM,   True),
+    (SIM,     False),
+```
+
+A test that encodes the same assumption as the code cannot find a wrong
+assumption. All 46 checks passed on the boot that had no mobile data.
+
+### The fix: stop deciding, keep a list
+
+Defects 12, 16, 21 and 22 are one defect seen four times - *when and to whom
+does a modem become visible* - and each of the first three was fixed by
+narrowing a predicate over path strings. That is the part that kept failing,
+so it is gone. `ModemManagerBus` now holds `_published`, the set of modem
+paths a client may see. A path is in it because `modem_ready` put it there
+with the bus name already ours, never because a rule about its spelling said
+it belonged there. `GetManagedObjects` answers from that set and
+`InterfacesAdded` is sent for its members only, so the two doors cannot
+disagree, and neither can be opened by the manager object, a SIM, a bearer or
+a half-built modem. `_is_announced` and `_is_complete` no longer exist.
+
+The premature announcement is a deletion: `set_props` no longer calls
+`release_request_modemmanager`, and `init_ofono_interfaces` announces once the
+modem is actually built, which it already did.
+
+The test asks the question NetworkManager and phosh ask instead. It replays a
+real startup - manager exported, fifteen interfaces one at a time, SIM,
+bearer, `modem_ready`, then the name - and checks only what a client can
+observe. It fails on the old code.
+
+### Measured after the change
+
+One announcement on the bus, from the manager's path, naming the modem:
+
+```
+$ dbus-monitor --system "type='signal',interface='org.freedesktop.DBus.ObjectManager'"
+signal path=/org/freedesktop/ModemManager1; member=InterfacesAdded
+   object path "/org/freedesktop/ModemManager1/Modem/0"
+      "Sim"    -> object path "/org/freedesktop/ModemManager1/SIM/0"
+      "State"  -> int32 8
+```
+
+`Sim` filled in and `State` 8 (`REGISTERED`), where the broken boot had `/`
+and `-1`. NetworkManager, on the same restart:
+
+```
+device (/ril_0): modem state 'registered'
+device (/ril_0): state change: unavailable -> disconnected
+device (/ril_0): Activation: starting connection 'Willkommen'
+modem-broadband[/ril_0]: DNS 61.8.132.52 / 202.71.137.208
+device (/ril_0): Activation: successful, device activated.
+```
+
+`nmcli` `/ril_0: connected:Willkommen`, both DNS servers held, no
+`MM_IS_MODEM` warning anywhere in the boot, and over the mobile interface
+`curl https://heise.de` answered HTTP 301 in 0.21 s with `ping -I ccmni1` at
+0% loss.
+
+**Trap:** `ping -I` and `curl --interface` need `SO_BINDTODEVICE`, which is
+root-only. Run as a user, curl binds the source address instead, the packet
+leaves over Wi-Fi with a mobile source address and is dropped - it looks
+exactly like mobile data being broken. Both measurements above were taken
+with `sudo`.
 
 ---
 
