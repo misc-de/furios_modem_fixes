@@ -9,7 +9,7 @@ from dbus_fast.aio import MessageBus
 from dbus_fast.service import (ServiceInterface,
                                method, dbus_property)
 from dbus_fast.constants import PropertyAccess
-from dbus_fast import DBusError, BusType, Variant
+from dbus_fast import DBusError, BusType, Message, Variant
 
 from ofono2mm import MMModemInterface, Ofono, DBus
 from ofono2mm.logging import ofono2mm_print
@@ -20,6 +20,7 @@ def get_version():
 
 MM_ROOT = '/org/freedesktop/ModemManager1'
 MM_MODEM_PREFIX = MM_ROOT + '/Modem/'
+MM_MODEM_IFACE = 'org.freedesktop.ModemManager1.Modem'
 
 class ModemManagerBus(MessageBus):
     """A bus whose ObjectManager announces modems and nothing else.
@@ -43,13 +44,75 @@ class ModemManagerBus(MessageBus):
     ModemManager does it.
     """
 
-    __slots__ = ()
+    __slots__ = ('_ready_modems', 'something_to_show')
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Modems that have finished coming up. Until a modem is in here it is
+        # not handed out and not announced - see _is_complete.
+        self._ready_modems = set()
+        # Set once there is either a modem worth showing or nothing to wait
+        # for. main() holds the bus name back until then.
+        self.something_to_show = asyncio.Event()
+
+    def announce_modem(self, path):
+        """Say that the modem at this path is ready to be looked at.
+
+        This is what upstream's release-and-request of the bus name was for:
+        the modem is built, the interfaces are exported, now tell everyone.
+        Losing the bus name made every client enumerate again, which is one way
+        to be noticed and a very expensive one - see FINDINGS.md, defect 16.
+        An InterfacesAdded says the same thing to the same clients, and costs
+        nobody their signal icon.
+        """
+        self._ready_modems.add(path)
+        self.something_to_show.set()
+        interfaces = list(self._path_exports.get(path, {}).values())
+        if interfaces:
+            self._announce(path, interfaces)
+
+    def _announce_modem_eventually(self, path, delay=10):
+        # A modem that never reports itself ready would otherwise stay
+        # invisible for ever - a worse failure than the one this fixes. Every
+        # path into MMModemInterface ends in announce_modem, so this net should
+        # never catch anything; it is here because "should" is not a guarantee
+        # and a phone without a modem is not an acceptable way to find out.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.call_later(delay, self.announce_modem, path)
 
     @staticmethod
     def _is_announced(path):
         if not path.startswith(MM_ROOT + '/'):
             return True
         return path.startswith(MM_MODEM_PREFIX)
+
+    def _is_complete(self, path):
+        """Whether a modem path is worth showing to anybody yet.
+
+        ofono2mm builds a modem in pieces: the Modem interface is exported
+        before the bus name is even requested, the other fourteen follow one at
+        a time, and the SIM, the bands and the capabilities are filled in after
+        that. A client that looks in the middle of it gets something that
+        cannot be used and does not get a second chance:
+
+            mm_object_peek_modem: runtime check failed: (MM_IS_MODEM (modem))
+            modem with path .../Modem/0 doesn't have the Modem interface, ignoring
+
+            modem-broadband[/ril_0]: failed to retrieve SIM object: No SIM
+            object available
+
+        Both measured on 14.9., twenty milliseconds after the bus name
+        appeared. ModemManager itself never shows a half-built modem: it
+        exports the object when it is finished. So this one waits for the
+        modem to say it is ready, which is the moment upstream chose too - it
+        just said so by throwing its bus name away.
+        """
+        if not path.startswith(MM_MODEM_PREFIX):
+            return True
+        return path in self._ready_modems
 
     def _default_get_managed_objects_handler(self, msg, send_reply):
         if msg.path != MM_ROOT:
@@ -63,20 +126,109 @@ class ModemManagerBus(MessageBus):
         self._path_exports = {
             path: interfaces
             for path, interfaces in every.items()
-            if self._is_announced(path)
+            if self._is_announced(path) and self._is_complete(path)
         }
         try:
             return super()._default_get_managed_objects_handler(msg, send_reply)
         finally:
             self._path_exports = every
 
+    # Both announcements go out from the object manager's own path, and not
+    # from the path of the object that changed, which is where dbus_fast sends
+    # them. The specification is explicit: InterfacesAdded and
+    # InterfacesRemoved belong on the manager's path, with the object path as
+    # the first argument - and that is where every client is listening,
+    # because that is where it subscribed. Sent from the object's own path
+    # they reach nobody at all: NetworkManager, phosh and chatty all watch
+    # /org/freedesktop/ModemManager1 and never hear that a modem appeared.
+    #
+    # This is what release_request_modemmanager in mm_modem.py was working
+    # around - with a TODO beside it asking why it should be necessary. With
+    # no announcement that arrives, the only way a client learns about the
+    # modem is to enumerate all over again, and taking the bus name away
+    # forces it to. That trick also costs the phone its signal icon, because
+    # in the moment nobody owns the name a client's GetManagedObjects is
+    # refused and GLib never asks again. See FINDINGS.md, defect 16.
+    # And a modem is announced once, with everything it has, the way
+    # ModemManager itself does it. libmm-glib builds its MMObject from the
+    # first announcement that names the object, and NetworkManager throws that
+    # object away for good when the Modem interface is not in it:
+    #
+    #   mm_object_peek_modem: runtime check failed: (MM_IS_MODEM (modem))
+    #   modem with path .../Modem/0 doesn't have the Modem interface, ignoring
+    #
+    # dbus_fast announces one interface per export call and ofono2mm exports
+    # fifteen of them in a row, so which one happened to go first decided
+    # whether the phone had mobile data at all. Measured 14.9.: with the
+    # announcements corrected but still one at a time, NetworkManager dropped
+    # the modem on every restart.
     def _emit_interface_added(self, path, interface):
-        if self._is_announced(path):
-            super()._emit_interface_added(path, interface)
+        if self._disconnected or not self._is_announced(path):
+            return
+
+        exported = self._path_exports.get(path, {})
+        if path.startswith(MM_MODEM_PREFIX):
+            if not self._is_complete(path):
+                # Too early to say anything: a half-built modem is one a client
+                # is entitled to believe in. Everything exported so far goes
+                # out together when the modem reports itself ready.
+                if interface.name == MM_MODEM_IFACE:
+                    self._announce_modem_eventually(path)
+                return
+            # Every announcement carries the whole modem, not just the
+            # interface that was added. The Modem interface is exported before
+            # the bus name is even requested, so its own announcement is made
+            # to an empty room; the first one a client actually hears is
+            # whichever interface happened to be exported next. Measured 14.9.:
+            # that was Modem3gpp, NetworkManager built an object with no Modem
+            # interface in it and ignored the modem for the rest of the boot.
+            # Repeating the interfaces a client already has costs nothing - it
+            # updates them - while leaving one out costs the phone its
+            # connection.
+            self._announce(path, list(exported.values()))
+            return
+        self._announce(path, [interface])
+
+    def _announce(self, path, interfaces):
+        body = {iface.name: None for iface in interfaces}
+
+        def collected(iface, values, _user_data, error):
+            if error is not None:
+                # dbus_fast sends the signal anyway in this case, with whatever
+                # it did read. A modem announced with some properties missing
+                # is still better than a modem nobody hears about; the client
+                # asks for what it needs afterwards.
+                ofono2mm_print(f"Some properties of {iface.name} are missing "
+                               f"from the announcement of {path}: {error}", True)
+                values = {}
+            body[iface.name] = values
+            if any(value is None for value in body.values()):
+                return
+            self.send(Message.new_signal(
+                path=MM_ROOT,
+                interface='org.freedesktop.DBus.ObjectManager',
+                member='InterfacesAdded',
+                signature='oa{sa{sv}}',
+                body=[path, body],
+            ))
+
+        for iface in interfaces:
+            ServiceInterface._get_all_property_values(iface, collected)
 
     def _emit_interface_removed(self, path, removed_interfaces):
-        if self._is_announced(path):
-            super()._emit_interface_removed(path, removed_interfaces)
+        if path not in self._path_exports:
+            # The modem is gone; the next one at this path has to earn its
+            # announcement again.
+            self._ready_modems.discard(path)
+        if self._disconnected or not self._is_announced(path):
+            return
+        self.send(Message.new_signal(
+            path=MM_ROOT,
+            interface='org.freedesktop.DBus.ObjectManager',
+            member='InterfacesRemoved',
+            signature='oas',
+            body=[path, removed_interfaces],
+        ))
 
 class MMInterface(ServiceInterface):
     def __init__(self, loop, bus, verbose=False):
@@ -130,6 +282,7 @@ class MMInterface(ServiceInterface):
         for _path, modem in self.modems.items():
             modem.unexport_mm_interface_objects()
         self.modems.clear()
+        self.bus.something_to_show.set()
 
         self.loop.create_task(self.bus.release_name('org.freedesktop.ModemManager1'))
 
@@ -154,6 +307,9 @@ class MMInterface(ServiceInterface):
             # Seriously though, that's fucking stupid.
             if retry_counter <= 0:
                 ofono2mm_print("No ril modems found after retries, giving up", self.verbose)
+                # Nothing will be exported, so nothing is gained by making
+                # anyone wait for it.
+                self.bus.something_to_show.set()
                 return
 
             ofono2mm_print("No ril modems found, retrying", self.verbose)
@@ -323,6 +479,25 @@ async def main():
     mm_manager_interface = MMInterface(loop, bus, verbose=verbose)
 
     bus.export('/org/freedesktop/ModemManager1', mm_manager_interface)
+
+    # The bus name is the announcement. Everything that watches ModemManager
+    # enumerates the moment the name appears, and some of those clients look
+    # exactly once - phosh draws the signal icon from the objects it finds
+    # then, and nothing later changes its mind. Taking the name before the
+    # modem exists therefore means an icon-less phone until something restarts
+    # the shell, which is what upstream's release-and-request of the name was
+    # really for: a second chance at the enumeration, bought by making the
+    # name disappear - and at the price of every client that asks during that
+    # gap being refused for good (FINDINGS.md, defect 16).
+    #
+    # So: wait until there is a modem to show, or until it is clear there
+    # will not be one. Measured 14.9.: the modem is ready about 150 ms after
+    # start. The timeout is what keeps a phone with no modem - no SIM, oFono
+    # still coming up - from having no ModemManager on the bus either.
+    try:
+        await asyncio.wait_for(bus.something_to_show.wait(), timeout=10)
+    except asyncio.TimeoutError:
+        ofono2mm_print("No modem after ten seconds - taking the bus name anyway", verbose)
 
     try:
         await bus.request_name('org.freedesktop.ModemManager1')

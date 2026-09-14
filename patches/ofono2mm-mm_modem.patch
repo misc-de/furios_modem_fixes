@@ -247,7 +247,59 @@
              self.emit_properties_changed({'Bearers': self.props['Bearers'].value})
  
      async def sim_unlocked(self):
-@@ -727,6 +803,15 @@
+@@ -674,27 +750,30 @@
+         await self.release_request_modemmanager()
+ 
+     async def release_request_modemmanager(self):
+-        ofono2mm_print("Releasing and requesting the bus name", self.verbose)
+-
+-        if hasattr(self, '_releasing'):
+-            ofono2mm_print("Failed to release and request, operation already in progress", self.verbose)
+-            return
+-        self._releasing = True
+-
+-        # Release and request the name so other apps realize we're here.
+-        # TODO: this feels like it shouldn't be necessary. We are signaling InterfacesAdded, so... why?
+-
+-        try:
+-            await self.bus.release_name('org.freedesktop.ModemManager1')
+-        except Exception as e:
+-            ofono2mm_print(f"Failed to release name: {e}", self.verbose)
+-
+-        try:
+-            await self.bus.request_name('org.freedesktop.ModemManager1')
+-        except Exception as e:
+-            ofono2mm_print(f"Failed to request name: {e}", self.verbose)
+-
+-        delattr(self, '_releasing')
++        # This used to release org.freedesktop.ModemManager1 and request it
++        # again, "so other apps realize we're here" - with upstream's own TODO
++        # beside it asking why that should be necessary when InterfacesAdded is
++        # already being signalled. It is not necessary, and it is what costs
++        # the phone its signal icon.
++        #
++        # Measured 14.9.: the name went away and came back twice within 150 ms
++        # of startup. In the moment nobody owns it, no
++        # <allow send_destination="org.freedesktop.ModemManager1"> rule can
++        # match - a rule keyed on a name matches nothing while it is unowned -
++        # so a client's GetManagedObjects is refused by the catch-all deny, and
++        # GLib warns once and never enumerates again. gsd-wwan, phosh, chatty
++        # and wireplumber all went blind at the same instant, and the mobile
++        # signal icon never came back. See FINDINGS.md, defect 16.
++        #
++        # What is left is the part upstream actually meant: the modem is
++        # built, so tell everyone. One InterfacesAdded from the object manager
++        # reaches exactly the clients the name flap was shouting at, and the
++        # bus name never moves. main.py's ModemManagerBus holds the modem back
++        # until this call, because a client that sees a half-built modem keeps
++        # it - NetworkManager asked one for its SIM twenty milliseconds in and
++        # gave up on it for the rest of the boot.
++        ofono2mm_print("Announcing the modem", self.verbose)
++        self.bus.announce_modem(f'/org/freedesktop/ModemManager1/Modem/{self.index}')
+ 
+     async def set_props(self):
+         ofono2mm_print("Setting properties", self.verbose)
+@@ -727,6 +806,15 @@
                                          self.props['State'] = Variant('i', 8) # modem is registered MM_MODEM_STATE_REGISTERED
                                          if 'Strength' in self.ofono_interface_props['org.ofono.NetworkRegistration'].props:
                                              self.props['SignalQuality'] = Variant('(ub)', [self.ofono_interface_props['org.ofono.NetworkRegistration']['Strength'].value, True])
@@ -263,7 +315,7 @@
                                      elif self.ofono_interface_props['org.ofono.NetworkRegistration']['Status'].value == 'searching':
                                          self.props['State'] = Variant('i', 7) # modem is searching MM_MODEM_STATE_SEARCHING
                                      else:
-@@ -973,6 +1058,31 @@
+@@ -973,6 +1061,31 @@
          if changed_props:
              self.emit_properties_changed(changed_props)
  
@@ -295,7 +347,7 @@
      @method()
      async def Enable(self, enable: 'b'):
          ofono2mm_print(f"Enable with state {enable}", self.verbose)
-@@ -1054,6 +1164,9 @@
+@@ -1054,6 +1167,9 @@
              if name.lower() == "internet":
                  ofono_ctx = ctx[0]
                  ofono_ctx_interface = self.ofono_client["ofono_context"][ofono_ctx]['org.ofono.ConnectionContext']
@@ -305,7 +357,7 @@
                  await ofono_ctx_interface.call_set_property("Active", Variant('b', False))
                  await ofono_ctx_interface.call_set_property("Protocol", Variant('s', protocol))
                  await ofono_ctx_interface.call_set_property("Active", Variant('b', True))
-@@ -1064,6 +1177,7 @@
+@@ -1064,6 +1180,7 @@
              try:
                  ofono_ctx = await self.ofono_proxy['org.ofono.ConnectionManager'].call_add_context("internet")
                  ofono_ctx_interface = self.ofono_client["ofono_context"][ofono_ctx]['org.ofono.ConnectionContext']
@@ -313,7 +365,7 @@
                  if 'apn' in properties:
                      await ofono_ctx_interface.call_set_property("AccessPointName", properties['apn'])
                  await ofono_ctx_interface.call_set_property("Protocol", Variant('s', protocol))
-@@ -1075,6 +1189,18 @@
+@@ -1075,6 +1192,18 @@
          if ofono_ctx is not None:
              mm_bearer_interface.ofono_ctx = ofono_ctx
  
@@ -332,7 +384,7 @@
          object_path = f'/org/freedesktop/ModemManager1/Bearer/{bearer_i}'
          mm_bearer_interface.own_object_path = object_path
          self.bus.export(object_path, mm_bearer_interface)
-@@ -1557,7 +1683,55 @@
+@@ -1557,7 +1686,55 @@
              protocol = 1
          return protocol
  
