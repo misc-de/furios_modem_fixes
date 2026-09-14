@@ -1,6 +1,6 @@
 # furios_modem_fixes
 
-Seventeen defects in the FuriOS modem stack, and a way to keep them fixed.
+Eighteen defects in the FuriOS modem stack, and a way to keep them fixed.
 
 Out of the box on this phone the data connection often only came up after a
 reboot, the signal icon sat at the emptiest bar regardless of reception, and
@@ -84,7 +84,7 @@ identify the tower you are on, which places you within a kilometre or so. The
 signal levels do not. Nothing is stored or sent - it prints and exits - but a
 bug report is a public place.
 
-## The seventeen defects
+## The eighteen defects
 
 | # | What | Where | Symptom |
 |---|---|---|---|
@@ -105,6 +105,7 @@ bug report is a public place.
 | 15 | The one of three places that builds a bearer for `Simple.Connect` never subscribes to its oFono context | `mm_modem.py` | bearer stays `connected: no` with no interface, NM fails every activation with `missing data port` - **no mobile data for the whole boot** |
 | 16 | While ModemManager hands its bus name over, a client's `GetManagedObjects` matches no `<allow>` rule and is denied | the system bus, and clients that do not retry | the **signal icon disappears for good** after a restart of ModemManager - phosh, chatty and wireplumber all give up at once |
 | 17 | Failing to take the bus name is reported through a logger that is off, the reply saying somebody else owns it is never read, and giving up leaves the daemon running | `main.py`, our own fix for 16 | ofono2mm is `active (running)` with nothing owning `org.freedesktop.ModemManager1` - **a whole boot with no mobile data**, and one line in the journal |
+| 18 | oFono not being on the bus yet is reported as oFono having left, and that path gives the bus name back - after `take_bus_name` has just taken it | `main.py`, our own fix for 16 | the name is ours one second after boot and gone the next, and nothing ever asks for it again - **another whole boot with no mobile data** |
 
 Numbers behind each of these, and why they are what they are, in
 [FINDINGS.md](FINDINGS.md).
@@ -156,6 +157,17 @@ nothing on the bus answers for ModemManager. Measured after the reboot on
 ModemManager process in the bus". A restart by hand always fixed it, because
 by then oFono is already there - at boot ofono2mm starts seventeen seconds
 first, waiting on `binder-wait` for the radio.
+
+Number 18 was found by the reboot meant to prove 17, in the same two lines of
+journal. At boot oFono is not on the bus yet, and the only way ofono2mm has of
+saying that is to call the method written for oFono *leaving* - which set the
+event that lets the name be taken early and queued a release of it. The queue
+is what makes it silent: the release runs after the name was taken, one second
+into the boot, and nothing asks for it a second time when oFono arrives
+fifteen seconds later. Releasing the name was upstream's trick for making
+clients enumerate again, and number 16 replaced it with a proper announcement,
+so it now goes; the phone keeps its ModemManager whether oFono is early, late
+or absent.
 
 `modemctl` will not restart the shell for you, and the reason is worth
 knowing: `mobi.phosh.Shell.service` answers a kill with

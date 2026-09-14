@@ -269,6 +269,100 @@ check(
 check("RequestNameReply is imported from dbus_fast", True,
       "from dbus_fast.constants import PropertyAccess, RequestNameReply" in shipped)
 
+print("\n  oFono leaving does not take the bus name with it (defect 18)")
+
+
+class FakeModem:
+    def __init__(self):
+        self.unexported = False
+
+    def unexport_mm_interface_objects(self):
+        self.unexported = True
+
+
+class FakeEvent:
+    def __init__(self):
+        self.is_set_ = False
+
+    def set(self):
+        self.is_set_ = True
+
+    def is_set(self):
+        return self.is_set_
+
+
+class FakeNameBus:
+    """A bus that writes down every attempt to give the name away."""
+
+    def __init__(self):
+        self.something_to_show = FakeEvent()
+        self.released = []
+
+    async def release_name(self, name):
+        self.released.append(name)
+
+
+class FakeLoop:
+    def __init__(self):
+        self.tasks = []
+
+    def create_task(self, coro):
+        # Run it here and now: a release queued and never run is still a
+        # release, and on the phone it ran a moment after the name was taken.
+        self.tasks.append(coro)
+        asyncio.new_event_loop().run_until_complete(coro)
+        return coro
+
+
+class FakeSelf:
+    def __init__(self):
+        self.verbose = False
+        self.ofono_manager_interface = object()
+        self.modems = {"/ril_0": FakeModem()}
+        self.bus = FakeNameBus()
+        self.loop = FakeLoop()
+
+
+def load_method(name):
+    """Lift one method out of the shipped file, class and all left behind."""
+    tree = ast.parse(open(SOURCE).read(), SOURCE)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return node
+    print(f"  \033[31mFAIL\033[0m {SOURCE} has no {name} - is main.py patched?")
+    sys.exit(1)
+
+
+def run_ofono_removed():
+    ns = {"ofono2mm_print": lambda *a, **k: None}
+    exec(compile(ast.Module(body=[load_method("ofono_removed")], type_ignores=[]),
+                 SOURCE, "exec"), ns)
+    me = FakeSelf()
+    modem = me.modems["/ril_0"]
+    ns["ofono_removed"](me)
+    return me, modem
+
+
+me, modem = run_ofono_removed()
+check("the modem is unexported", True, modem.unexported)
+check("and forgotten", 0, len(me.modems))
+check("the oFono manager interface is dropped", None, me.ofono_manager_interface)
+check("the bus name is not released", [], me.bus.released)
+check("nothing is queued that could release it later", 0, len(me.loop.tasks))
+check(
+    "and main() is not told to stop waiting for a modem",
+    False,
+    me.bus.something_to_show.is_set(),
+)
+
+shipped = open(SOURCE).read()
+check(
+    "no release of the ModemManager name is left anywhere",
+    False,
+    "release_name('org.freedesktop.ModemManager1')" in shipped
+    or "release_name(MM_BUS_NAME)" in shipped,
+)
+
 print("\n  the copy of RequestNameReply above is still the real one")
 try:
     from dbus_fast.constants import RequestNameReply as Real

@@ -276,6 +276,30 @@ class MMInterface(ServiceInterface):
         self.ofono_manager_interface.on_modem_removed(self.ofono_modem_removed)
         self.loop.create_task(self.find_ofono_modems())
 
+    # Called both when oFono goes away and when it was never there to begin
+    # with - check_ofono_presence has no other way to say "not on the bus".
+    # That second reading is why this method must not touch the bus name.
+    #
+    # It used to do two things that together left the phone with no
+    # ModemManager at all after a cold boot (FINDINGS.md, defect 18). oFono
+    # comes up sixteen seconds after we do - it waits nine of them on
+    # IRadio/slot1 - so at startup this ran first, in the "never there" sense:
+    #
+    #   * it set something_to_show, which released main() from the wait that
+    #     exists precisely so the name appears together with a modem, and
+    #   * it queued a release of the name, which then ran after take_bus_name
+    #     had just taken it.
+    #
+    # One second in, the journal said the name was ours; a moment later
+    # nobody owned it, and when oFono did arrive nothing asked for it again.
+    # Measured 14.9.: two minutes after boot, mmcli still could not find
+    # ModemManager on the bus.
+    #
+    # Releasing the name was upstream's way to make clients enumerate again
+    # (defect 16) - announce_modem says the same thing without costing anyone
+    # their signal icon. A modem that disappears is announced as removed; the
+    # name stays, the way ModemManager itself keeps it when a modem is
+    # unplugged, and is there for oFono coming back.
     def ofono_removed(self):
         ofono2mm_print("oFono removed", self.verbose)
         self.ofono_manager_interface = None
@@ -283,9 +307,6 @@ class MMInterface(ServiceInterface):
         for _path, modem in self.modems.items():
             modem.unexport_mm_interface_objects()
         self.modems.clear()
-        self.bus.something_to_show.set()
-
-        self.loop.create_task(self.bus.release_name('org.freedesktop.ModemManager1'))
 
     async def find_ofono_modems(self, retry_counter=5):
         ofono2mm_print("Finding oFono modems", self.verbose)

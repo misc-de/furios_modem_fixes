@@ -20,6 +20,33 @@ sudo install -Dm755 tools/furios-mobile-route "$SHARE/tools/furios-mobile-route"
 sudo install -Dm755 tools/furios-mobile-context "$BIN/furios-mobile-context"
 sudo install -Dm755 tools/furios-mobile-context "$SHARE/tools/furios-mobile-context"
 
+# Before anything in $SHARE is overwritten: take out the previous version of
+# our OWN patches. Changing one of them is the ordinary case when developing
+# here, and it used to end in a dead end that costs half an hour to recognise
+# - the file on the phone is our previous patched version, so the new patch
+# does not fit ("main.py: patch does not fit (upstream moved)") and revert
+# does not recognise it either ("main.py is not ours to revert"): by both
+# patches' reckoning, nothing on the phone is ours. The old ready-made copies
+# and the old patches are still here at this point, which is exactly what is
+# needed to undo them. The .deb has this covered in prerm; this is the hand
+# path. Measured 14.9.
+TARGET=/usr/lib/ofono2mm/ofono2mm
+for f in utils mm_bearer mm_modem mm_modem_simple mm_modem_signal main; do
+    [ "$f" = main ] && on_disk="$TARGET/../main.py" || on_disk="$TARGET/$f.py"
+    old_copy="$SHARE/patched-files/$f.py"
+    [ -f "$old_copy" ] && [ -f "$on_disk" ] || continue
+    # Only a file that is byte for byte what we installed last time, and is
+    # not already what we are about to install.
+    cmp -s "$old_copy" "$on_disk" || continue
+    cmp -s "patched-files/$f.py" "$on_disk" && continue
+    if sudo patch -R -s -f -p1 -d "$TARGET/.." < "$SHARE/patches/ofono2mm-$f.patch"; then
+        echo "  ok    $f.py: previous version of our own patch taken back out"
+    else
+        echo "  warn  $f.py: could not take the previous patch out - the new"
+        echo "  warn       patch will not fit; $SHARE/patched-files/$f.py is the way in"
+    fi
+done
+
 sudo mkdir -p "$SHARE/patches" "$SHARE/patched-files" "$SHARE/networkmanager" "$SHARE/dbus"
 sudo install -m644 networkmanager/*.conf "$SHARE/networkmanager/"
 sudo install -m644 dbus/*.conf            "$SHARE/dbus/"

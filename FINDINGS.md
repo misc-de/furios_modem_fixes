@@ -1769,7 +1769,7 @@ count. And it does not come back without the name: it retries, waiting 1, 2,
 4, 8, 16 and then 30 seconds, for ever. There is no situation in which a phone
 is better off with a daemon that has quietly stopped trying.
 
-`tests/test-bus-name.py`, 35 checks: each of the four replies, a bus that
+`tests/test-bus-name.py`, 35 of its checks: each of the four replies, a bus that
 refuses, a bus that does not answer, the doubling and its ceiling, that every
 failed attempt says something, and that the shipped `main.py` still routes
 through it.
@@ -1782,6 +1782,117 @@ only what happens after, when the name is asked for.
 any of this. oFono is up by then, the modem is ready in about 150 ms, and
 every path that only runs when it is *not* goes untested. The same warning
 already applies to defects 11 and 12 - it is the third time in this file.
+
+---
+
+## 18. And the same boot, giving the name straight back
+
+The reboot on 14.9. at 08:51 was to prove defect 17 cold. It proved it - and
+found the next one in the same two lines of journal:
+
+```
+Sep 14 08:52:30  Started ModemManager.service - Modem Manager.
+Sep 14 08:52:31  ofono2mm: org.freedesktop.ModemManager1 is ours (PRIMARY_OWNER)
+```
+
+That second line is 17's fix working: it is printed with `print`, so it is in
+the journal without `-v`, and it says the name was really taken. Two minutes
+later:
+
+```
+$ dbus-send ... org.freedesktop.DBus.NameHasOwner string:org.freedesktop.ModemManager1
+   boolean false
+$ mmcli -L
+error: couldn't find the ModemManager process in the bus
+$ nmcli -t -f DEVICE,TYPE,STATE d | grep ril      # nothing
+```
+
+Taken at 08:52:31, gone by 08:52:33, and never asked for again. oFono was up
+and `/ril_0` was online and powered the whole time.
+
+### Nobody took it away. We gave it back
+
+`check_ofono_presence` has exactly one way to say "oFono is not on the bus":
+it calls `ofono_removed`. At boot that is the normal case - oFono appears
+sixteen seconds after we do, nine of them spent in `binder-wait` - so the
+first thing that runs on a cold boot is the method written for oFono
+*leaving*:
+
+```python
+def ofono_removed(self):
+    ...
+    self.bus.something_to_show.set()
+    self.loop.create_task(self.bus.release_name('org.freedesktop.ModemManager1'))
+```
+
+Both lines then do the wrong thing, in the wrong order:
+
+* `something_to_show.set()` releases `main()` from the wait that exists
+  precisely so the name appears together with a modem (defect 16). One second
+  in, with no oFono and no modem, `take_bus_name` takes the name.
+* The release was queued *before* that and runs *after* it, because
+  `create_task` schedules and does not execute. It hands back the name that
+  was taken a moment ago.
+
+And when oFono did arrive at 08:52:46, `ofono_added` exported the modem and
+announced it to a bus where ModemManager no longer had a name. Nothing asks
+for it a second time; there is no code that does.
+
+**Fix:** `ofono_removed` touches neither the event nor the name. Releasing the
+name was upstream's way of making clients enumerate again, and defect 16
+replaced that with `announce_modem`, which says the same thing without costing
+anyone their signal icon - so there is nothing left for a release to do. A
+modem that goes away is announced as removed; the name stays, the way
+ModemManager itself keeps it when a modem is unplugged, and is there when
+oFono comes back. The "no oFono at all" case is what the ten second timeout in
+`main()` was always for, and it is now the only thing that ends that wait
+early.
+
+### Proving it without a reboot, which is harder than it sounds
+
+A warm restart cannot reproduce this: `ModemManager.service` has
+`Requires=ofono.service`, so restarting it pulls oFono up in the same second -
+and stopping oFono stops ModemManager with it. The boot ordering had to be
+built on purpose, with a transient drop-in that makes oFono take as long as
+`binder-wait` does:
+
+```
+/run/systemd/system/ofono.service.d/99-test-delay.conf
+[Service]
+ExecStartPre=/bin/sleep 20
+```
+
+Measured 14.9. 09:00, with the fix in place:
+
+```
+  3s: name=false  ofono=activating      <- waiting for a modem, as intended
+  6s: name=false  ofono=activating
+  9s: name=false  ofono=activating
+ 12s: name=true   ofono=activating      <- "no modem after ten seconds"
+ 18s: name=true   ofono=activating
+ 22s: name=true   ofono=active          <- oFono arrives, name still ours
+ 35s: name=true   ofono=active
+```
+
+Afterwards: `mmcli -L` lists the modem, `registered` and `home`, and
+`nmcli` says `/ril_0:gsm:connected`. On the old code the name was taken after
+one second and gone after two, for the rest of the uptime.
+
+`tests/test-bus-name.py` is 42 checks now. The new ones lift `ofono_removed`
+out of the shipped `main.py` with `ast` and run it against a bus that writes
+down every attempt to give the name away: the modem is unexported and
+forgotten, the oFono interface dropped, and nothing is released, queued, or
+allowed to cut `main()`'s wait short. Against the previous `main.py` three of
+them fail, which is the only thing that makes them worth having.
+
+**Trap, and it cost half an hour:** changing one of our *own* patches leaves
+the phone in a state both halves of `modemctl` refuse to touch - the file on
+disk is our previous patched version, so the new patch does not fit
+(`main.py: patch does not fit (upstream moved)`) and revert does not recognise
+it either (`main.py is not ours to revert`). The `.deb` handles this in
+`prerm`; `install.sh` now does the same for the hand path, taking the previous
+version of our own patch out with the old patch still in `/usr/local/share`
+before it overwrites it.
 
 ---
 
