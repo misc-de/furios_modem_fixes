@@ -1,6 +1,6 @@
 # furios_modem_fixes
 
-Nineteen defects in the FuriOS modem stack, and a way to keep them fixed.
+Twenty-three defects in the FuriOS modem stack, and a way to keep them fixed.
 
 Out of the box on this phone the data connection often only came up after a
 reboot, the signal icon sat at the emptiest bar regardless of reception, and
@@ -87,7 +87,7 @@ identify the tower you are on, which places you within a kilometre or so. The
 signal levels do not. Nothing is stored or sent - it prints and exits - but a
 bug report is a public place.
 
-## The twenty defects
+## The twenty-three defects
 
 | # | What | Where | Symptom |
 |---|---|---|---|
@@ -111,6 +111,9 @@ bug report is a public place.
 | 18 | oFono not being on the bus yet is reported as oFono having left, and that path gives the bus name back - after `take_bus_name` has just taken it | `main.py`, our own fix for 16 | the name is ours one second after boot and gone the next, and nothing ever asks for it again - **another whole boot with no mobile data** |
 | 19 | A cell that drops burns NetworkManager's four autoconnect attempts in two seconds, and the blocked profile outlives the outage | NetworkManager's defaults, and our own supervisor answering a smaller question | the radio comes back and **mobile data does not** - an interface with an address, a default route and no DNS server at all, until somebody switches the connection on by hand |
 | 20 | ofono2mm's unit requires oFono but is not ordered after it, so both start at once while oFono waits on the radio HAL | `ModemManager.service` drop-in, upstream ofono2mm | ofono2mm takes the bus name with no modem behind it, the shell enumerates nothing, and the phone boots with **no signal icon and grey bars** on a perfectly healthy modem |
+| 21 | The modem is announced before anyone owns the bus name - the announcement itself set the event `main()` waits on, so every announcement went out 59 ms too early, by construction | `main.py` (ours) | NetworkManager builds its modem from a proxy with no name owner and keeps it all boot: LTE registered, modem healthy, **no mobile data** |
+| 22 | The manager object announced as one of its own managed objects, and the modem announced before `State` and `Sim` were filled in | `main.py` (ours) | NetworkManager discards the one and keeps the other as `state: failed` for the rest of the boot - **no mobile data** |
+| 23 | Our own defect 20 fix ordered ModemManager behind oFono's 8.7 s in `binder-wait`, and `main()` then waited again for a modem - so the bus name appeared after the shell had already asked | `ModemManager.service` drop-in and `main.py` (ours) | the phone boots with **no signal icon and no signal strength** on a perfectly healthy modem, all measurements green |
 
 Numbers behind each of these, and why they are what they are, in
 [FINDINGS.md](FINDINGS.md).

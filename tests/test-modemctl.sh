@@ -933,8 +933,15 @@ out=$(settle_run)
 check "the shell is never killed to repair an icon" no "$(shell_was_killed)"
 check "but the loss is reported in terms of what the user can see" yes \
       "$(printf '%s\n' "$out" | grep -qi 'signal icon' && echo yes || echo no)"
-check "and the way back is printed, with the unit name" yes \
-      "$(printf '%s\n' "$out" | grep -q 'kill --signal=KILL mobi.phosh.Shell.service' && echo yes || echo no)"
+# Defect 23: the way back is a ModemManager restart, not the shell. phosh
+# picks the modem up again by itself when the name comes back - measured on
+# the device on 14.9., and confirmed by eye. Killing the shell was never
+# needed for this, and it is the one move here that can end the session.
+check "and the way back is printed, and it is not the shell" yes \
+      "$(printf '%s\n' "$out" \
+         | grep -q 'systemctl restart ModemManager.service' && echo yes || echo no)"
+check "no shell kill is suggested any more" no \
+      "$(printf '%s\n' "$out" | grep -q 'kill --signal' && echo yes || echo no)"
 check "and the rest of the stack is not made to sound broken" yes \
       "$(printf '%s\n' "$out" | grep -qi 'Everything else is fine' && echo yes || echo no)"
 
@@ -960,8 +967,9 @@ check "the silence itself is explained" yes \
 check "and it is about the icon, not about the modem" yes \
       "$(printf '%s\n' "$out" | grep -q 'nothing else is affected' && echo yes || echo no)"
 check "the way back is offered, not taken" no "$(shell_was_killed)"
-check "and it is the shell unit that is named" yes \
-      "$(printf '%s\n' "$out" | grep -q 'kill --signal=KILL mobi.phosh.Shell.service' && echo yes || echo no)"
+check "and the remedy named is the ModemManager restart" yes \
+      "$(printf '%s\n' "$out" \
+         | grep -q 'systemctl restart ModemManager.service' && echo yes || echo no)"
 
 # The healthy boot: ModemManager comes up first, the shell after it. Nothing
 # to warn about, and warning anyway is how a check stops being read.
@@ -1079,30 +1087,38 @@ check "the tool answers --metric" yes \
 check "the MMS context is found by type, not by number" yes \
       "$(printf '%s\n' "$code" | grep -q 'context_path mms' && echo yes || echo no)"
 
-# --- defect 20: the start order that decides the signal icon ----------------
+# --- defect 23: what systemd is told, and when the name is really up --------
 #
-# ModemManager.service is ofono2mm, and its own drop-in says
-# Requires=ofono.service with no After=. Requires is not an ordering, so both
-# start at once, oFono sits in binder-wait, and ofono2mm gives up waiting and
-# takes the bus name with nothing behind it. Measured 14.9.: the phone came up
-# with no signal icon and grey bars.
+# Upstream ModemManager.service is Type=dbus with BusName=...: the unit is
+# started when the name is on the bus. ofono2mm's own drop-in sets
+# Type=simple, so systemd calls it started at fork - 4.5 s early on 14.9.
+# 14:50, and on the boot where ofono2mm never took the name at all it looked
+# like a perfectly healthy service (defect 17). Our drop-in puts Type=dbus
+# back; it no longer orders anything after oFono, because that ordering was
+# what pushed the name past the shell in the first place.
 #
-# systemctl is stubbed for this block, and has to be: "is the unit already
-# ordered after oFono" is a question about the machine the test happens to run
-# on, and on this phone the answer changes the moment apply has run once.
+# systemctl is stubbed for this block, and has to be: "does this unit already
+# answer to its bus name" is a question about the machine the test happens to
+# run on, and on this phone the answer changes the moment apply has run once.
 SYSD="$WORK/systemd-system"; mkdir -p "$SYSD"
 STUB="$WORK/stub-bin"; mkdir -p "$STUB"
 cat > "$STUB/systemctl" <<'STUBEOF'
 #!/bin/bash
-# Only the one question this block is about; everything else answers the way
-# an absent unit does, which is what the rest of status already copes with.
-if [ "${1:-}" = show ] && [ "${3:-}" = -p ] && [ "${4:-}" = After ]; then
-    printf 'After=%s\n' "${STUB_AFTER:-basic.target}"
+# Only the questions this block is about; everything else answers the way an
+# absent unit does, which is what the rest of status already copes with.
+if [ "${1:-}" = show ] && [ "${3:-}" = -p ] && [ "${4:-}" = Type ]; then
+    printf '%s\n' "${STUB_TYPE:-simple}"
+    exit 0
+fi
+if [ "${1:-}" = show ] && [ "${3:-}" = -p ] && [ "${4:-}" = BusName ]; then
+    printf '%s\n' "${STUB_BUSNAME:-}"
     exit 0
 fi
 exit 0
 STUBEOF
 chmod +x "$STUB/systemctl"
+
+DROPIN=50-furios-modemmanager-name.conf
 
 order_state() {
     local out
@@ -1111,42 +1127,64 @@ order_state() {
               MODEMCTL_SYSTEMD_CONF_D="$1" \
               bash "$ROOT/modemctl" status 2>&1)
     case "$out" in
-        *"starts after ofono.service"*)          echo applied ;;
-        *"is not ordered after ofono.service"*)  echo missing ;;
-        *"cannot check start order"*)            echo absent ;;
-        *)                                       echo unknown ;;
+        *"started when its bus name is up"*)  echo applied ;;
+        *"is Type=simple"*)                   echo missing ;;
+        *"cannot check the unit type"*)       echo absent ;;
+        *)                                    echo unknown ;;
     esac
 }
 
 check "shipped state is not mistaken for fixed" missing "$(order_state "$SYSD")"
 
 mkdir -p "$SYSD/ModemManager.service.d"
-install -m644 "$ROOT/systemd/50-furios-after-ofono.conf" \
-        "$SYSD/ModemManager.service.d/50-furios-after-ofono.conf"
+install -m644 "$ROOT/systemd/$DROPIN" "$SYSD/ModemManager.service.d/$DROPIN"
 check "the drop-in is what makes it applied" applied "$(order_state "$SYSD")"
 
 rm -rf "$SYSD/ModemManager.service.d"
 check "and removing it is noticed" missing "$(order_state "$SYSD")"
 
-# If ofono2mm ever ships the After= itself, ours is not needed and must not be
-# reported as missing - nor put back by apply, nor claimed by revert.
-STUB_AFTER=ofono.service
-export STUB_AFTER
+# If ofono2mm ever stops throwing Type=dbus away, ours is not needed and must
+# not be reported as missing - nor put back by apply, nor claimed by revert.
 check "an upstream that fixes this itself counts as covered" applied \
-      "$(order_state "$SYSD")"
-unset STUB_AFTER
+      "$(STUB_TYPE=dbus STUB_BUSNAME=org.freedesktop.ModemManager1 \
+         order_state "$SYSD")"
+
+# Half of it is not it: Type=dbus pointing at nothing must not count.
+check "Type=dbus without the BusName is not covered" missing \
+      "$(STUB_TYPE=dbus STUB_BUSNAME= order_state "$SYSD")"
 
 check "a phone without systemd is not a failure" absent \
       "$(order_state "$WORK/no-such-systemd")"
 
-# The drop-in has to say the one thing it exists to say. A file that installs
-# cleanly and orders nothing would pass every check above.
-check "the drop-in actually orders after oFono" yes \
-      "$(grep -q '^After=ofono.service$' \
-              "$ROOT/systemd/50-furios-after-ofono.conf" && echo yes || echo no)"
+# status also compares two moments of this boot: the bus name appearing and
+# the shell starting. The stubbed systemctl answers nothing for the shell's
+# start time - and `date -d ""` is midnight this morning, not an error. Left
+# ungarded that read as "the bus name was fifteen hours late" and failed a
+# healthy phone; it has to say it cannot tell instead.
+status_out=$(env PATH="$STUB:$PATH" \
+                 MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+                 MODEMCTL_SYSTEMD_CONF_D="$SYSD" \
+                 bash "$ROOT/modemctl" status 2>&1)
+check "an unreadable shell start time is not read as midnight" yes \
+      "$(printf '%s\n' "$status_out" | grep -q 'AFTER .* started' && echo no || echo yes)"
+check "and status says it cannot tell" yes \
+      "$(printf '%s\n' "$status_out" | grep -q 'cannot compare with the shell' \
+         && echo yes || echo no)"
+
+# The drop-in has to say the two things it exists to say. A file that
+# installs cleanly and changes nothing would pass every check above.
+check "the drop-in sets Type=dbus" yes \
+      "$(grep -q '^Type=dbus$' "$ROOT/systemd/$DROPIN" && echo yes || echo no)"
+check "and names the bus it waits for" yes \
+      "$(grep -q '^BusName=org.freedesktop.ModemManager1$' \
+              "$ROOT/systemd/$DROPIN" && echo yes || echo no)"
+# The whole point of defect 23: this file must not push ModemManager behind
+# oFono's nine seconds in binder-wait ever again.
+check "and it no longer orders ModemManager after oFono" yes \
+      "$(grep -q '^After=' "$ROOT/systemd/$DROPIN" && echo no || echo yes)"
 check "and it does not restart anything to do it" yes \
-      "$(grep -qE '^(ExecStart|Restart)' \
-              "$ROOT/systemd/50-furios-after-ofono.conf" && echo no || echo yes)"
+      "$(grep -qE '^(ExecStart|Restart)' "$ROOT/systemd/$DROPIN" \
+         && echo no || echo yes)"
 
 # apply puts it in place and revert takes it away - both without root, both
 # against the work tree, so the real unit directory is never touched here.
@@ -1155,13 +1193,23 @@ env PATH="$STUB:$PATH" MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
     MODEMCTL_SYSTEMD_CONF_D="$SYSD" MODEMCTL_SHARE="$ROOT" \
     bash "$ROOT/modemctl" apply -q >/dev/null 2>&1
 check "apply installs the drop-in" yes \
+      "$([ -f "$SYSD/ModemManager.service.d/$DROPIN" ] && echo yes || echo no)"
+
+# A phone upgrading from defect 20 still carries the old file, and a drop-in
+# is whatever is in the directory: left there, it would keep ordering
+# ModemManager after oFono and undo the whole fix.
+: > "$SYSD/ModemManager.service.d/50-furios-after-ofono.conf"
+env PATH="$STUB:$PATH" MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+    MODEMCTL_SYSTEMD_CONF_D="$SYSD" MODEMCTL_SHARE="$ROOT" \
+    bash "$ROOT/modemctl" apply -q >/dev/null 2>&1
+check "apply takes the defect 20 drop-in back out" yes \
       "$([ -f "$SYSD/ModemManager.service.d/50-furios-after-ofono.conf" ] \
-         && echo yes || echo no)"
+         && echo no || echo yes)"
+
 env PATH="$STUB:$PATH" MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
     MODEMCTL_SYSTEMD_CONF_D="$SYSD" MODEMCTL_SHARE="$ROOT" \
     bash "$ROOT/modemctl" revert -q >/dev/null 2>&1
 check "revert takes it away again" yes \
-      "$([ -f "$SYSD/ModemManager.service.d/50-furios-after-ofono.conf" ] \
-         && echo no || echo yes)"
+      "$([ -f "$SYSD/ModemManager.service.d/$DROPIN" ] && echo no || echo yes)"
 
 summary

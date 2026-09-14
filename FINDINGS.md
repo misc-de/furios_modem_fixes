@@ -18,10 +18,12 @@ Four symptoms started this, on different days:
 - and finally the signal icon disappeared altogether, on a boot where every
   measurable thing about the modem was correct.
 
-None was a radio problem. All twenty-two causes are in software. Fifteen are
-in code that shipped with the phone, two are a shipped fault our own fix only
-half covered, and five we introduced ourselves while fixing the others. The
-five are marked as such where they appear.
+None was a radio problem. All twenty-three causes are in software. Fifteen
+are in code that shipped with the phone, two are a shipped fault our own fix
+only half covered, and six we introduced ourselves while fixing the others.
+The six are marked as such where they appear - and the newest of them,
+defect 23, was caused by the fix for defect 20 and by the reason we gave for
+it, which turned out not to survive measurement.
 
 ---
 
@@ -1903,6 +1905,15 @@ running, logged its `object_removed_cb: should not be reached` on every
 restart - it saw ModemManager go. phosh, which started inside the gap, saw
 nothing and had nothing to see.
 
+> **Corrected by [defect 23](#23-the-grey-icon-was-ours-and-the-reason-we-gave-for-it-was-wrong).**
+> There was indeed nothing to see at the time, but the conclusion drawn from
+> it was wrong. A GLib object manager client built while nobody owns the name
+> *does* watch for the owner and re-enumerates when it arrives - measured
+> three ways on this phone, and confirmed on the device, where restarting
+> ModemManager put the icon back with no shell restart. Everything below
+> about killing the shell is superseded: the way back is
+> `sudo systemctl restart ModemManager`.
+
 So `settle` asked the wrong question. An empty journal is not evidence that
 the shell has a modem; it is also exactly what a shell that never found one
 looks like. It now asks a question that has an answer either way: **is the
@@ -2077,6 +2088,17 @@ nothing later changes its mind - which is the whole reason [defect
 16](#16-the-restart-that-takes-the-signal-icon-with-it) mattered and why taking
 the bus name early is written in this tree as a last resort. On this boot the
 last resort *was* the normal path.
+
+> **Wrong, and the fix built on it caused
+> [defect 23](#23-the-grey-icon-was-ours-and-the-reason-we-gave-for-it-was-wrong).**
+> "Nothing later changes its mind" is the sentence this section rests on, and
+> it does not survive measurement: phosh connects `object-added` before it
+> cold-plugs anything, and a client built exactly the way it builds its own
+> picked up a modem announced five seconds after the name appeared. Ordering
+> ModemManager after oFono put the bus name behind oFono's 8.7 s in
+> binder-wait and so behind the shell - the very thing this section set out
+> to prevent. The drop-in no longer orders anything: it restores
+> `Type=dbus`, and ofono2mm takes the name at once.
 
 **ofono2mm's own drop-in orders nothing.** It says:
 
@@ -2386,6 +2408,134 @@ root-only. Run as a user, curl binds the source address instead, the packet
 leaves over Wi-Fi with a mobile source address and is dropped - it looks
 exactly like mobile data being broken. Both measurements above were taken
 with `sudo`.
+
+---
+
+## 23. The grey icon was ours, and the reason we gave for it was wrong
+
+Reported on 14 September, an hour after the cold boot that was supposed to
+confirm defects 20, 21 and 22: *no LTE icon, no signal strength, all grey*.
+That cold boot had passed every check this repository knows how to run -
+`ril_0 connected`, two DNS servers, one modem in the object manager, HTTP 301
+over `ccmni0` in 0.45 s. The modem was perfect. Only the drawing of it was
+missing.
+
+### What the five boots say
+
+Two moments decide it: when `org.freedesktop.ModemManager1` gets an owner,
+and when the shell is up to ask.
+
+```
+boot   bus name is ours      "Phosh ready"        icon
+ -4    09:20:33.25           09:20:41.83          8.6 s early   ok
+ -3    13:27:57.12           13:28:03.51          6.4 s early   ok
+ -2    13:37:36.15           13:37:41.02          4.9 s early   ok
+ -1    14:19:34.49           14:19:35.38          0.9 s early   ok
+  0    14:51:42.07           14:51:40.19          1.9 s LATE    grey
+```
+
+The margin had been shrinking all day, and on the fifth boot it went
+negative. What pushed it there was this repository:
+
+* `50-furios-after-ofono.conf` - defect 20's own fix, installed at 13:33 -
+  ordered ModemManager after oFono. oFono spends **8.7 s** in `binder-wait`
+  for `IRadio/slot1` (14:51:28.75 to 14:51:37.43), so ModemManager was not
+  allowed to start until 14:51:37.5. phosh had started at **14:51:34**.
+* `main()` then waited a second time, for a modem, before taking the name:
+  14:51:42.07.
+
+phosh built its ModemManager client somewhere in between, into a gap four and
+a half seconds wide that we had dug and then deepened.
+
+### The reason in the comment was disproven three ways
+
+Every one of those two waits was justified by the same sentence, which
+appears in `main.py`, in the drop-in and in defect 20: *phosh draws the
+signal icon from the objects it finds at one enumeration and nothing later
+changes its mind.* It is not true, and the belief is what made the fix look
+like the danger.
+
+phosh 0.55.0 (`src/wwan/phosh-wwan-mm.c`) builds its client with
+`mm_manager_new (conn, G_DBUS_OBJECT_MANAGER_CLIENT_FLAGS_DO_NOT_AUTO_START,
+...)` and connects `object-added` and `object-removed` before it cold-plugs
+anything. Measured on the device, against this GLib (2.88):
+
+1. **A replica of phosh's client, built while nobody owned the name, watching
+   the real ofono2mm restart.** It got `OBJECT-ADDED
+   /org/freedesktop/ModemManager1/Modem/0`, fifteen interfaces, Modem and
+   Modem3gpp present. It recovered.
+2. **A name that appears with nothing behind it**, the shape ofono2mm would
+   have if it stopped waiting: the client saw the name arrive with zero
+   objects and still received the object announced five seconds later.
+3. **Fifteen runs walking the name's arrival across the client's own
+   asynchronous construction**, 0, 1, 2, 3, 5, 8, 12, 20, 30, 50, 80, 120,
+   200, 400 and 800 ms. None missed it.
+
+And the running phosh proved it on the phone: `systemctl restart
+ModemManager` brought the icon and the bars straight back, with no shell
+restart. Defect 16's advice - kill the shell - was never necessary for this,
+and killing `mobi.phosh.Shell.service` is the one move in `modemctl` that can
+leave the phone with no shell at all. It is gone from `settle`.
+
+**What is still not explained:** why phosh went grey on boot 0 when every
+bench reproduction of the same shape recovers. The field is consistent (five
+boots, five agreements) and the bench is consistent the other way. So the fix
+removes the disputed condition rather than relying on a mechanism nobody has
+pinned down, and `status` *reports* the timing instead of failing a phone
+over it.
+
+### The fix
+
+* **The name goes up first, empty.** `main()` exports the manager object and
+  takes the name at once - upstream ModemManager's own lifecycle, and the one
+  every client is written against. Measured after the change: 1.29 s from
+  process start to `PRIMARY_OWNER`, against 4.5 s of waiting before.
+* **The drop-in stops ordering and starts declaring.** Upstream's unit is
+  `Type=dbus` with `BusName=org.freedesktop.ModemManager1`; ofono2mm's own
+  `10-ofono2mm.conf` replaces the ExecStart and sets `Type=simple`, so
+  systemd counts the service started at fork. On boot 0 that was 4.5 s early.
+  `50-furios-modemmanager-name.conf` puts `Type=dbus` back and orders
+  nothing. It also closes defect 17 for good: a ofono2mm that never takes the
+  name is now a failed unit after `TimeoutStartSec` (5 s here) instead of a
+  healthy-looking service nobody can reach.
+* **The old drop-in is taken out by name.** A drop-in is whatever is in the
+  directory, so a phone upgrading from defect 20 would otherwise keep
+  obeying `After=ofono.service` and undo all of it. `apply` and `revert`
+  remove it; there is a test for exactly that.
+
+Nothing about `modem_ready` or `_published` changed. Announcing a modem
+before the name is owned (defect 21) or before it is finished (defect 22) is
+still impossible, and with the name taken in the first second the first of
+those two windows is now nearly closed by construction as well.
+
+### Two measurement errors of our own, both worth keeping
+
+**`date -d ""` is midnight this morning, not an error.** The first version of
+the new `status` check read the shell's start time from `systemctl show` and
+handed it to `date`. Under the test suite's stubbed `systemctl` that string
+is empty, `date` cheerfully answered 00:00, and status reported the bus name
+as 53502 seconds late on a perfectly healthy phone. The raw value is checked
+before `date` sees it, and there is a test that a shell start time which
+cannot be read is skipped rather than believed.
+
+**A status check must not assert what it cannot prove.** The same check
+first *failed* the phone whenever the name was late - and then said so while
+the icon was visibly on the screen, because the ModemManager restart that
+put it back also made the name later than the shell. It now stays quiet once
+ModemManager has changed hands since the shell started, and warns rather
+than fails.
+
+### The tests wrote the wrong belief down, again
+
+`tests/test-bus-name.py` asserted that the ten-second timeout message was
+present in the shipped file - the disproven premise, pinned as a
+requirement. It now asserts the opposite invariant and reads it off `main()`
+rather than off a string: the statements before `take_bus_name` are walked
+for anything that waits, and there must be none. Against the previous
+`main.py` two checks fail, which is the only thing that makes them worth
+having. `tests/test-object-manager.py` gained the startup the daemon actually
+performs now - name first, empty, modem seconds later - alongside the old one,
+whose guard still has a window to cover.
 
 ---
 

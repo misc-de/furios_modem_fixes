@@ -17,7 +17,7 @@ if [ "$(id -u)" -eq 0 ]; then
     for v in MODEMCTL_TARGET MODEMCTL_RADIO_CONF MODEMCTL_SHARE MODEMCTL_PATCHES \
              MODEMCTL_NM_CONF_D MODEMCTL_RESOLV MODEMCTL_NM_RESOLV \
              MODEMCTL_DBUS_CONF_D MODEMCTL_CBS_DB MODEMCTL_PROFILE \
-             MODEMCTL_SYSTEMD_CONF_D; do
+             MODEMCTL_SYSTEMD_CONF_D MODEMCTL_SHELL_SYSTEM_UNIT; do
         if [ -n "${!v:-}" ]; then
             echo "refusing to honour $v as root - that would be an arbitrary-file patch" >&2
             exit 3
@@ -66,7 +66,19 @@ CB_IFACE=org.freedesktop.ModemManager1.Modem.CellBroadcast
 # bars until the shell is restarted. Not an ofono2mm file - it is a drop-in
 # of our own on top of theirs, so an update of that package does not wipe it.
 SYSTEMD_CONF_D=${MODEMCTL_SYSTEMD_CONF_D:-/etc/systemd/system}
-ORDER_DROPIN=50-furios-after-ofono.conf
+ORDER_DROPIN=50-furios-modemmanager-name.conf
+# The shell whose signal icon this is all about. The system unit, not the
+# user one settle uses further down: modemctl runs as root from the boot unit
+# too, where "systemctl --user" answers for nobody. Its start is a lower
+# bound for the shell process - close enough to say whether the bus name was
+# there first, which is the only question asked of it.
+SHELL_SYSTEM_UNIT=${MODEMCTL_SHELL_SYSTEM_UNIT:-phosh.service}
+# Defect 20 shipped this drop-in under another name, and with the opposite
+# content: After=ofono.service. Defect 23 showed that ordering to be the
+# cause of the grey signal icon, so the file was renamed rather than edited -
+# but a phone that has the old one keeps obeying it, because a drop-in is
+# whatever is in the directory. Every apply takes these out by name.
+LEGACY_ORDER_DROPINS="50-furios-after-ofono.conf"
 ORDER_UNIT=ModemManager.service
 
 # Defect 14. The database cellbroadcastd takes its channel list from subscribes
@@ -196,14 +208,16 @@ resolvconf_state() {
 }
 
 #   applied / covered / missing / absent
-# "covered" is the day this stops being ours: a ModemManager update that grows
-# the allow itself. Then the drop-in is dead weight and revert should take it.
+# "covered" is the day this stops being ours: an ofono2mm that stops throwing
+# Type=dbus away. Then the drop-in is dead weight and revert should take it.
 ordering_state() {
-    # "covered" is the case worth keeping apart: if ofono2mm ever ships the
-    # After= itself, ours is not needed and revert must not claim a fix that
-    # is now upstream's. systemctl show answers for the unit as systemd has
-    # actually assembled it, drop-ins and all, which is the only reading that
-    # matters here.
+    # The question is whether systemd knows what "ModemManager has started"
+    # means. Upstream's unit is Type=dbus with BusName=..., so the unit is
+    # started when the name is on the bus; ofono2mm's 10-ofono2mm.conf sets
+    # Type=simple, and then it is started when the process exists - which on
+    # 14.9. 14:50 was four and a half seconds too early (defect 23).
+    # systemctl show answers for the unit as systemd assembled it, drop-ins
+    # and all, which is the only reading that matters here.
     local dir="$SYSTEMD_CONF_D/$ORDER_UNIT.d"
     if [ ! -d "$SYSTEMD_CONF_D" ]; then
         echo absent; return
@@ -211,11 +225,9 @@ ordering_state() {
     if [ -f "$dir/$ORDER_DROPIN" ]; then
         echo applied; return
     fi
-    # "After=a.service b.target ..." on one line, so the property name comes
-    # off first: without that, the first entry in the list is read as
-    # "After=ofono.service" and never matches anything.
-    if systemctl show "$ORDER_UNIT" -p After 2>/dev/null \
-       | sed 's/^After=//' | tr ' ' '\n' | grep -qx 'ofono.service'; then
+    if [ "$(systemctl show "$ORDER_UNIT" -p Type --value 2>/dev/null)" = dbus ] \
+       && [ "$(systemctl show "$ORDER_UNIT" -p BusName --value 2>/dev/null)" \
+            = org.freedesktop.ModemManager1 ]; then
         echo covered; return
     fi
     echo missing
@@ -463,8 +475,7 @@ settle_shell() {
         #
         # So ask the other question, which has an answer either way: is the
         # shell older than the ModemManager that is on the bus now? If it is,
-        # it has lived through at least one ModemManager going away, and on
-        # this phone it never gets the icon back by itself.
+        # its one early look may have found nobody.
         shell_age=$(shell_started_at) || shell_age=""
         if [ -z "$shell_age" ]; then
             skip "no client lost ModemManager, and no shell is running"
@@ -477,9 +488,8 @@ settle_shell() {
         warn "no client said it lost ModemManager - but the shell has been up"
         warn "since before this ModemManager started, and a shell that never"
         warn "found one says nothing at all. If the mobile signal icon is"
-        warn "missing, that is why; nothing else is affected. The way back,"
-        warn "when it suits you (see FINDINGS, defects 16 and 18):"
-        warn "    systemctl --user kill --signal=KILL $SHELL_UNIT"
+        warn "missing, that is why; nothing else is affected. The way back:"
+        warn "    sudo systemctl restart $ORDER_UNIT"
         return 0
     fi
     while IFS= read -r c; do
@@ -509,12 +519,12 @@ settle_shell() {
     fi
     [ -n "$shell_hit" ] || { ok "the shell has ModemManager"; return 0; }
 
-    warn "the shell lost ModemManager - the mobile signal icon is gone and"
-    warn "does not come back by itself. Everything else is fine: the modem is"
-    warn "registered, data works, only the drawing of the icon is dead."
-    warn "The way back, when it suits you - it takes the screen with it for a"
-    warn "moment and can end the session outright (see FINDINGS, defect 16):"
-    warn "    systemctl --user kill --signal=KILL $SHELL_UNIT"
+    warn "the shell lost ModemManager - the mobile signal icon is gone."
+    warn "Everything else is fine: the modem is registered, data works, only"
+    warn "the drawing of the icon is dead. The way back is a second, and it"
+    warn "is not the shell (measured on the device 14.9., defect 23 - phosh"
+    warn "picks the modem up again by itself when the name comes back):"
+    warn "    sudo systemctl restart $ORDER_UNIT"
     return 0
 }
 
@@ -646,8 +656,19 @@ $RADIO_CONF.bak.$ts)"
     esac
 
     head_ "start order"
+    for legacy in $LEGACY_ORDER_DROPINS; do
+        [ -f "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$legacy" ] || continue
+        if rm -f "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$legacy"; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            touched=1
+            ok "$legacy removed - it ordered $ORDER_UNIT after ofono.service"
+        else
+            bad "could not remove $legacy"
+            failed=1
+        fi
+    done
     case "$(ordering_state)" in
-        covered) skip "$ORDER_UNIT is already ordered after ofono.service" ;;
+        covered) skip "$ORDER_UNIT already takes the bus name for systemd" ;;
         absent)  skip "$SYSTEMD_CONF_D not found - no systemd?" ;;
         applied)
             # Same reasoning as the cell broadcast policy: present and correct
@@ -666,7 +687,7 @@ $RADIO_CONF.bak.$ts)"
                     failed=1
                 fi
             else
-                skip "$ORDER_UNIT already starts after ofono.service"
+                skip "$ORDER_UNIT already answers to the bus name"
             fi ;;
         missing)
             if [ ! -f "$SHARE/systemd/$ORDER_DROPIN" ]; then
@@ -677,7 +698,7 @@ $RADIO_CONF.bak.$ts)"
                             "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$ORDER_DROPIN"; then
                 systemctl daemon-reload >/dev/null 2>&1 || true
                 touched=1
-                ok "$ORDER_UNIT ordered after ofono.service"
+                ok "$ORDER_UNIT counts as started when the bus name is up"
                 # Deliberately no restart. Restarting ModemManager is what
                 # costs the signal icon in the first place (defect 16), and
                 # the ordering is a boot-time question anyway: there is
@@ -916,6 +937,11 @@ $0 ~ mark {
     fi
 
     head_ "start order"
+    for legacy in $LEGACY_ORDER_DROPINS; do
+        [ -f "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$legacy" ] || continue
+        rm -f "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$legacy" \
+            && ok "$legacy removed"
+    done
     if [ -f "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$ORDER_DROPIN" ]; then
         rm -f "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$ORDER_DROPIN"
         rmdir "$SYSTEMD_CONF_D/$ORDER_UNIT.d" 2>/dev/null || true
@@ -1189,25 +1215,63 @@ and no 5G"; bad_count=$((bad_count+1)) ;;
             bad_count=$((bad_count+1)) ;;
     esac
 
-    # The drop-in is only half the answer. What decides the signal icon is
-    # whether ofono2mm actually had a modem when it took the bus name, and
-    # that is written in its journal for this boot: the "taking the bus name
-    # anyway" line means it did not, and the shell that enumerated after it
-    # found nothing to draw.
     case "$(ordering_state)" in
-        applied|covered) ok "$ORDER_UNIT starts after ofono.service" ;;
-        absent)          skip "no $SYSTEMD_CONF_D - cannot check start order" ;;
+        applied|covered) ok "$ORDER_UNIT is started when its bus name is up" ;;
+        absent)          skip "no $SYSTEMD_CONF_D - cannot check the unit type" ;;
         missing)
-            bad "$ORDER_UNIT is not ordered after ofono.service"
-            bad "     ofono2mm can take the bus name before there is a modem;"
-            bad "     a boot that does comes up with no signal icon"
+            bad "$ORDER_UNIT is Type=simple: systemd calls it started at fork"
+            bad "     it was 4.5 s early on 14.9. 14:50, and a failure to take"
+            bad "     the name at all looks like a healthy service (defect 17)"
             bad_count=$((bad_count+1)) ;;
     esac
-    if journalctl -b -u "$ORDER_UNIT" --no-pager 2>/dev/null \
-       | grep -q 'taking the bus name anyway'; then
-        warn "this boot: ofono2mm took the bus name with no modem behind it"
-        warn "     - the signal icon is missing until the shell restarts"
-        warn "     - 'modemctl settle' says whether this shell is one of those"
+
+    # The drop-in is only half the answer. What correlates with the signal
+    # icon on this boot is the order of two moments: the bus name appearing,
+    # and the shell building the one ModemManager client it builds. On 14.9.
+    # 14:50 the name was late and the phone came up with grey bars; on the
+    # four boots before it the name was there first and the icon was fine.
+    #
+    # This is reported, not asserted. A client built exactly the way phosh
+    # builds its own recovered from a late name in every timing that could be
+    # constructed for it - 0 ms to 800 ms across its own construction, and a
+    # name that appears with nothing behind it at all. The field says one
+    # thing and the bench says another, and until that is settled this has no
+    # business failing a phone (FINDINGS.md, defect 23).
+    #
+    # It also stays quiet once ModemManager has changed hands since: a
+    # restart gives the shell another look, and on 14.9. 15:00 that is what
+    # put the icon back on the device.
+    local name_at shell_at shell_raw delta names_seen
+    name_at=$(journalctl -b -u "$ORDER_UNIT" --no-pager -o short-unix 2>/dev/null \
+              | grep -m1 'is ours' | cut -d' ' -f1 | cut -d. -f1)
+    names_seen=$(journalctl -b -u "$ORDER_UNIT" --no-pager 2>/dev/null \
+                 | grep -c 'is ours')
+    # `date -d ""` is midnight this morning, not an error - so an unstarted
+    # unit, or a systemctl that answers nothing, would read as "the name was
+    # fifteen hours late". The raw value is checked before date ever sees it.
+    shell_raw=$(systemctl show "$SHELL_SYSTEM_UNIT" -p ExecMainStartTimestamp \
+                --value 2>/dev/null)
+    case "$shell_raw" in
+        ""|0|n/a) shell_at= ;;
+        *)        shell_at=$(date -d "$shell_raw" +%s 2>/dev/null) ;;
+    esac
+    if [ -z "$name_at" ]; then
+        warn "no 'is ours' line this boot - cannot say when the name appeared"
+    elif [ -z "$shell_at" ]; then
+        skip "$SHELL_SYSTEM_UNIT has no start time - cannot compare with the shell"
+    else
+        delta=$((shell_at - name_at))
+        if [ "$delta" -ge 0 ]; then
+            ok "bus name was up ${delta}s before $SHELL_SYSTEM_UNIT started"
+        elif [ "${names_seen:-1}" -gt 1 ]; then
+            ok "bus name was late at boot, but $ORDER_UNIT has restarted since"
+        else
+            warn "bus name appeared $(( -delta ))s after $SHELL_SYSTEM_UNIT started"
+            warn "     if the mobile signal icon is missing, this is why - the"
+            warn "     shell looked before anyone owned the name. Nothing else"
+            warn "     is affected, and the way back costs a second:"
+            warn "         sudo systemctl restart $ORDER_UNIT"
+        fi
     fi
 
     # Reported as the channel count, not as "the file is there": the file is

@@ -68,7 +68,7 @@ class ModemManagerBus(MessageBus):
     bearer, not a half-built modem.
     """
 
-    __slots__ = ('_published', '_waiting', '_name_is_ours', 'something_to_show')
+    __slots__ = ('_published', '_waiting', '_name_is_ours')
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -79,9 +79,6 @@ class ModemManagerBus(MessageBus):
         # unowned, in the order they reported it.
         self._waiting = []
         self._name_is_ours = False
-        # Set once there is either a modem worth showing or nothing left to
-        # wait for. main() holds the bus name back until then.
-        self.something_to_show = asyncio.Event()
 
     def modem_ready(self, path):
         """The modem at this path is built; a client may be told about it.
@@ -103,8 +100,6 @@ class ModemManagerBus(MessageBus):
         (`already exists, ignoring`) and the phone had no mobile data for the
         rest of the boot.
         """
-        self.something_to_show.set()
-
         if not self._name_is_ours:
             # Nobody could act on it yet - see name_acquired.
             if path not in self._waiting:
@@ -339,8 +334,9 @@ class MMInterface(ServiceInterface):
     # comes up sixteen seconds after we do - it waits nine of them on
     # IRadio/slot1 - so at startup this ran first, in the "never there" sense:
     #
-    #   * it set something_to_show, which released main() from the wait that
-    #     exists precisely so the name appears together with a modem, and
+    #   * it cut short the wait that then existed in main(), which held the
+    #     bus name back until a modem was built (defect 23 removed that wait
+    #     for reasons of its own), and
     #   * it queued a release of the name, which then ran after take_bus_name
     #     had just taken it.
     #
@@ -383,9 +379,6 @@ class MMInterface(ServiceInterface):
             # Seriously though, that's fucking stupid.
             if retry_counter <= 0:
                 ofono2mm_print("No ril modems found after retries, giving up", self.verbose)
-                # Nothing will be exported, so nothing is gained by making
-                # anyone wait for it.
-                self.bus.something_to_show.set()
                 return
 
             ofono2mm_print("No ril modems found, retrying", self.verbose)
@@ -597,26 +590,34 @@ async def main():
 
     bus.export('/org/freedesktop/ModemManager1', mm_manager_interface)
 
-    # The bus name is the announcement. Everything that watches ModemManager
-    # enumerates the moment the name appears, and some of those clients look
-    # exactly once - phosh draws the signal icon from the objects it finds
-    # then, and nothing later changes its mind. Taking the name before the
-    # modem exists therefore means an icon-less phone until something restarts
-    # the shell, which is what upstream's release-and-request of the name was
-    # really for: a second chance at the enumeration, bought by making the
-    # name disappear - and at the price of every client that asks during that
-    # gap being refused for good (FINDINGS.md, defect 16).
+    # The name goes up first, empty, the way ModemManager itself does it.
     #
-    # So: wait until there is a modem to show, or until it is clear there
-    # will not be one. Measured 14.9.: the modem is ready about 150 ms after
-    # start. The timeout is what keeps a phone with no modem - no SIM, oFono
-    # still coming up - from having no ModemManager on the bus either.
-    try:
-        await asyncio.wait_for(bus.something_to_show.wait(), timeout=10)
-    except asyncio.TimeoutError:
-        print("ofono2mm: no modem after ten seconds - taking the bus name anyway",
-              flush=True)
-
+    # This used to wait for a modem, on the belief that a client enumerates
+    # once when the name appears and never changes its mind - so that a name
+    # taken early meant an icon-less phone. That belief was wrong, and it cost
+    # the boot of 14.9. 14:50 its signal icon (FINDINGS.md, defect 23). Three
+    # measurements on this phone, against this GLib (2.88):
+    #
+    #   * a client built exactly as phosh builds its own - asynchronously,
+    #     with DO_NOT_AUTO_START, while nobody owned the name - was told about
+    #     the modem when ofono2mm finally took the name. It recovered.
+    #   * the same client, watching a name that appears with NOTHING behind
+    #     it, was still told about the object announced five seconds later.
+    #   * fifteen runs walking the name's arrival across the client's own
+    #     construction, 0 ms to 800 ms, missed nothing.
+    #
+    # And the running phosh proved it on the device: restarting ModemManager
+    # brought the icon back by itself, with no shell restart.
+    #
+    # What a client cannot survive is being told about a modem before the
+    # name is owned (defect 21) or about a half-built one (defect 22), and
+    # neither has anything to do with when the name is taken. Both are held
+    # by modem_ready and _published, which are untouched.
+    #
+    # Waiting, on the other hand, does harm that nothing downstream can undo:
+    # oFono spends nine seconds in binder-wait for the Android radio HAL, and
+    # every second the name is missing is a second in which the session's
+    # shell can start, ask, and be answered by nobody.
     await take_bus_name(bus)
 
     # Only now can anyone act on what they hear. Until this line every

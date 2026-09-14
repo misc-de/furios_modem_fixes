@@ -262,9 +262,9 @@ check(
     "await bus.request_name('org.freedesktop.ModemManager1')" in shipped,
 )
 check(
-    "the timeout message is printed, not ofono2mm_print'ed",
-    True,
-    'print("ofono2mm: no modem after ten seconds - taking the bus name anyway",' in shipped,
+    "and no wait for a modem is left before it (defect 23)",
+    False,
+    "something_to_show" in shipped or "no modem after ten seconds" in shipped,
 )
 check("RequestNameReply is imported from dbus_fast", True,
       "from dbus_fast.constants import PropertyAccess, RequestNameReply" in shipped)
@@ -280,22 +280,13 @@ class FakeModem:
         self.unexported = True
 
 
-class FakeEvent:
-    def __init__(self):
-        self.is_set_ = False
-
-    def set(self):
-        self.is_set_ = True
-
-    def is_set(self):
-        return self.is_set_
-
-
 class FakeNameBus:
     """A bus that writes down every attempt to give the name away."""
 
     def __init__(self):
-        self.something_to_show = FakeEvent()
+        # Deliberately no something_to_show: defect 23 took the wait out, and
+        # a method that reaches for it again should raise here rather than
+        # quietly pass.
         self.released = []
 
     async def release_name(self, name):
@@ -349,11 +340,6 @@ check("and forgotten", 0, len(me.modems))
 check("the oFono manager interface is dropped", None, me.ofono_manager_interface)
 check("the bus name is not released", [], me.bus.released)
 check("nothing is queued that could release it later", 0, len(me.loop.tasks))
-check(
-    "and main() is not told to stop waiting for a modem",
-    False,
-    me.bus.something_to_show.is_set(),
-)
 
 shipped = open(SOURCE).read()
 check(
@@ -362,6 +348,57 @@ check(
     "release_name('org.freedesktop.ModemManager1')" in shipped
     or "release_name(MM_BUS_NAME)" in shipped,
 )
+
+print("\n  the name goes up before anything is waited for (defect 23)")
+
+
+def load_function(name):
+    tree = ast.parse(open(SOURCE).read(), SOURCE)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return node
+    print(f"  \033[31mFAIL\033[0m {SOURCE} has no {name}")
+    sys.exit(1)
+
+
+def called_names(stmt):
+    """Every call in this statement, as a dotted name where there is one."""
+    out = []
+    for node in ast.walk(stmt):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        if isinstance(f, ast.Name):
+            out.append(f.id)
+        elif isinstance(f, ast.Attribute):
+            base = f.value.id if isinstance(f.value, ast.Name) else ""
+            out.append(f"{base}.{f.attr}" if base else f.attr)
+    return out
+
+
+main_fn = load_function("main")
+take_at = export_at = None
+for i, stmt in enumerate(main_fn.body):
+    names = called_names(stmt)
+    if take_at is None and "take_bus_name" in names:
+        take_at = i
+    if export_at is None and any(n.endswith("export") for n in names):
+        export_at = i
+
+check("main() takes the bus name", True, take_at is not None)
+check("the manager interface is exported first", True,
+      export_at is not None and take_at is not None and export_at < take_at)
+
+# On the old main.py this list came back with asyncio.wait_for and .wait in
+# it: the name waited ten seconds for a modem, and on the boot of 14.9. 14:50
+# phosh asked in the gap and got nobody.
+waited = []
+for stmt in main_fn.body[:take_at or 0]:
+    for n in called_names(stmt):
+        if n in ("asyncio.wait_for", "asyncio.sleep") or n.endswith(".wait"):
+            waited.append(n)
+check("and nothing at all is waited for before it", [], waited)
+
 
 print("\n  the copy of RequestNameReply above is still the real one")
 try:

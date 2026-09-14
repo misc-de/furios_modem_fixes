@@ -261,7 +261,6 @@ check("nothing is said while the bus name is still unowned", [], heard(bus))
 
 bus.modem_ready(MODEM)
 check("nor when the modem reports itself built", [], heard(bus))
-check("but the daemon may take the name now", True, bus.something_to_show.is_set_)
 
 bus.name_acquired()
 check("exactly one announcement reaches a client", 1, len(bus.sent))
@@ -279,6 +278,37 @@ check("and every other interface the modem has",
       sorted([MODEM_IFACE, THREEGPP, SIMPLE]), sorted(bus.sent[0].body[1]))
 check("a client enumerating now finds the modem and nothing else",
       [MODEM], managed(bus, MM_ROOT))
+
+# ---------------------------------------------------------------------------
+print("\n  the startup main() actually performs since defect 23")
+# The sequence above is the old one, where the name waited for a modem. It is
+# kept because the guard it exercises is still there and still has a window to
+# cover - export and take_bus_name are not one instruction. But the order the
+# daemon runs in now is this one: the name goes up first, empty, and the modem
+# follows whenever oFono manages to produce it.
+bus = Bus()
+FakeAsyncio.loop = FakeLoop()
+
+export(bus, MM_ROOT, MANAGER_IFACE)      # main() exports the manager object
+bus.name_acquired()                      # ...and takes the name at once
+check("a client enumerating at that moment finds no modem", [], managed(bus, MM_ROOT))
+check("and is told nothing", [], heard(bus))
+
+for name in (MODEM_IFACE, THREEGPP, SIMPLE):
+    export(bus, MODEM, name)             # oFono arrives, seconds later
+export(bus, SIM, "org.freedesktop.ModemManager1.Sim")
+export(bus, BEARER, "org.freedesktop.ModemManager1.Bearer")
+check("exporting it announces nothing by itself", [], heard(bus))
+
+bus.modem_ready(MODEM)
+check("reporting it built announces it, once", 1, len(bus.sent))
+check("it is the modem", [MODEM], heard(bus))
+check("from the object manager's path", [MM_ROOT], [m.path for m in bus.sent])
+check("with every interface it has",
+      sorted([MODEM_IFACE, THREEGPP, SIMPLE]), sorted(bus.sent[0].body[1]))
+check("and the manager object is still not one of its own objects",
+      False, MM_ROOT in heard(bus))
+check("a client enumerating now finds it", [MODEM], managed(bus, MM_ROOT))
 
 # ---------------------------------------------------------------------------
 print("\n  the modem is not shown before it is built")
