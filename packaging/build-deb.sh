@@ -50,6 +50,11 @@ install -Dm644 networkmanager/99-furios-modem-resolvconf.conf \
 # it away again, and dpkg would keep putting a conffile back.
 install -Dm644 dbus/furios-modem-cellbroadcast.conf \
     "$STAGE/usr/share/furios-modem/dbus/furios-modem-cellbroadcast.conf"
+# Same reasoning for the start-order drop-in: under /usr/share as a template,
+# put into /etc/systemd/system/ModemManager.service.d by apply. It is a
+# drop-in on somebody else's unit, and revert has to be able to take it back.
+install -Dm644 systemd/50-furios-after-ofono.conf \
+    "$STAGE/usr/share/furios-modem/systemd/50-furios-after-ofono.conf"
 install -Dm644 systemd/furios-modem-fixes.service \
     "$STAGE/usr/lib/systemd/system/furios-modem-fixes.service"
 install -Dm644 systemd/furios-mobile-route.service \

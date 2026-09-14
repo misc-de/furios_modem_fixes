@@ -47,9 +47,11 @@ for f in utils mm_bearer mm_modem mm_modem_simple mm_modem_signal main; do
     fi
 done
 
-sudo mkdir -p "$SHARE/patches" "$SHARE/patched-files" "$SHARE/networkmanager" "$SHARE/dbus"
+sudo mkdir -p "$SHARE/patches" "$SHARE/patched-files" "$SHARE/networkmanager" \
+             "$SHARE/dbus" "$SHARE/systemd"
 sudo install -m644 networkmanager/*.conf "$SHARE/networkmanager/"
 sudo install -m644 dbus/*.conf            "$SHARE/dbus/"
+sudo install -m644 systemd/*.conf "$SHARE/systemd/"
 sudo install -m644 patches/*.patch    "$SHARE/patches/"
 # The ready-made files are the rescue path for the day a patch stops fitting.
 # -type f: a stray __pycache__ from a test run must not take the install down.

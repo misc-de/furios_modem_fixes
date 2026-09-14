@@ -1079,4 +1079,89 @@ check "the tool answers --metric" yes \
 check "the MMS context is found by type, not by number" yes \
       "$(printf '%s\n' "$code" | grep -q 'context_path mms' && echo yes || echo no)"
 
+# --- defect 20: the start order that decides the signal icon ----------------
+#
+# ModemManager.service is ofono2mm, and its own drop-in says
+# Requires=ofono.service with no After=. Requires is not an ordering, so both
+# start at once, oFono sits in binder-wait, and ofono2mm gives up waiting and
+# takes the bus name with nothing behind it. Measured 14.9.: the phone came up
+# with no signal icon and grey bars.
+#
+# systemctl is stubbed for this block, and has to be: "is the unit already
+# ordered after oFono" is a question about the machine the test happens to run
+# on, and on this phone the answer changes the moment apply has run once.
+SYSD="$WORK/systemd-system"; mkdir -p "$SYSD"
+STUB="$WORK/stub-bin"; mkdir -p "$STUB"
+cat > "$STUB/systemctl" <<'STUBEOF'
+#!/bin/bash
+# Only the one question this block is about; everything else answers the way
+# an absent unit does, which is what the rest of status already copes with.
+if [ "${1:-}" = show ] && [ "${3:-}" = -p ] && [ "${4:-}" = After ]; then
+    printf 'After=%s\n' "${STUB_AFTER:-basic.target}"
+    exit 0
+fi
+exit 0
+STUBEOF
+chmod +x "$STUB/systemctl"
+
+order_state() {
+    local out
+    out=$(env PATH="$STUB:$PATH" \
+              MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+              MODEMCTL_SYSTEMD_CONF_D="$1" \
+              bash "$ROOT/modemctl" status 2>&1)
+    case "$out" in
+        *"starts after ofono.service"*)          echo applied ;;
+        *"is not ordered after ofono.service"*)  echo missing ;;
+        *"cannot check start order"*)            echo absent ;;
+        *)                                       echo unknown ;;
+    esac
+}
+
+check "shipped state is not mistaken for fixed" missing "$(order_state "$SYSD")"
+
+mkdir -p "$SYSD/ModemManager.service.d"
+install -m644 "$ROOT/systemd/50-furios-after-ofono.conf" \
+        "$SYSD/ModemManager.service.d/50-furios-after-ofono.conf"
+check "the drop-in is what makes it applied" applied "$(order_state "$SYSD")"
+
+rm -rf "$SYSD/ModemManager.service.d"
+check "and removing it is noticed" missing "$(order_state "$SYSD")"
+
+# If ofono2mm ever ships the After= itself, ours is not needed and must not be
+# reported as missing - nor put back by apply, nor claimed by revert.
+STUB_AFTER=ofono.service
+export STUB_AFTER
+check "an upstream that fixes this itself counts as covered" applied \
+      "$(order_state "$SYSD")"
+unset STUB_AFTER
+
+check "a phone without systemd is not a failure" absent \
+      "$(order_state "$WORK/no-such-systemd")"
+
+# The drop-in has to say the one thing it exists to say. A file that installs
+# cleanly and orders nothing would pass every check above.
+check "the drop-in actually orders after oFono" yes \
+      "$(grep -q '^After=ofono.service$' \
+              "$ROOT/systemd/50-furios-after-ofono.conf" && echo yes || echo no)"
+check "and it does not restart anything to do it" yes \
+      "$(grep -qE '^(ExecStart|Restart)' \
+              "$ROOT/systemd/50-furios-after-ofono.conf" && echo no || echo yes)"
+
+# apply puts it in place and revert takes it away - both without root, both
+# against the work tree, so the real unit directory is never touched here.
+rm -rf "$SYSD/ModemManager.service.d"
+env PATH="$STUB:$PATH" MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+    MODEMCTL_SYSTEMD_CONF_D="$SYSD" MODEMCTL_SHARE="$ROOT" \
+    bash "$ROOT/modemctl" apply -q >/dev/null 2>&1
+check "apply installs the drop-in" yes \
+      "$([ -f "$SYSD/ModemManager.service.d/50-furios-after-ofono.conf" ] \
+         && echo yes || echo no)"
+env PATH="$STUB:$PATH" MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+    MODEMCTL_SYSTEMD_CONF_D="$SYSD" MODEMCTL_SHARE="$ROOT" \
+    bash "$ROOT/modemctl" revert -q >/dev/null 2>&1
+check "revert takes it away again" yes \
+      "$([ -f "$SYSD/ModemManager.service.d/50-furios-after-ofono.conf" ] \
+         && echo no || echo yes)"
+
 summary

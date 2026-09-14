@@ -16,7 +16,8 @@ VERSION=0.1.0
 if [ "$(id -u)" -eq 0 ]; then
     for v in MODEMCTL_TARGET MODEMCTL_RADIO_CONF MODEMCTL_SHARE MODEMCTL_PATCHES \
              MODEMCTL_NM_CONF_D MODEMCTL_RESOLV MODEMCTL_NM_RESOLV \
-             MODEMCTL_DBUS_CONF_D MODEMCTL_CBS_DB MODEMCTL_PROFILE; do
+             MODEMCTL_DBUS_CONF_D MODEMCTL_CBS_DB MODEMCTL_PROFILE \
+             MODEMCTL_SYSTEMD_CONF_D; do
         if [ -n "${!v:-}" ]; then
             echo "refusing to honour $v as root - that would be an arbitrary-file patch" >&2
             exit 3
@@ -56,6 +57,17 @@ NM_RESOLV=${MODEMCTL_NM_RESOLV:-/run/NetworkManager/resolv.conf}
 DBUS_CONF_D=${MODEMCTL_DBUS_CONF_D:-/etc/dbus-1/system.d}
 CB_DROPIN=furios-modem-cellbroadcast.conf
 CB_IFACE=org.freedesktop.ModemManager1.Modem.CellBroadcast
+
+# Defect 20. ModemManager.service is ofono2mm here, and ofono2mm's drop-in
+# says Requires=ofono.service with no After=. Requires is not an ordering:
+# systemd starts both at once, oFono sits in binder-wait for the radio HAL,
+# and ofono2mm runs out of patience and takes the bus name with no modem
+# behind it. phosh enumerates once, finds nothing, and the phone has grey
+# bars until the shell is restarted. Not an ofono2mm file - it is a drop-in
+# of our own on top of theirs, so an update of that package does not wipe it.
+SYSTEMD_CONF_D=${MODEMCTL_SYSTEMD_CONF_D:-/etc/systemd/system}
+ORDER_DROPIN=50-furios-after-ofono.conf
+ORDER_UNIT=ModemManager.service
 
 # Defect 14. The database cellbroadcastd takes its channel list from subscribes
 # de and nl to EU-Alert level 2 with three of its four channels: 4371, 4384 and
@@ -186,6 +198,29 @@ resolvconf_state() {
 #   applied / covered / missing / absent
 # "covered" is the day this stops being ours: a ModemManager update that grows
 # the allow itself. Then the drop-in is dead weight and revert should take it.
+ordering_state() {
+    # "covered" is the case worth keeping apart: if ofono2mm ever ships the
+    # After= itself, ours is not needed and revert must not claim a fix that
+    # is now upstream's. systemctl show answers for the unit as systemd has
+    # actually assembled it, drop-ins and all, which is the only reading that
+    # matters here.
+    local dir="$SYSTEMD_CONF_D/$ORDER_UNIT.d"
+    if [ ! -d "$SYSTEMD_CONF_D" ]; then
+        echo absent; return
+    fi
+    if [ -f "$dir/$ORDER_DROPIN" ]; then
+        echo applied; return
+    fi
+    # "After=a.service b.target ..." on one line, so the property name comes
+    # off first: without that, the first entry in the list is read as
+    # "After=ofono.service" and never matches anything.
+    if systemctl show "$ORDER_UNIT" -p After 2>/dev/null \
+       | sed 's/^After=//' | tr ' ' '\n' | grep -qx 'ofono.service'; then
+        echo covered; return
+    fi
+    echo missing
+}
+
 cellbroadcast_state() {
     [ -d "$DBUS_CONF_D" ] || { echo absent; return; }
     if [ -f "$DBUS_CONF_D/$CB_DROPIN" ] && grep -q "$CB_IFACE" "$DBUS_CONF_D/$CB_DROPIN"; then
@@ -610,6 +645,50 @@ $RADIO_CONF.bak.$ts)"
             fi ;;
     esac
 
+    head_ "start order"
+    case "$(ordering_state)" in
+        covered) skip "$ORDER_UNIT is already ordered after ofono.service" ;;
+        absent)  skip "$SYSTEMD_CONF_D not found - no systemd?" ;;
+        applied)
+            # Same reasoning as the cell broadcast policy: present and correct
+            # are different questions, and a phone that already has an older
+            # copy of this file would otherwise never get a correction to it.
+            if [ -f "$SHARE/systemd/$ORDER_DROPIN" ] \
+               && ! cmp -s "$SHARE/systemd/$ORDER_DROPIN" \
+                           "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$ORDER_DROPIN"; then
+                if install -m644 "$SHARE/systemd/$ORDER_DROPIN" \
+                        "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$ORDER_DROPIN"; then
+                    systemctl daemon-reload >/dev/null 2>&1 || true
+                    touched=1
+                    ok "start order drop-in updated"
+                else
+                    bad "could not update $ORDER_DROPIN"
+                    failed=1
+                fi
+            else
+                skip "$ORDER_UNIT already starts after ofono.service"
+            fi ;;
+        missing)
+            if [ ! -f "$SHARE/systemd/$ORDER_DROPIN" ]; then
+                bad "$ORDER_DROPIN not found in $SHARE/systemd"
+                failed=1
+            elif mkdir -p "$SYSTEMD_CONF_D/$ORDER_UNIT.d" \
+                 && install -m644 "$SHARE/systemd/$ORDER_DROPIN" \
+                            "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$ORDER_DROPIN"; then
+                systemctl daemon-reload >/dev/null 2>&1 || true
+                touched=1
+                ok "$ORDER_UNIT ordered after ofono.service"
+                # Deliberately no restart. Restarting ModemManager is what
+                # costs the signal icon in the first place (defect 16), and
+                # the ordering is a boot-time question anyway: there is
+                # nothing it can do for a phone that is already up.
+                say "      (applies at the next boot)"
+            else
+                bad "could not write $SYSTEMD_CONF_D/$ORDER_UNIT.d/$ORDER_DROPIN"
+                failed=1
+            fi ;;
+    esac
+
     head_ "DNS"
     case "$(resolvconf_state)" in
         applied) skip "resolv.conf already points at NetworkManager" ;;
@@ -834,6 +913,18 @@ $0 ~ mark {
         fi
     else
         skip "no alert channel edit of ours to undo"
+    fi
+
+    head_ "start order"
+    if [ -f "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$ORDER_DROPIN" ]; then
+        rm -f "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$ORDER_DROPIN"
+        rmdir "$SYSTEMD_CONF_D/$ORDER_UNIT.d" 2>/dev/null || true
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        ok "$ORDER_DROPIN removed"
+        warn "with this undone, ofono2mm and oFono start at the same time again"
+        warn "     - the boot that loses the race comes up with grey signal bars"
+    else
+        skip "no start order drop-in of ours to remove"
     fi
 
     head_ "cell broadcast"
@@ -1097,6 +1188,27 @@ and no 5G"; bad_count=$((bad_count+1)) ;;
             bad "     with Wi-Fi off, routing works and no name resolves"
             bad_count=$((bad_count+1)) ;;
     esac
+
+    # The drop-in is only half the answer. What decides the signal icon is
+    # whether ofono2mm actually had a modem when it took the bus name, and
+    # that is written in its journal for this boot: the "taking the bus name
+    # anyway" line means it did not, and the shell that enumerated after it
+    # found nothing to draw.
+    case "$(ordering_state)" in
+        applied|covered) ok "$ORDER_UNIT starts after ofono.service" ;;
+        absent)          skip "no $SYSTEMD_CONF_D - cannot check start order" ;;
+        missing)
+            bad "$ORDER_UNIT is not ordered after ofono.service"
+            bad "     ofono2mm can take the bus name before there is a modem;"
+            bad "     a boot that does comes up with no signal icon"
+            bad_count=$((bad_count+1)) ;;
+    esac
+    if journalctl -b -u "$ORDER_UNIT" --no-pager 2>/dev/null \
+       | grep -q 'taking the bus name anyway'; then
+        warn "this boot: ofono2mm took the bus name with no modem behind it"
+        warn "     - the signal icon is missing until the shell restarts"
+        warn "     - 'modemctl settle' says whether this shell is one of those"
+    fi
 
     # Reported as the channel count, not as "the file is there": the file is
     # only the permission. What matters is whether the list actually reached

@@ -2043,6 +2043,92 @@ data up on an interface, and NetworkManager not carrying it.
 
 ---
 
+## 20. Requires is not an ordering, and the icon pays for it
+
+Reported on 14 September, minutes after a boot: no LTE icon, and the signal
+bars all grey. The modem was in perfect health the whole time.
+
+```
+mmcli -m 0     state: registered   access tech: lte   signal quality: 12% (recent)
+GetManagedObjects   exactly one object, the modem, all fifteen interfaces
+```
+
+So this is not defect 12 (extra objects in the ObjectManager), not 16 (the bus
+name handed back), not 17 or 18 (no owner for the name at all). The name was
+owned, by us, from before the shell started. Everything downstream of
+ModemManager was right. What was wrong is *when*.
+
+The journal of that boot, to the second:
+
+```
+13:27:45  ModemManager.service started            (that is ofono2mm)
+13:27:53  ofono.service: ExecStartPre begins      binder-wait, for the radio HAL
+13:27:57  ofono2mm: no modem after ten seconds - taking the bus name anyway
+13:27:57  ofono2mm: org.freedesktop.ModemManager1 is ours (PRIMARY_OWNER)
+13:27:59  phosh starts                            enumerates: nothing there
+13:28:02  binder-wait returns, ofono.service active
+13:28:02+ the modem appears, and is exported
+```
+
+phosh draws the signal icon from the objects it finds when it enumerates, and
+nothing later changes its mind - which is the whole reason [defect
+16](#16-the-restart-that-takes-the-signal-icon-with-it) mattered and why taking
+the bus name early is written in this tree as a last resort. On this boot the
+last resort *was* the normal path.
+
+**ofono2mm's own drop-in orders nothing.** It says:
+
+```
+[Unit]
+Requires=ofono.service NetworkManager.service
+```
+
+`Requires=` is a dependency, not an ordering. systemd is explicit about this:
+it starts both units at the same time unless an `After=` says otherwise. So
+ofono2mm and oFono start together, and oFono then spends its `ExecStartPre` in
+`binder-wait` for `android.hardware.radio@1.0::IRadio/slot1` - nine seconds on
+this phone, on this boot. ofono2mm waits ten seconds for a modem and gives up
+five seconds too early.
+
+Nine seconds is not a constant. That is why this is a boot that *sometimes*
+comes up without an icon: the two numbers are close, and which one wins is a
+question about how quickly the Android side comes up that morning.
+
+The fix is one line, in a drop-in of our own on top of theirs:
+
+```
+[Unit]
+After=ofono.service
+```
+
+Ordering it after oFono makes the ten-second wait in `main()` what it was
+written to be - the net under a phone with no SIM and no modem coming - rather
+than the path every cold boot takes. Nothing is restarted to do it: restarting
+ModemManager is what costs the icon in the first place, and an ordering can do
+nothing for a phone that is already up. It applies at the next boot.
+
+`Requires=ofono.service` was already there, so this adds no new way to fail:
+if oFono never comes up, ModemManager was going down with it before this
+change too. What it adds is at most a wait - oFono's own `TimeoutStartSec` is
+90 s - in exchange for the icon.
+
+`modemctl status` now reports both halves separately, because they answer
+different questions:
+
+```
+ok    ModemManager.service starts after ofono.service     <- will the next boot be right
+warn  this boot: ofono2mm took the bus name with no modem behind it
+warn       - the signal icon is missing until the shell restarts
+```
+
+The second line reads the journal of the boot that actually happened. A phone
+fixed for the future is still a phone without an icon right now, and saying
+only the first would be the same mistake `settle` made before defect 18: an
+answer to an easier question, in the voice of an answer to the real one.
+
+
+---
+
 ## What it costs, measured
 
 Numbers from the phone, not estimates. Three things here run all the time -

@@ -87,7 +87,7 @@ identify the tower you are on, which places you within a kilometre or so. The
 signal levels do not. Nothing is stored or sent - it prints and exits - but a
 bug report is a public place.
 
-## The eighteen defects
+## The twenty defects
 
 | # | What | Where | Symptom |
 |---|---|---|---|
@@ -110,6 +110,7 @@ bug report is a public place.
 | 17 | Failing to take the bus name is reported through a logger that is off, the reply saying somebody else owns it is never read, and giving up leaves the daemon running | `main.py`, our own fix for 16 | ofono2mm is `active (running)` with nothing owning `org.freedesktop.ModemManager1` - **a whole boot with no mobile data**, and one line in the journal |
 | 18 | oFono not being on the bus yet is reported as oFono having left, and that path gives the bus name back - after `take_bus_name` has just taken it | `main.py`, our own fix for 16 | the name is ours one second after boot and gone the next, and nothing ever asks for it again - **another whole boot with no mobile data** |
 | 19 | A cell that drops burns NetworkManager's four autoconnect attempts in two seconds, and the blocked profile outlives the outage | NetworkManager's defaults, and our own supervisor answering a smaller question | the radio comes back and **mobile data does not** - an interface with an address, a default route and no DNS server at all, until somebody switches the connection on by hand |
+| 20 | ofono2mm's unit requires oFono but is not ordered after it, so both start at once while oFono waits on the radio HAL | `ModemManager.service` drop-in, upstream ofono2mm | ofono2mm takes the bus name with no modem behind it, the shell enumerates nothing, and the phone boots with **no signal icon and grey bars** on a perfectly healthy modem |
 
 Numbers behind each of these, and why they are what they are, in
 [FINDINGS.md](FINDINGS.md).
@@ -253,7 +254,8 @@ the device, with a SIM in it.
     original-files/      untouched originals from the package, for the tests
     networkmanager/      the DNS drop-in that takes resolvconf out of the path
     dbus/                the bus policy that lets emergency alert channels be set
-    systemd/, apt/       the two things that survive a package update
+    systemd/             the units, and the drop-in that orders ofono2mm after oFono
+    apt/                 the hook that puts the patches back after a package update
     upstream/            bug reports, ready to file
     tests/               what can be checked without a radio
     packaging/           build-deb.sh
