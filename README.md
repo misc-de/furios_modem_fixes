@@ -1,271 +1,75 @@
 # furios_modem_fixes
 
-Twenty-three defects in the FuriOS modem stack, and a way to keep them fixed.
+Fixes twenty-three defects in the FuriOS modem stack on the FuriPhone FLX1, and
+keeps them fixed across package updates.
 
-Out of the box on this phone the data connection often only came up after a
-reboot, the signal icon sat at the emptiest bar regardless of reception, and
-mobile data never carried a single packet of anybody's traffic. None of it was
-a radio problem. Eight of them are in `ofono2mm`, one is in oFono's binder
-configuration, and one is in the state oFono keeps between boots - and one of
-those eight, the signal bar, has a second cause inside oFono itself, where LTE
-RSRP and RSRQ arrive swapped.
+As it comes, the phone shows symptoms that look like bad reception but are not:
+mobile data that only comes up after a reboot, a signal bar stuck at its lowest
+regardless of actual strength, no working route for mobile traffic at all, and
+emergency alert channels the modem never listens on. Most of the causes sit in
+`ofono2mm`, the rest in oFono's configuration, in NetworkManager's defaults and
+in one database belonging to a third package.
 
-The remaining six are different in kind: nothing gets patched, because there
-is no code of anybody's to patch. Number 7 is about what oFono *says* about the
-data call - it reports the interface's own address as the gateway - and the fix
-is to install the route that claim prevents. Number 8 is a resolver that is
-filled correctly and asked by nobody, which is how FuriOS wires up DNS.
-Together those two are why switching Wi-Fi off left this phone with no network
-at all. Number 9 is a data call that stays down once it drops, so something has
-to be watching. Number 19 is what that watch turned out to be missing: a data
-call the phone cannot use, because NetworkManager spent its four autoconnect
-attempts inside the same dead second and stayed blocked long after the cell
-came back. Number 13 is a permission that was never written down:
-ModemManager grew a Cell Broadcast interface and a polkit action to guard it,
-but no rule in its bus policy, so the bus turns the call away before polkit is
-ever asked - and the channels a phone must listen on to receive a public
-emergency alert stay at whatever the modem happened to default to. Number 14 is
-one line in a database belonging to a third package, and the only one here that
-is wrong upstream as well.
-
-The fixes live in files owned by the `ofono2mm` package, so **every update of
-that package removes them**. That is the entire reason this repository is more
-than a patch file: a boot unit and an apt hook put them back, and `modemctl`
-tells you whether they are in place and whether they are working.
-
-**Two files:** this one says what it does and how to run it.
-**[FINDINGS.md](FINDINGS.md)** says why - every measurement, and the traps that
-cost hours.
+Ten of the fixes are patches to files owned by the `ofono2mm` package, so
+**every update of that package removes them**. That is why this is more than a
+patch file: a boot unit and an apt hook put them back, and `modemctl` tells you
+whether they are in place and whether they are working.
 
 ## Install
 
     git clone https://github.com/misc-de/furios_modem_fixes
     cd furios_modem_fixes && ./install.sh
 
-or build a package:
+or as a package:
 
     ./packaging/build-deb.sh --install
 
-Both apply everything immediately and enable the three units - the one that
-puts the patches back after a package update, the one that keeps a default
-route on mobile data, and the one that brings the data context back when it
-drops. Reversible with `./uninstall.sh` or
-`apt remove furios-modem-fixes`.
+Both apply everything immediately and enable three units: one that restores the
+patches after a package update, one that keeps a default route on mobile data,
+and one that brings the data context back when it drops. Undo with
+`./uninstall.sh` or `apt remove furios-modem-fixes`.
 
-## modemctl
+## Usage
 
     modemctl status     what is in place, and what the stack says
     modemctl apply      apply whatever is missing (idempotent, needs root)
     modemctl revert     back to the shipped state
-    modemctl check      status plus runtime checks (polling, loops)
+    modemctl check      status plus runtime checks
     modemctl signal     what the radio really receives, cross-checked
     modemctl settle     after restarting ModemManager by hand: puts
-                        NetworkManager back in order and says who else lost
-                        the modem (needs root)
+                        NetworkManager back in order (needs root)
 
 `modemctl signal` is the one worth knowing. Neither the icon nor
-`mmcli --signal-get` could be trusted before the fix, so it reads oFono
+`mmcli --signal-get` could be trusted before these fixes, so it reads oFono
 directly and checks the answer against `AT+CESQ`, an independent path through
 the modem:
 
     technology     lte
-    EARFCN         350
     RSRP           -120 dBm
     RSRQ           -10 dB
-    RSSI           -111 dBm   (ASU 1)
     bar            26 %
 
     AT+CESQ        RSRP -119 dBm, RSRQ -10 dB
                    agrees within 1 dB
 
-It imports its conversions from the patched `mm_modem_signal.py` rather than
-keeping a copy, so it measures the code that is actually running - and says so
-plainly when the fix is not installed.
-
-One thing to know before pasting its output anywhere: `cell` and `EARFCN`
+One thing before pasting its output into a bug report: `cell` and `EARFCN`
 identify the tower you are on, which places you within a kilometre or so. The
-signal levels do not. Nothing is stored or sent - it prints and exits - but a
-bug report is a public place.
-
-## The twenty-three defects
-
-| # | What | Where | Symptom |
-|---|---|---|---|
-| 1 | The stored radio preference asks for NR, which this modem rejects outright | oFono state | RIL error 44 once a second, no clean cell reselection |
-| 2 | MMS context with a placeholder APN | oFono state | ~1,700 failed activations an hour |
-| 3 | Netmask never copied into `Ip4Config` | `utils.py`, `mm_bearer.py`, `mm_modem.py` | address configured as a `/0` |
-| 4 | NM profile asks for IPv6 on an IPv4-only context | `mm_modem_simple.py`, `mm_bearer.py` | `modem IP method unsupported` on every activation |
-| 5 | `active_connect` never cleared on the failure path | `mm_modem_simple.py`, `mm_bearer.py` | NetworkManager waits in `prepare` until you reboot |
-| 6 | No signal strength, and RSRP/RSRQ swapped and unsigned | `mm_modem_signal.py`, `mm_modem.py`, `mm_modem_simple.py` | bar stuck at 0%, `rsrp=+10 dBm` |
-| 7 | Data call's `Gateway` reported as the interface's own address | oFono | either no default route at all, or one that silently drops every packet |
-| 8 | `resolvconf` is a symlink to `resolvectl` and fails on every network change | FuriOS NM config | `/etc/resolv.conf` points at a resolver that only ever learns Wi-Fi's servers |
-| 9 | Nothing brings the data context back after a failed data call | the system as shipped | mobile data stays down until the next reboot |
-| 10 | Interfaces are appended to the modem's port list and never removed | `mm_modem.py`, `mm_bearer.py` | NM binds the resolver to a dead interface; every lookup REFUSED with Wi-Fi off |
-| 11 | An oFono interface asked for before oFono has it is never asked again | `mm_modem.py` | `CurrentCapabilities` pinned to LTE alone and `SupportedModes` **empty**, for the whole uptime |
-| 12 | SIM and bearer objects announced through the ObjectManager, which ModemManager reserves for modems | `main.py` | phosh grabs a bearer, finds no modem on it and shows **no signal icon at all** |
-| 13 | ModemManager's bus policy has no rule for the CellBroadcast interface it gained in 1.24 | `/etc/dbus-1/system.d` | the system bus rejects `SetChannels`, so **emergency alert channels never reach the modem** |
-| 14 | The alert channel database lists EU-Alert level 2 for `de` and `nl` without channel 4372, while listing its local-language counterpart | `serviceproviders.xml` | **"extreme, immediate, likely" warnings sent on 4372 go unheard** |
-| 15 | The one of three places that builds a bearer for `Simple.Connect` never subscribes to its oFono context | `mm_modem.py` | bearer stays `connected: no` with no interface, NM fails every activation with `missing data port` - **no mobile data for the whole boot** |
-| 16 | While ModemManager hands its bus name over, a client's `GetManagedObjects` matches no `<allow>` rule and is denied | the system bus, and clients that do not retry | the **signal icon disappears for good** after a restart of ModemManager - phosh, chatty and wireplumber all give up at once |
-| 17 | Failing to take the bus name is reported through a logger that is off, the reply saying somebody else owns it is never read, and giving up leaves the daemon running | `main.py`, our own fix for 16 | ofono2mm is `active (running)` with nothing owning `org.freedesktop.ModemManager1` - **a whole boot with no mobile data**, and one line in the journal |
-| 18 | oFono not being on the bus yet is reported as oFono having left, and that path gives the bus name back - after `take_bus_name` has just taken it | `main.py`, our own fix for 16 | the name is ours one second after boot and gone the next, and nothing ever asks for it again - **another whole boot with no mobile data** |
-| 19 | A cell that drops burns NetworkManager's four autoconnect attempts in two seconds, and the blocked profile outlives the outage | NetworkManager's defaults, and our own supervisor answering a smaller question | the radio comes back and **mobile data does not** - an interface with an address, a default route and no DNS server at all, until somebody switches the connection on by hand |
-| 20 | ofono2mm's unit requires oFono but is not ordered after it, so both start at once while oFono waits on the radio HAL | `ModemManager.service` drop-in, upstream ofono2mm | ofono2mm takes the bus name with no modem behind it, the shell enumerates nothing, and the phone boots with **no signal icon and grey bars** on a perfectly healthy modem |
-| 21 | The modem is announced before anyone owns the bus name - the announcement itself set the event `main()` waits on, so every announcement went out 59 ms too early, by construction | `main.py` (ours) | NetworkManager builds its modem from a proxy with no name owner and keeps it all boot: LTE registered, modem healthy, **no mobile data** |
-| 22 | The manager object announced as one of its own managed objects, and the modem announced before `State` and `Sim` were filled in | `main.py` (ours) | NetworkManager discards the one and keeps the other as `state: failed` for the rest of the boot - **no mobile data** |
-| 23 | Our own defect 20 fix ordered ModemManager behind oFono's 8.7 s in `binder-wait`, and `main()` then waited again for a modem - so the bus name appeared after the shell had already asked | `ModemManager.service` drop-in and `main.py` (ours) | the phone boots with **no signal icon and no signal strength** on a perfectly healthy modem, all measurements green |
-
-Numbers behind each of these, and why they are what they are, in
-[FINDINGS.md](FINDINGS.md).
-
-Number 1 carries a correction worth reading before trusting anything else
-here. For a day this repository "fixed" it with `radioInterface = 1.6`, and
-the error loop did stop. But `1.6` is not a value `ofono-binder-plugin`
-accepts - its table ends at `1.5` - and an unrecognised value falls back to
-`1.2` silently. The loop stopped because at 1.2 the plugin drops NR from the
-technology list, so nothing asked for it any more. The phone ran two interface
-versions below the one it shipped with, lost 5G from the settings, and the
-config file said 1.6 the whole time. See [FINDINGS.md](FINDINGS.md#1-runaway-loop-the-modem-rejects-the-preferred-mode).
-
-Numbers 7, 8, 10 and 11 are the ones nobody notices, because everything reports itself
-healthy: the modem is registered, the bearer is connected, the interface has an
-address, `mmcli` is happy, names resolve, and `ip route` can even show a
-default route - one measured at 100% packet loss. There is simply no way out of the
-phone, and no resolver that will answer once Wi-Fi is gone. All three only show
-the moment Wi-Fi goes away. `furios-mobile-route` installs the route and keeps it
-installed, `modemctl apply` fixes the DNS wiring, `furios-mobile-context` puts
-the data call back when it dies, and `modemctl status` calls out any of them
-when it is missing.
-
-Number 19 is the same trap one layer up, and it caught this repository's own
-supervisor. Putting the data call back is not the same as the phone having
-mobile data: NetworkManager owns the address, the DNS servers and what the UI
-shows, and after a cell drops it blocks the cellular profile and stays blocked.
-A phone in that state has a route to the carrier and not one server to resolve
-a name through. `furios-mobile-context` now watches both halves.
-
-Number 12 is the same kind of trap seen from the other side. There the stack
-lied and the phone worked; here the stack is right about everything - modem
-registered, bearer up, packets flowing - and the phone still shows no signal,
-because the one client that draws the icon was handed a bearer where it
-expected a modem. Nothing in `mmcli`, `ip`, or `ping` can see it. Only
-`journalctl | grep phosh` can:
-
-    phosh: mm_object_get_modem: runtime check failed: (MM_IS_MODEM (modem))
-    phosh: modem_init_modem: assertion 'self->modem' failed
-
-Number 16 is the third way to lose the same icon. While the ModemManager bus
-name passes from one process to the next, nobody owns it, and a policy rule
-keyed on that name cannot match - so a client asking in that gap is denied,
-and none of them ever asks again. The gap is not systemd's: ofono2mm gives the
-name up and takes it back twice a moment after it starts, on purpose, to make
-clients notice the modem. It is what makes them blind instead.
-
-Number 17 is what the fix for 16 cost before it was found. Holding the bus
-name back until there is a modem to show is right, but the code that took it
-afterwards reported failure through `ofono2mm_print` - silent without `-v`,
-which the service does not use - ignored `request_name`'s answer, and on
-failure returned from `main()`. That does not end the process: `asyncio.run`
-waits on the tasks that outlive it, so systemd sees a healthy service while
-nothing on the bus answers for ModemManager. Measured after the reboot on
-14.9.: two minutes up, oFono online, `mmcli -L` saying "couldn't find the
-ModemManager process in the bus". A restart by hand always fixed it, because
-by then oFono is already there - at boot ofono2mm starts seventeen seconds
-first, waiting on `binder-wait` for the radio.
-
-Number 18 was found by the reboot meant to prove 17, in the same two lines of
-journal. At boot oFono is not on the bus yet, and the only way ofono2mm has of
-saying that is to call the method written for oFono *leaving* - which set the
-event that lets the name be taken early and queued a release of it. The queue
-is what makes it silent: the release runs after the name was taken, one second
-into the boot, and nothing asks for it a second time when oFono arrives
-fifteen seconds later. Releasing the name was upstream's trick for making
-clients enumerate again, and number 16 replaced it with a proper announcement,
-so it now goes; the phone keeps its ModemManager whether oFono is early, late
-or absent.
-
-`modemctl` will not restart the shell for you, and the reason is worth
-knowing: `mobi.phosh.Shell.service` answers a kill with
-`OnFailure=gnome-session-shutdown.target`, `replace-irreversibly`. Measured
-twice on 14.9.: once the shell was back in two seconds, once the phone had no
-shell at all until it was started by hand. So `settle_shell` reports - who lost
-ModemManager, that the icon is the only casualty, and what the command is -
-after every restart `modemctl` does itself, and on demand with `modemctl
-settle` after one you did by hand.
-
-## When a patch stops fitting
-
-An ofono2mm update can move the code a patch anchors on. `modemctl` then says
-so and **changes nothing** - a patch that lands in the wrong place is worse
-than no patch:
-
-    FAIL  mm_modem_signal.py: patch does not fit (upstream moved)
-          ready-made file in /usr/share/furios-modem/patched-files/... - check by hand
-
-Three of the fourteen are already fixed or half-fixed upstream, so this is expected to
-happen eventually.
-
-The same message used to appear for a much less interesting reason: **a patch
-of ours that changed**. The installed file was then neither what ofono2mm
-ships nor what the new patch produces, so it applied in neither direction -
-and the new fix could not be installed at all onto a phone that already had
-this package. The package now reverts itself on upgrade, from the old version,
-while its patches still describe the files on disk:
-
-    modemctl revert --patches-only     # files back, configuration untouched
-
-which is what `prerm upgrade` calls. Configuration is left alone on purpose: a
-full revert would put `radioInterface` back to 1.4, and an upgrade that stops
-between the two halves would leave the phone on the value that brings back the
-Error-44 loop.
-
-## Root, cost, and what is checked
-
-`apply` and `revert` write under `/usr/lib` and need root. `status`, `signal`
-and most of `check` do not, and do not ask. What `apply` tests is whether it
-can write the files, not `id -u` - a better message when it cannot, and the
-reason the tests can exercise it without root.
-
-Measured on the phone: the 30-second poll costs 0.005% of a core in ofono2mm
-and at most 0.068% in oFono; `apply` as a no-op, which is what the boot unit
-and the apt hook run, takes 41 ms. Numbers and method in
-[FINDINGS.md](FINDINGS.md).
+signal levels do not.
 
 ## Tests
 
-    ./tests/run-tests.sh
+    ./tests/run-tests.sh        # never with sudo
 
-What can be decided at a desk: that every patch reproduces the file we ship,
-byte for byte, and reverts cleanly; that the signal conversions turn real
-readings taken off this phone into the right numbers; that `modemctl`
-recognises a file it must not touch; that the route watcher picks the default
-bearer rather than the IMS one, and writes nothing when there is nothing to
-write; that half a DNS fix is never reported as a whole one; that whatever builds a
-bearer also subscribes to its oFono context; and - most of it - that the
-context supervisor refuses to act, on mobile data somebody switched off, on a
-radio that is not registered, and during a call.
-
-What cannot: whether the bar on the screen moves. That is `modemctl check`, on
-the device, with a SIM in it.
-
-## Layout
-
-    modemctl             the tool
-    tools/               the signal readout, the route watcher, the context supervisor
-    patches/             the fixes, as unified diffs
-    patched-files/       the finished files - the rescue path when a patch stops fitting
-    original-files/      untouched originals from the package, for the tests
-    networkmanager/      the DNS drop-in that takes resolvconf out of the path
-    dbus/                the bus policy that lets emergency alert channels be set
-    systemd/             the units, and the drop-in that orders ofono2mm after oFono
-    apt/                 the hook that puts the patches back after a package update
-    upstream/            bug reports, ready to file
-    tests/               what can be checked without a radio
-    packaging/           build-deb.sh
+Everything that can be decided without a SIM in the phone: the conversions, the
+patches, and modemctl's judgement about when to leave a file alone. Whether the
+bar on the screen moves needs a radio and a look at the device — that is
+`modemctl check`.
 
 ## Licence
 
-Our own code is MIT. The patches are diffs against ofono2mm's files and carry
-ofono2mm's licences - BSD-3-Clause for four of them, **GPL-2.0** for
-`mm_modem_signal.py`, which makes the package as a whole GPL-2.0. See
-[NOTICE](NOTICE).
+Our own code is MIT (see [LICENSE](LICENSE)). The patches modify ofono2mm's
+files and carry ofono2mm's licences, one of which is GPL-2.0 — **so the built
+package as a whole is GPL-2.0**. The details are in [NOTICE](NOTICE).
+
+Every defect, the measurements behind it and the traps that cost hours are in
+[FINDINGS.md](FINDINGS.md).
