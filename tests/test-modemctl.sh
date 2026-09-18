@@ -1106,6 +1106,10 @@ cat > "$STUB/systemctl" <<'STUBEOF'
 #!/bin/bash
 # Only the questions this block is about; everything else answers the way an
 # absent unit does, which is what the rest of status already copes with.
+if [ "${1:-}" = show ] && [ "${3:-}" = -p ] && [ "${4:-}" = LoadState ]; then
+    printf '%s\n' "${STUB_LOADSTATE:-loaded}"
+    exit 0
+fi
 if [ "${1:-}" = show ] && [ "${3:-}" = -p ] && [ "${4:-}" = Type ]; then
     printf '%s\n' "${STUB_TYPE:-simple}"
     exit 0
@@ -1118,6 +1122,21 @@ exit 0
 STUBEOF
 chmod +x "$STUB/systemctl"
 
+# journalctl too, for the same reason: "when did the bus name appear" is a
+# question about this boot of this machine. On the phone the line is in the
+# journal, anywhere else it is not, and status would then stop at "no 'is
+# ours' line" instead of reaching the comparison the next checks are about.
+cat > "$STUB/journalctl" <<'STUBEOF'
+#!/bin/bash
+for a in "$@"; do
+    [ "$a" = ModemManager.service ] && \
+        exec printf '%s.000000 phone ofono2mm[1]: org.freedesktop.ModemManager1 is ours\n' \
+                    "$(date +%s)"
+done
+exit 0
+STUBEOF
+chmod +x "$STUB/journalctl"
+
 DROPIN=50-furios-modemmanager-name.conf
 
 order_state() {
@@ -1129,6 +1148,7 @@ order_state() {
     case "$out" in
         *"started when its bus name is up"*)  echo applied ;;
         *"is Type=simple"*)                   echo missing ;;
+        *"no ModemManager.service here - cannot check"*) echo unknown ;;
         *"cannot check the unit type"*)       echo absent ;;
         *)                                    echo unknown ;;
     esac
@@ -1155,6 +1175,13 @@ check "Type=dbus without the BusName is not covered" missing \
 
 check "a phone without systemd is not a failure" absent \
       "$(order_state "$WORK/no-such-systemd")"
+
+# And a machine that has systemd but no ModemManager at all - a build runner,
+# a container - is not a broken phone either. It used to read as Type=simple
+# and fail the whole status, which is how this suite came to pass only where
+# it was written.
+check "a machine without the unit is not a failure" unknown \
+      "$(STUB_LOADSTATE=not-found order_state "$SYSD")"
 
 # status also compares two moments of this boot: the bus name appearing and
 # the shell starting. The stubbed systemctl answers nothing for the shell's

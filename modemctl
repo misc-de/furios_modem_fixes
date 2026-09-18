@@ -225,6 +225,15 @@ ordering_state() {
     if [ -f "$dir/$ORDER_DROPIN" ]; then
         echo applied; return
     fi
+    # A machine that does not have the unit at all cannot be judged on it:
+    # there is nothing to order, and a drop-in for a unit systemd never heard
+    # of orders nothing. systemd says not-found for a unit it does not know;
+    # an empty answer means there was no systemctl to ask, which is a
+    # different thing and is left reading as it did before.
+    if [ "$(systemctl show "$ORDER_UNIT" -p LoadState --value 2>/dev/null)" \
+         = not-found ]; then
+        echo unknown; return
+    fi
     if [ "$(systemctl show "$ORDER_UNIT" -p Type --value 2>/dev/null)" = dbus ] \
        && [ "$(systemctl show "$ORDER_UNIT" -p BusName --value 2>/dev/null)" \
             = org.freedesktop.ModemManager1 ]; then
@@ -670,6 +679,7 @@ $RADIO_CONF.bak.$ts)"
     case "$(ordering_state)" in
         covered) skip "$ORDER_UNIT already takes the bus name for systemd" ;;
         absent)  skip "$SYSTEMD_CONF_D not found - no systemd?" ;;
+        unknown) skip "no $ORDER_UNIT here - nothing to order" ;;
         applied)
             # Same reasoning as the cell broadcast policy: present and correct
             # are different questions, and a phone that already has an older
@@ -1218,6 +1228,7 @@ and no 5G"; bad_count=$((bad_count+1)) ;;
     case "$(ordering_state)" in
         applied|covered) ok "$ORDER_UNIT is started when its bus name is up" ;;
         absent)          skip "no $SYSTEMD_CONF_D - cannot check the unit type" ;;
+        unknown)         skip "no $ORDER_UNIT here - cannot check the unit type" ;;
         missing)
             bad "$ORDER_UNIT is Type=simple: systemd calls it started at fork"
             bad "     it was 4.5 s early on 14.9. 14:50, and a failure to take"
