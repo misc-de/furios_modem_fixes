@@ -119,7 +119,7 @@ class MMModemInterface(ServiceInterface):
             'Drivers': Variant('as', ['binder']),
             'Plugin': Variant('s', 'ofono2mm'),
             'PrimaryPort': Variant('s', self.modem_name),
-            'Ports': Variant('a(su)', [[self.modem_name, 0]]), # on runtime unknown MM_MODEM_PORT_TYPE_UNKNOWN
+            'Ports': Variant('a(su)', [[self.modem_name, 1]]), # unknown MM_MODEM_PORT_TYPE_UNKNOWN - 0 is not a value of that enum
             'EquipmentIdentifier': Variant('s', ''),
             'UnlockRequired': Variant('u', 0), # on runtime unknown MM_MODEM_LOCK_UNKNOWN
             'UnlockRetries': Variant('a{uu}', {}),
@@ -483,7 +483,7 @@ class MMModemInterface(ServiceInterface):
         # answers REFUSED without forwarding anything, so every lookup fails
         # while packets still flow perfectly over the live interface - a phone
         # that is online and looks offline.
-        ports = [[self.modem_name, 0]]  # MM_MODEM_PORT_TYPE_UNKNOWN
+        ports = [[self.modem_name, 1]]  # MM_MODEM_PORT_TYPE_UNKNOWN
 
         for bearer in self.bearers.values():
             iface = bearer.props['Interface'].value if 'Interface' in bearer.props else ''

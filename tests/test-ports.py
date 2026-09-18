@@ -91,8 +91,11 @@ class Modem:
         self.emitted.append(changed)
 
 
-MODEM = ["/ril_0", 0]
+# MMModemPortType: UNKNOWN = 1, NET = 2. There is no 0 in that enum - the
+# shipped file had one, and our first version of sync_net_ports copied it.
+UNKNOWN = 1
 NET = 2
+MODEM = ["/ril_0", UNKNOWN]
 
 print("\n\033[1m== the stale interface goes\033[0m")
 
@@ -137,6 +140,7 @@ m = Modem([MODEM, ["ccmni0", NET]], [])
 sync_net_ports(m)
 check("survives with no bearers left", [MODEM], m.props["Ports"].value)
 check("and stays first", MODEM, m.props["Ports"].value[0])
+check("and has a port type that exists", UNKNOWN, m.props["Ports"].value[0][1])
 
 print(f"\n  {RUN} checks, {FAILED} failed")
 sys.exit(1 if FAILED else 0)
