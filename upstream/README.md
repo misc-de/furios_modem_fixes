@@ -1,6 +1,6 @@
-# Upstream reports — as of 2026-09-13
+# Upstream reports — as of 2026-09-18
 
-Six reports, ready to paste into the respective issue tracker.
+Eleven reports, ready to paste into the respective issue tracker.
 
 | File | Repo | Severity |
 |---|---|---|
@@ -8,14 +8,25 @@ Six reports, ready to paste into the respective issue tracker.
 | `ofono2mm-2-duplicate-bearer.md` | furilabs/oFono2MM | medium |
 | `ofono2mm-3-ipv6-family.md` | furilabs/oFono2MM | low |
 | `ofono2mm-4-signal-quality.md` | furilabs/oFono2MM | medium — the signal display is permanently blind |
+| `ofono2mm-5-stale-net-ports.md` | furilabs/oFono2MM | high — DNS fails on mobile data while packets flow |
+| `ofono2mm-6-radiosettings-never-reread.md` | furilabs/oFono2MM | medium — no capabilities, no modes, for the whole boot |
+| `ofono2mm-7-objectmanager-announces-sims-and-bearers.md` | furilabs/oFono2MM | high — no signal icon at all, on a healthy modem |
+| `ofono2mm-8-bearer-without-subscription.md` | furilabs/oFono2MM | high — a whole boot with no mobile data |
+| `ofono2mm-9-bus-name-released-on-purpose.md` | furilabs/oFono2MM | high — every restart can cost the clients for good |
 | `mmsd4ofono-1-activation-loop.md` | furilabs/mmsd4ofono | high — destabilises the data connection |
 | `mobile-broadband-provider-info-1-eu-alert-4372.md` | GNOME/mobile-broadband-provider-info | high — an "extreme" level warning channel is missing, in DE **and** NL |
 
-The first four were checked against the **current** upstream state, not only
-against the installed version:
+All nine oFono2MM reports were checked against the **current** upstream state,
+not only against the installed version:
 
 - oFono2MM `forky` @ `2b1d012f3d37722f97151c52f989e239d91ee4bc`
+  (fetched 18.9.2026 — still HEAD, unchanged since 12.8.2026)
 - mmsd4ofono `forky` @ `9b04724b4e68dbcd899b827250eb8e07f57bb796`
+
+Reports 5–9 quote line numbers from that oFono2MM commit. Where upstream has
+moved since the version installed here, the report says what that changes —
+see "What HEAD already fixes" in report 5 and "What it costs, on HEAD" in
+report 8. Nothing in reports 5 to 9 is fixed upstream.
 
 ## Not reported, because upstream has already fixed it
 
@@ -35,7 +46,14 @@ The missing netmask in `Ip4Config` (→ NetworkManager configured the address as
 `mm_modem.py` and `mm_bearer.py`. The local patch in `../patches/` is
 therefore in effect a backport onto the installed version 1.8.0.
 
-## The new one (13.9.)
+Two more of our local fixes have upstream equivalents on HEAD, both from
+Jeffrey Clemmons' bearer work of July/August 2026: clearing a bearer's
+`Interface` when its context goes down (`de4894c`) and adopting a context that
+is already active instead of re-activating it (`713e342`). Neither closes the
+defect it touches here — see reports 5 and 8 — but both change the symptom, so
+read those two sections before reproducing.
+
+## The provider database
 
 `mobile-broadband-provider-info-1-eu-alert-4372.md` is not about ofono2mm but
 about the database `cellbroadcastd` takes its channel list from. Found while
@@ -56,20 +74,16 @@ so this is not something a package update brings along by itself.
 
 The installed version is **older** than upstream. An `ofono2mm` update
 therefore brings the netmask fix and part of the counter fix along by itself —
-but overwrites the local patches while doing so. After an update:
-
-```bash
-sudo /home/furios/modem-fixes/reapply.sh
-```
-
-The script notices when a patch no longer applies (because upstream changed
-the place), and says so instead of breaking something.
+but overwrites the local patches while doing so. The apt hook and the boot
+unit put them back, and `modemctl status` says whether they are in place; the
+hook reports a patch that no longer applies (because upstream changed the
+place) instead of breaking something.
 
 ## Not yet checked against current upstream
 
 `ofono2mm-4-signal-quality.md` (signal display) was written against the
 **installed** version. Before reporting it, please check whether
 `mm_modem_signal.py` looks different upstream by now. The third part of the
-report is not about ofono2mm anyway but about ofono's
+report is not about ofono2mm anyway but about oFono's
 `plugins/cellinfo-netmon.c` — which belongs, if reported separately, with
 FuriLabs/ofono.

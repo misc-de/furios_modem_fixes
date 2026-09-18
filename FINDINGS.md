@@ -3038,10 +3038,17 @@ dbus-send --system --print-reply --dest=org.ofono /ril_0 \
 
 ## Upstream
 
-Four reports were written against the **current** upstream tree, not just the
-installed version - see [upstream/](upstream/). The signal report
-(`ofono2mm-4-signal-quality.md`) has not been re-checked against current
-upstream, and its third part belongs to oFono rather than ofono2mm.
+Nine reports on ofono2mm were written against the **current** upstream tree,
+not just the installed version - see [upstream/](upstream/). They cover
+defects 1 to 5 and 10, 11, 12, 15 and 16; the index says which of the local
+fixes upstream has since made on its own, and what that changes for the ones
+it does not. The signal report (`ofono2mm-4-signal-quality.md`) has not been
+re-checked against current upstream, and its third part belongs to oFono
+rather than ofono2mm.
+
+Defects 17, 18, 20, 21, 22 and 23 are faults in our own patches and belong
+nowhere but here. Defects 19 and 24 are NetworkManager behaviour we work
+around rather than something ofono2mm does wrong.
 
 Nothing has been filed for numbers 7 and 8 yet. It is not clear which project should
 take it: oFono reporting a gateway it does not have, or NetworkManager having
