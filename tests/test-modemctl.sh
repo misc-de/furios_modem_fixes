@@ -1107,7 +1107,8 @@ cat > "$STUB/systemctl" <<'STUBEOF'
 # Only the questions this block is about; everything else answers the way an
 # absent unit does, which is what the rest of status already copes with.
 if [ "${1:-}" = show ] && [ "${3:-}" = -p ] && [ "${4:-}" = LoadState ]; then
-    printf '%s\n' "${STUB_LOADSTATE:-loaded}"
+    # Set-but-empty has to stay empty here: it is one of the answers.
+    printf '%s\n' "${STUB_LOADSTATE-loaded}"
     exit 0
 fi
 if [ "${1:-}" = show ] && [ "${3:-}" = -p ] && [ "${4:-}" = Type ]; then
@@ -1182,6 +1183,13 @@ check "a phone without systemd is not a failure" absent \
 # it was written.
 check "a machine without the unit is not a failure" unknown \
       "$(STUB_LOADSTATE=not-found order_state "$SYSD")"
+
+# And one where the question cannot be put at all - no systemd behind
+# systemctl, or no systemctl - answers nothing. That is the same "cannot
+# tell", not a verdict: the runner turned out to be this one, not the one
+# above.
+check "a systemctl that answers nothing is not a failure" unknown \
+      "$(STUB_LOADSTATE= order_state "$SYSD")"
 
 # status also compares two moments of this boot: the bus name appearing and
 # the shell starting. The stubbed systemctl answers nothing for the shell's
