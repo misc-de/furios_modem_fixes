@@ -1,12 +1,13 @@
 # furios_modem_fixes
 
-Fixes twenty-three defects in the FuriOS modem stack on the FuriPhone FLX1, and
+Fixes twenty-four defects in the FuriOS modem stack on the FuriPhone FLX1, and
 keeps them fixed across package updates.
 
 As it comes, the phone shows symptoms that look like bad reception but are not:
-mobile data that only comes up after a reboot, a signal bar stuck at its lowest
-regardless of actual strength, no working route for mobile traffic at all, and
-emergency alert channels the modem never listens on. Most of the causes sit in
+mobile data that only comes up after a reboot, mobile data that reports itself
+connected over an interface that no longer exists, a signal bar stuck at its
+lowest regardless of actual strength, no working route for mobile traffic at
+all, and emergency alert channels the modem never listens on. Most of the causes sit in
 `ofono2mm`, the rest in oFono's configuration, in NetworkManager's defaults and
 in one database belonging to a third package.
 

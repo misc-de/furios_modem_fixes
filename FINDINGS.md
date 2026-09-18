@@ -2539,6 +2539,124 @@ whose guard still has a window to cover.
 
 ---
 
+## 24. NetworkManager kept holding a data call that had moved on
+
+Reported on 18 September, on a train: *why did I just have to switch mobile
+data off and on by hand to get a connection?* Half an hour of journal says it
+plainly, and none of it is a broken modem.
+
+The cell came and went for about fifteen minutes:
+
+```
+08:25:51  ofonod: data reg changed 1 -> 0 (unregistered), attached 0
+08:29:43  ofonod: data reg changed 0 -> 1 (registered), attached 1
+08:30:14  ofonod: Unexpected data call failure          (and again, and again)
+08:36:14  ofonod: setting up data call
+08:40:39  ofonod: data reg changed 1 -> 0 (unregistered)
+08:42:45  ofonod: setting up data call
+```
+
+The supervisor did its job through all of it, and said so:
+
+```
+08:36:15  furios-mobile-context: mobile data is back up
+08:42:46  furios-mobile-context: mobile data is back up
+```
+
+And the phone had no internet the whole time. Between 08:28:51 and 08:44:36
+NetworkManager logged **nothing at all** - not a state change, not a warning.
+It had never been told the data call went away, so it had no reason to look:
+its device sat at `activated`, holding `ccmni1` and `10.8.156.6` from 08:23,
+while the data call had been torn down and rebuilt twice and was now somewhere
+else. dnsmasq had its upstream servers `via ccmni1` to match, which is a dead
+interface, which is every lookup timing out on a phone whose every display said
+connected.
+
+It ended the way these always end:
+
+```
+08:44:36  NetworkManager: state change: activated -> deactivating (reason 'user-requested')
+08:44:37  NetworkManager: address 10.56.234.107/24   <- a different address entirely
+08:44:38  NetworkManager: state is now CONNECTED_GLOBAL
+```
+
+Somebody reached for the mobile-data switch. That is the thing this repository
+exists to make unnecessary.
+
+### It is defect 19 with the halves swapped
+
+Defect 19 was NetworkManager having given up while the data call was fine, and
+the supervisor learned to activate the connection for it. This is
+NetworkManager **not** having given up - connected, autoconnect on, no error
+anywhere - while being connected to something that no longer exists. Every
+check the supervisor had came back green, because `connected` was the whole
+question it knew how to ask.
+
+`connected` is not the question. The question is whether the interface and the
+address NetworkManager is holding are the ones oFono is carrying **now**:
+
+```
+NM:     ccmni1  10.8.156.6          oFono:  ccmni2  10.44.71.13
+```
+
+Both halves have to be asked. The interface moves when the context is rebuilt
+on another channel - `ccmni1` to `ccmni2`, which is what happened here - and
+the address changes on every rebuild even when the interface does not, which is
+what the 08:44 recovery shows: `ccmni1` before and after, a different address
+each side.
+
+### The fix
+
+`nm_stale_pass` in `furios-mobile-context`, reached only when the context is up
+*and* NetworkManager says connected. It compares `GENERAL.IP-IFACE` and the
+whole `IP4.ADDRESS` list against the context's IPv4 `Settings`, and when they
+disagree it takes the connection down and brings it back up - by UUID, the
+profile NetworkManager itself named, which is the switch somebody would
+otherwise flip by hand.
+
+It is the most expensive repair in this daemon: it throws away a working data
+call to build a new one. So it is also the most restrained.
+
+- **It looks twice**, `NM_STALE_CONFIRM` seconds apart, and acts only if both
+  sides said the same thing both times. The two really do disagree for a second
+  or two every time the data call moves, while NetworkManager follows; a
+  supervisor that jumped on the first disagreement would tear down the
+  recovery it was watching.
+- **Both addresses count.** This phone reports the same address twice, `/24`
+  and `/8`. Matching the first entry only would be a coin toss over which one
+  `nmcli` happens to print first.
+- **Only the IPv4 settings.** The context reply carries an `IPv6.Settings`
+  block with the same key names after the IPv4 one. A first-match search for
+  `Address` reads an IPv6 answer to an IPv4 question the moment the carrier
+  hands out both - and then rebuilds the connection on every single pass, on a
+  phone with nothing wrong with it. The test feeds it exactly that reply.
+- **The same three switches** as every other repair here, plus no rebuild
+  during a voice call, and `NM_STALE_BACKOFF` of two attempts rather than the
+  usual three: a connection that comes back on the wrong data call twice will
+  not be talked round the third time, and rebuilding for ever is a phone that
+  drops its own connection on a timer.
+
+**Trap:** the repair is `connection down` / `connection up`, and the two
+obvious alternatives are both wrong on this phone. `device disconnect` also
+clears the device's autoconnect flag - the phone reconnects once and then
+refuses to do it on its own afterwards. `device reapply` empties the interface
+and never puts the address back (see *Traps that cost time*).
+
+Proven at the device before it was believed: on a healthy phone one pass does
+nothing at all, and with only NetworkManager's answer to `GENERAL.IP-IFACE`
+faked to the stale one it printed
+
+```
+NetworkManager is holding an old data call (it has ccmni1 10.8.156.6,
+oFono is on ccmni1/10.56.234.107) - rebuilding the connection (attempt 1)
+```
+
+and reached for `connection down uuid fb960ee6…` / `connection up uuid
+fb960ee6…` - the same UUID, and the same two steps, that the journal shows
+working by hand at 08:44:37.
+
+---
+
 ## What it costs, measured
 
 Numbers from the phone, not estimates. Three things here run all the time -
@@ -2938,7 +3056,7 @@ That is what `modemctl apply` is for.
 
 The README was cut down to what somebody needs to use this. What follows was in it until then: the reasoning, the measurements and the trade-offs behind the decisions.
 
-## The twenty-three defects
+## The twenty-four defects
 
 | # | What | Where | Symptom |
 |---|---|---|---|
@@ -2965,6 +3083,7 @@ The README was cut down to what somebody needs to use this. What follows was in 
 | 21 | The modem is announced before anyone owns the bus name - the announcement itself set the event `main()` waits on, so every announcement went out 59 ms too early, by construction | `main.py` (ours) | NetworkManager builds its modem from a proxy with no name owner and keeps it all boot: LTE registered, modem healthy, **no mobile data** |
 | 22 | The manager object announced as one of its own managed objects, and the modem announced before `State` and `Sim` were filled in | `main.py` (ours) | NetworkManager discards the one and keeps the other as `state: failed` for the rest of the boot - **no mobile data** |
 | 23 | Our own defect 20 fix ordered ModemManager behind oFono's 8.7 s in `binder-wait`, and `main()` then waited again for a modem - so the bus name appeared after the shell had already asked | `ModemManager.service` drop-in and `main.py` (ours) | the phone boots with **no signal icon and no signal strength** on a perfectly healthy modem, all measurements green |
+| 24 | A data call rebuilt on a new interface is never announced to NetworkManager, which stays `activated` on the old one | NetworkManager, and our own supervisor asking `connected?` instead of `connected to what?` | every display says mobile data is up while DNS resolves through a dead interface - **no internet until somebody switches the connection off and on** |
 
 Numbers behind each of these, and why they are what they are, in
 [FINDINGS.md](FINDINGS.md).

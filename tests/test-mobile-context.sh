@@ -32,6 +32,19 @@ NM_STATE="connected"
 NM_WWAN="enabled"
 NM_DEV_AUTO="yes"
 NM_PROFILE="yes"
+NM_IFACE="ccmni0"
+NM_ADDR="10.13.195.47/24"
+EOF
+}
+
+nm_holds() {
+    # nm_holds <interface NetworkManager has> <address it has>
+    # What NetworkManager is carrying, as opposed to what oFono is carrying.
+    # The default is the two agreeing; this is how they are made to disagree.
+    # Appended, so it has to follow the scenario call it belongs to.
+    cat >> "$STUBDIR/scenario" <<EOF
+NM_IFACE="$1"
+NM_ADDR="$2"
 EOF
 }
 
@@ -62,8 +75,24 @@ case "$*" in
       echo '         variant             string "internet"'
       echo '         string "Active"'
       echo "         variant             boolean $ACTIVE"
-      echo '         string "Interface"'
-      echo '         variant             string "ccmni0"' ;;
+      echo '         string "Settings"'
+      echo '         variant             array ['
+      echo '               string "Interface"'
+      echo '               variant                      string "ccmni0"'
+      echo '               string "Address"'
+      echo '               variant                      string "10.13.195.47"'
+      echo '            ]'
+      # The same key names again, after the IPv4 ones and with values that
+      # are nobody's IPv4 address. A reader that takes the first "Address" in
+      # the reply gets the right answer here; one that takes any "Address"
+      # gets this.
+      echo '         string "IPv6.Settings"'
+      echo '         variant             array ['
+      echo '               string "Interface"'
+      echo '               variant                      string "ccmni9"'
+      echo '               string "Address"'
+      echo '               variant                      string "2001:db8::1"'
+      echo '            ]' ;;
   *context2*ConnectionContext.GetProperties*)
       echo '         string "Type"'
       echo '         variant             string "mms"'
@@ -101,9 +130,23 @@ printf '%s\n' "$*" >> "$(dirname "$0")/nmcli.args"
 case "$*" in
   *"device status"*)   echo "/ril_0:gsm:$NM_STATE" ;;
   *"radio"*)           echo "$NM_WWAN" ;;
-  *"device show"*)     echo "GENERAL.AUTOCONNECT:$NM_DEV_AUTO" ;;
+  *"GENERAL.AUTOCONNECT device show"*)
+                       echo "GENERAL.AUTOCONNECT:$NM_DEV_AUTO" ;;
+  *"GENERAL.IP-IFACE device show"*)
+                       echo "GENERAL.IP-IFACE:$NM_IFACE" ;;
+  *"IP4.ADDRESS device show"*)
+                       # Two entries for one address, /24 and /8, the way this
+                       # phone really reports it.
+                       [ -n "$NM_ADDR" ] && {
+                           echo "IP4.ADDRESS[1]:$NM_ADDR"
+                           echo "IP4.ADDRESS[2]:${NM_ADDR%%/*}/8"
+                       } ;;
+  *"GENERAL.CON-UUID device show"*)
+                       echo "GENERAL.CON-UUID:fb960ee6-5f21-49ef-a766-97ddfa306b6a" ;;
   *"connection show"*) [ "$NM_PROFILE" = yes ] && echo "gsm:yes" ;;
   *"device connect"*)  ;;
+  *"connection down"*) ;;
+  *"connection up"*)   ;;
 esac
 exit 0
 STUB
@@ -111,7 +154,11 @@ chmod +x "$STUBDIR/nmcli"
 
 run_tool() {
     rm -f "$STUBDIR/dbus.args" "$STUBDIR/nmcli.args"
-    PATH="$STUBDIR:$PATH" bash "$TOOL" --once --quiet 2>/dev/null
+    # The confirm wait is five real seconds in the field and the point of it
+    # is the second look, not the sleep - so the tests take the second look
+    # with no wait in front of it.
+    PATH="$STUBDIR:$PATH" FURIOS_MOBILE_CONTEXT_NM_STALE_CONFIRM=0 \
+        bash "$TOOL" --once --quiet 2>/dev/null
 }
 # grep -c prints 0 AND exits 1 when nothing matches, so "|| echo 0" appends a
 # second zero and every count comes out as "0\n0". Count in one place instead.
@@ -128,6 +175,18 @@ activated() { count 'string:Active variant:boolean:true'; }
 nm_acted() {
     local n
     n=$(grep -c 'device connect' "$STUBDIR/nmcli.args" 2>/dev/null)
+    echo "${n:-0}"
+}
+# Taking the connection down is the expensive repair, and the only one that
+# ever drops a working data call. Counted on its own so that no test can
+# mistake it for an activation.
+nm_rebuilt() { nm_count 'connection down'; }
+# Same trap as count(): grep -c prints 0 and exits 1 when nothing matches, so
+# a "|| echo 0" after it appends a second zero and every count comes out as
+# "0\n0". One helper, like the dbus side has.
+nm_count() {
+    local n
+    n=$(grep -c "$@" "$STUBDIR/nmcli.args" 2>/dev/null)
     echo "${n:-0}"
 }
 
@@ -236,6 +295,133 @@ scenario true true registered true yes no
 nm_scenario connecting enabled yes yes
 run_tool
 check "an activation in flight is not interrupted" 0 "$(nm_acted)"
+
+printf '\n\033[1m== a connection held on an old data call\033[0m\n'
+
+# The train, 18 September. The cell came and went for a quarter of an hour,
+# oFono rebuilt the data call on a new interface each time, and NetworkManager
+# was never told: it sat at "activated" on ccmni1 with an address from twenty
+# minutes earlier while the data call was on ccmni2, dnsmasq resolved names
+# through the dead one, and this daemon said "mobile data is back up" about it.
+# Everything on the phone reported mobile data as working.
+scenario true true registered true yes no
+nm_holds ccmni1 10.8.156.6/24
+run_tool
+check "NetworkManager on an old interface - the connection is rebuilt" 1 "$(nm_rebuilt)"
+# And the data call itself is left alone. It is the one thing here that is
+# working; setting Active on it again is how oFono ends up answering without
+# acting.
+check "and the working data call is not touched" 0 "$(acted)"
+
+# The same fault with the interface name unchanged - which is what happens on
+# a plain rebuild, and would be invisible to a check that only compared
+# interfaces. It was the state the phone came back to at 08:44:37: ccmni1
+# both times, 10.8.156.6 before and 10.56.234.107 after.
+scenario true true registered true yes no
+nm_holds ccmni0 10.8.156.6/24
+run_tool
+check "same interface, an address from the last data call - also rebuilt" 1 "$(nm_rebuilt)"
+
+# Both sides agreeing is the normal case and must cost nothing. This is the
+# check that keeps the repair from running every five minutes for ever.
+scenario true true registered true yes no
+run_tool
+check "interface and address agree - nothing is rebuilt" 0 "$(nm_rebuilt)"
+
+# This phone reports the same address twice, /24 and /8. Matching only the
+# first entry would be a coin toss over which one nmcli prints first.
+scenario true true registered true yes no
+nm_holds ccmni0 10.13.195.47/8
+run_tool
+check "the same address under a different prefix still agrees" 0 "$(nm_rebuilt)"
+
+# The reply carries an IPv6.Settings block with the same key names after the
+# IPv4 one. Reading an address out of that and comparing it to what
+# NetworkManager holds for IPv4 would rebuild the connection every single
+# pass, on a phone with nothing wrong with it.
+scenario true true registered true yes no
+run_tool
+check "the IPv6 settings are not mistaken for the IPv4 ones" 0 "$(nm_rebuilt)"
+
+# Nothing to compare against. A device NetworkManager has not configured yet,
+# or one that has nothing to do with our data call - either way, tearing a
+# connection down over it would be acting on a guess.
+scenario true true registered true yes no
+nm_holds "" ""
+run_tool
+check "no interface to compare - left alone" 0 "$(nm_rebuilt)"
+
+# The same three switches as every other repair here. The rudest one first:
+# a device told to stay disconnected.
+scenario true true registered true yes no
+nm_holds ccmni1 10.8.156.6/24
+nm_scenario connected enabled no yes
+run_tool
+check "a device told to stay disconnected is not rebuilt" 0 "$(nm_rebuilt)"
+
+scenario true true registered true yes no
+nm_holds ccmni1 10.8.156.6/24
+nm_scenario connected disabled yes yes
+run_tool
+check "WWAN switched off - nothing is rebuilt" 0 "$(nm_rebuilt)"
+
+scenario true true registered true yes no
+nm_holds ccmni1 10.8.156.6/24
+nm_scenario connected enabled yes no
+run_tool
+check "no profile allowed to autoconnect - nothing is rebuilt" 0 "$(nm_rebuilt)"
+
+# A rebuild drops the data call. Doing that under a voice call is how a
+# repair becomes the outage.
+scenario true true registered true yes yes
+nm_holds ccmni1 10.8.156.6/24
+run_tool
+check "never during a call" 0 "$(nm_rebuilt)"
+
+# Not connected at all is the other half's job, and its repair is the cheap
+# one: activate, not tear down and rebuild.
+scenario true true registered true yes no
+nm_holds ccmni1 10.8.156.6/24
+nm_scenario disconnected enabled yes yes
+run_tool
+check "a disconnected device is activated, not rebuilt" 0 "$(nm_rebuilt)"
+check "and activating is what happens instead" 1 "$(nm_acted)"
+
+# How it repairs matters as much as whether. "device disconnect" also clears
+# the device's autoconnect flag - the phone would come back and then refuse to
+# reconnect on its own - and "device reapply" empties the interface on this
+# phone without ever putting the address back.
+check "it does not disconnect the device" 0 \
+      "$(nm_count 'device disconnect')"
+check "and does not reapply" 0 \
+      "$(nm_count 'device reapply')"
+
+# Down alone is half a repair and leaves the phone worse off than the fault.
+scenario true true registered true yes no
+nm_holds ccmni1 10.8.156.6/24
+run_tool
+check "what it takes down it brings back up" 1 \
+      "$(nm_count 'connection up')"
+
+# The most expensive repair here needs the shortest list, and it needs to have
+# an end: a connection that comes back on the wrong data call twice will not
+# be talked round on the third go, and rebuilding for ever is a phone that
+# drops its own connection on a timer.
+stale_steps=$(sed -n 's/^NM_STALE_BACKOFF=${FURIOS_MOBILE_CONTEXT_NM_STALE_BACKOFF:-"\(.*\)"}.*/\1/p' "$TOOL")
+check "the rebuild gives up" yes \
+      "$([ -n "$stale_steps" ] && [ "$(set -- $stale_steps; echo $#)" -le 3 ] && echo yes \
+        || echo "no (${stale_steps:-unset})")"
+rising=yes; prev=0
+for w in $stale_steps; do
+    [ "$w" -lt "$prev" ] && rising=no
+    prev=$w
+done
+check "and waits longer each time" yes "$rising"
+# Rebuilding is not something to reach for at the first disagreement: the two
+# sides really do disagree for a second or two whenever the data call moves.
+confirm=$(sed -n 's/^NM_STALE_CONFIRM=${FURIOS_MOBILE_CONTEXT_NM_STALE_CONFIRM:-\([0-9]*\)}.*/\1/p' "$TOOL")
+check "a mismatch is confirmed before it is repaired" yes \
+      "$([ -n "$confirm" ] && [ "$confirm" -ge 2 ] && echo yes || echo "no (${confirm:-unset})")"
 
 printf '\n\033[1m== which half first\033[0m\n'
 

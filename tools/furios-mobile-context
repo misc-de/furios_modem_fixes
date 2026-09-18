@@ -32,6 +32,29 @@
 # half, NetworkManager actually using it is the other, and this supervises
 # both.
 #
+# And "using it" turned out to be two questions as well, found on 18 September
+# on a train. The cell came and went for a quarter of an hour; oFono rebuilt
+# the data call each time, and every rebuild is a new interface and a new
+# address. NetworkManager never saw any of it - not one line in its journal
+# between 08:28 and 08:44 - because nothing tore its device down: it sat at
+# "activated", holding ccmni1 and 10.8.156.6, while the data call had moved to
+# ccmni2 and this daemon reported itself happy about it:
+#
+#     08:40:39  ofonod: data reg changed 1 -> 0 (unregistered)
+#     08:42:45  ofonod: setting up data call            <- new interface, new address
+#     08:42:46  furios-mobile-context: mobile data is back up
+#     08:44:36  NetworkManager: state change: activated -> deactivating (reason 'user-requested')
+#
+# The last line is somebody reaching for the mobile-data switch, which is the
+# thing this daemon exists to make unnecessary. dnsmasq had its upstream
+# servers "via ccmni1" the whole time - a dead interface, so no name resolved,
+# so no internet, on a phone whose every status display said connected.
+#
+# A connected NetworkManager is therefore not proof of anything on its own.
+# The proof is that the interface and the address it is holding are the ones
+# oFono is carrying right now, and when they are not, the repair is the switch
+# somebody would otherwise flip by hand.
+#
 # Restraint is the whole design, not a feature:
 #
 #   - It only ever acts when the system already WANTS mobile data. Powered
@@ -51,7 +74,7 @@
 # nothing at all in between.
 set -u
 
-VERSION=0.2.0
+VERSION=0.3.0
 
 # Backoff between attempts, in seconds, one per attempt. When the list runs
 # out we stop and wait for the radio to tell us something changed - the list
@@ -89,6 +112,19 @@ IDLE=${FURIOS_MOBILE_CONTEXT_IDLE:-300}
 # call down and rebuild it every minute, for ever.
 NM_BACKOFF=${FURIOS_MOBILE_CONTEXT_NM_BACKOFF:-"10 30 60"}
 
+# And a shorter list still for the stale-bearer repair, because that one is
+# the most expensive thing here: taking the connection down and back up tears
+# the working data call down with it and builds a new one. Two attempts, far
+# apart, and then leave it alone - if NetworkManager comes back up on the
+# wrong interface twice, a third go will not change its mind and would just
+# drop the connection on a timer for ever.
+NM_STALE_BACKOFF=${FURIOS_MOBILE_CONTEXT_NM_STALE_BACKOFF:-"60 300"}
+# A mismatch is the normal state for a second or two every time the data call
+# moves: oFono publishes the new settings, NetworkManager follows. Only a
+# mismatch that is still there after this many seconds - with both sides
+# unchanged in between - is NetworkManager having stopped following.
+NM_STALE_CONFIRM=${FURIOS_MOBILE_CONTEXT_NM_STALE_CONFIRM:-5}
+
 ONCE=0
 QUIET=0
 for arg in "$@"; do
@@ -116,11 +152,23 @@ activates the cellular connection if it has given up on it - but never while
 the WWAN switch is off, the device is set to stay disconnected, or no
 cellular profile is allowed to autoconnect.
 
+A connected NetworkManager is checked once more: that the interface and
+address it holds are the ones oFono is carrying now. When a data call is
+rebuilt on a new interface without NetworkManager noticing, what is left is a
+device that reports itself connected over a dead interface. Confirmed by a
+second look before anything is done, then repaired by taking the connection
+down and back up - the switch somebody would otherwise flip by hand.
+
 Environment:
   FURIOS_MOBILE_CONTEXT_BACKOFF    seconds between attempts, one per attempt;
                                    the number of entries is the attempt limit
   FURIOS_MOBILE_CONTEXT_NM_BACKOFF the same, for activating the NetworkManager
                                    connection (default "10 30 60")
+  FURIOS_MOBILE_CONTEXT_NM_STALE_BACKOFF   the same, for rebuilding a
+                                   connection held on an old data call
+                                   (default "60 300")
+  FURIOS_MOBILE_CONTEXT_NM_STALE_CONFIRM   seconds between the two looks that
+                                   have to agree first (default 5)
   FURIOS_MOBILE_CONTEXT_ESCALATE   failures before cycling Powered (default 3)
   FURIOS_MOBILE_CONTEXT_IDLE       safety-net wakeup while healthy (default 300)
 EOF
@@ -207,15 +255,33 @@ call_in_progress() {
 # Active alone is not the truth. oFono reports Active=true on a context whose
 # data call has gone; the honest test is whether the interface it names is
 # carrying an address.
+
+# One value out of the context's IPv4 Settings dictionary. Confined to that
+# block on purpose: the reply carries an IPv6.Settings after it with the same
+# key names, and a first-match search would read an IPv6 answer to an IPv4
+# question the moment the carrier hands out both.
+setting() {
+    # setting <name> <stdin: GetProperties reply>
+    sed -n '/string "Settings"/,/string "IPv6.Settings"/p' \
+        | sed -n "/string \"$1\"/{n;s/.*string \"//;s/\".*//;p;q}"
+}
+
+# What the data call is, right now, for whoever asks next. Set by context_up
+# and read by the NetworkManager half, so that one pass asks oFono once.
+CTX_IFACE=
+CTX_ADDR=
+
 context_up() {
-    local props active iface
+    local props active
+    CTX_IFACE=; CTX_ADDR=
     props=$(ask "$CONTEXT" org.ofono.ConnectionContext.GetProperties)
     active=$(printf '%s\n' "$props" | prop Active)
     case "$active" in *true*) ;; *) return 1 ;; esac
 
-    iface=$(printf '%s\n' "$props" | sed -n '/string "Interface"/{n;s/.*string "//;s/".*//;p;q}')
-    [ -n "$iface" ] || return 1
-    ip -4 -o addr show dev "$iface" scope global 2>/dev/null | grep -q .
+    CTX_IFACE=$(printf '%s\n' "$props" | setting Interface)
+    CTX_ADDR=$(printf '%s\n' "$props" | setting Address)
+    [ -n "$CTX_IFACE" ] || return 1
+    ip -4 -o addr show dev "$CTX_IFACE" scope global 2>/dev/null | grep -q .
 }
 
 # --- the other half: NetworkManager -----------------------------------------
@@ -309,6 +375,57 @@ nm_activate() {
     timeout 30 nmcli -w 25 device connect "$NM_DEV" >/dev/null 2>&1 || true
 }
 
+# Whether the connection NetworkManager is holding is the data call oFono is
+# carrying, rather than one it carried earlier. Both halves are asked, because
+# both have been seen wrong: the interface moves when the context is rebuilt
+# on a different channel, and the address changes on every rebuild even when
+# the interface does not.
+#
+# The address is matched against the whole list NetworkManager reports, not
+# just the first entry: this phone routinely ends up with the same address
+# twice, once /24 and once /8, and either of them is NetworkManager being on
+# the right data call.
+# What NetworkManager was last seen holding, for the log line. A repair that
+# tears the data call down has to say what it saw that made it do so; without
+# the two sides side by side in the journal there is no way to tell this
+# working from this misfiring.
+NM_IFACE_SEEN=
+nm_carrying_context() {
+    local iface addrs
+    [ -n "$CTX_IFACE" ] || return 0
+
+    iface=$(timeout 10 nmcli -t -f GENERAL.IP-IFACE device show "$NM_DEV" 2>/dev/null \
+            | sed -n 's/^GENERAL\.IP-IFACE://p')
+    NM_IFACE_SEEN=$iface
+    # No interface at all is not a mismatch this repairs. It is either a
+    # device mid-configuration or a NetworkManager that has nothing to do with
+    # our data call, and tearing a connection down over it would be guessing.
+    [ -n "$iface" ] && [ "$iface" != -- ] || return 0
+    [ "$iface" = "$CTX_IFACE" ] || return 1
+
+    [ -n "$CTX_ADDR" ] || return 0
+    addrs=$(timeout 10 nmcli -t -f IP4.ADDRESS device show "$NM_DEV" 2>/dev/null \
+            | sed -n 's/^IP4\.ADDRESS\[[0-9]*\]://p' | sed 's,/.*,,')
+    [ -n "$addrs" ] || return 0
+    NM_IFACE_SEEN="$iface $(printf '%s' "$addrs" | tr '\n' ' ')"
+    printf '%s\n' "$addrs" | grep -qx "$CTX_ADDR"
+}
+
+# The switch, in software. Down and up on the profile NetworkManager itself
+# chose - not "device disconnect", which also clears the device's autoconnect
+# flag and would leave the phone refusing to reconnect on its own afterwards,
+# and not "device reapply", which on this phone empties the interface and
+# never puts the address back.
+nm_rebuild() {
+    local uuid
+    uuid=$(timeout 10 nmcli -t -f GENERAL.CON-UUID device show "$NM_DEV" 2>/dev/null \
+           | sed -n 's/^GENERAL\.CON-UUID://p')
+    [ -n "$uuid" ] && [ "$uuid" != -- ] || return 1
+    timeout 30 nmcli -w 25 connection down uuid "$uuid" >/dev/null 2>&1 || true
+    timeout 45 nmcli -w 40 connection up   uuid "$uuid" >/dev/null 2>&1 || true
+    return 0
+}
+
 # --- acting -----------------------------------------------------------------
 
 activate() {
@@ -332,9 +449,11 @@ cycle_powered() {
 
 FAILURES=0
 NM_FAILURES=0
+NM_STALE_FAILURES=0
 NEXT_WAIT=$IDLE
 read -ra BACKOFF_STEPS <<< "$BACKOFF"
 read -ra NM_BACKOFF_STEPS <<< "$NM_BACKOFF"
+read -ra NM_STALE_STEPS <<< "$NM_STALE_BACKOFF"
 
 # The NetworkManager half of a pass, and it only ever runs with the data call
 # actually up. That order is the point: the radio is the thing to fix first,
@@ -345,6 +464,66 @@ read -ra NM_BACKOFF_STEPS <<< "$NM_BACKOFF"
 # things and one of the answers to the oFono one is cycling Powered, which
 # would throw away a working data call to fix a NetworkManager that is merely
 # sulking.
+# NetworkManager connected, on an interface and address that are no longer
+# the ones oFono is carrying. Nothing in the system notices this by itself:
+# NetworkManager was never told the data call went, so it has no reason to
+# look, and every display on the phone reports mobile data as up while the
+# only thing left is a dead interface holding the DNS servers.
+#
+# The most restrained thing here, and it has to be, because the repair costs
+# the working data call:
+#
+#   - it is only ever reached with the context up and NetworkManager
+#     connected;
+#   - it looks twice, NM_STALE_CONFIRM seconds apart, and does nothing unless
+#     both sides said the same thing both times - a data call that moved while
+#     we were looking is not a NetworkManager that stopped following;
+#   - it asks the same three switches as every other repair here;
+#   - it stays out of voice calls, like everything else that touches the
+#     modem;
+#   - and it gives up after NM_STALE_BACKOFF runs out rather than rebuilding
+#     for ever.
+nm_stale_pass() {
+    local was_iface was_addr
+
+    [ -n "$CTX_IFACE" ] || { NM_STALE_FAILURES=0; return 0; }
+    if nm_carrying_context; then
+        [ "$NM_STALE_FAILURES" -gt 0 ] && \
+            log "NetworkManager is on the current data call again"
+        NM_STALE_FAILURES=0; return 0
+    fi
+
+    # Second look. Both sides, both re-read: the first look is as likely to
+    # have caught a handover in progress as a bearer nobody is maintaining.
+    was_iface=$CTX_IFACE; was_addr=$CTX_ADDR
+    [ "$NM_STALE_CONFIRM" -gt 0 ] && sleep "$NM_STALE_CONFIRM"
+    context_up || { NM_STALE_FAILURES=0; return 0; }
+    [ "$CTX_IFACE" = "$was_iface" ] && [ "$CTX_ADDR" = "$was_addr" ] || {
+        NM_STALE_FAILURES=0; return 0; }
+    nm_look || { NM_STALE_FAILURES=0; return 0; }
+    case "$NM_STATE" in connected*) ;; *) NM_STALE_FAILURES=0; return 0 ;; esac
+    nm_carrying_context && { NM_STALE_FAILURES=0; return 0; }
+
+    nm_wants_data || { NM_STALE_FAILURES=0; return 0; }
+    if call_in_progress; then
+        log "a call is in progress - leaving the connection alone"
+        NEXT_WAIT=60; return 0
+    fi
+
+    local steps=${#NM_STALE_STEPS[@]}
+    if [ "$NM_STALE_FAILURES" -ge "$steps" ]; then
+        [ "$NM_STALE_FAILURES" -eq "$steps" ] && \
+            log "NetworkManager keeps coming back on the wrong data call after $steps attempts - leaving it alone"
+        NM_STALE_FAILURES=$((NM_STALE_FAILURES + 1))
+        return 0
+    fi
+
+    NM_STALE_FAILURES=$((NM_STALE_FAILURES + 1))
+    log "NetworkManager is holding an old data call (it has $NM_IFACE_SEEN, oFono is on $CTX_IFACE/$CTX_ADDR) - rebuilding the connection (attempt $NM_STALE_FAILURES)"
+    nm_rebuild
+    NEXT_WAIT=${NM_STALE_STEPS[$((NM_STALE_FAILURES - 1))]:-$IDLE}
+}
+
 nm_pass() {
     NEXT_WAIT=$IDLE
 
@@ -353,7 +532,11 @@ nm_pass() {
     case "$NM_STATE" in
         connected*)
             [ "$NM_FAILURES" -gt 0 ] && log "NetworkManager is carrying mobile data again"
-            NM_FAILURES=0; return 0 ;;
+            NM_FAILURES=0
+            # Connected, yes - but to which data call? That is its own
+            # question and its own repair.
+            nm_stale_pass
+            return 0 ;;
         disconnected*|failed*) ;;
         # connecting, deactivating, unavailable, unmanaged. In flight, or not
         # ours. Either way the answer is to wait rather than to push.
