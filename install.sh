@@ -88,13 +88,26 @@ sudo systemctl enable furios-modem-fixes.service >/dev/null
 # This one is enable --now: it is a watcher, not a one-shot, and a watcher that
 # is running but was never enabled is a fix that disappears at the next boot
 # without telling anybody.
-sudo systemctl enable --now furios-mobile-route.service >/dev/null
-sudo systemctl enable --now furios-mobile-context.service >/dev/null
+#
+# Unless the phone is recorded as "shipped": the watchers are half of that
+# profile, and "modemctl set shipped" is how they were switched off. Re-running
+# this to update used to switch them back on for good.
+RECORDED=$("$BIN/modemctl" profile 2>/dev/null | sed -n 's/^recorded: *//p')
+if [ "$RECORDED" != shipped ]; then
+    sudo systemctl enable --now furios-mobile-route.service >/dev/null
+    sudo systemctl enable --now furios-mobile-context.service >/dev/null
+fi
 # Re-running install.sh over a running watcher has to hand it the new code;
 # "enable --now" alone leaves the old process running.
 sudo systemctl try-restart furios-mobile-route.service furios-mobile-context.service
 
-sudo "$BIN/modemctl" apply
+# boot, not apply - the same verb the package's postinst, the boot unit and the
+# apt hook run. With apply, re-running this on a phone recorded as "shipped"
+# put every repair back, said "Installed", and the boot unit took them all out
+# again at the next start: a phone that changed state across a reboot for no
+# reason anybody could see. With nothing recorded, boot is apply.
+sudo "$BIN/modemctl" boot
+[ "$RECORDED" = shipped ] && echo "Recorded profile is shipped - switch with: sudo modemctl set fixed"
 
 echo
 echo "Installed. Check any time with:  modemctl status"

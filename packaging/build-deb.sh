@@ -188,8 +188,17 @@ if [ "$1" = configure ]; then
     # --now for the watcher: it is a long-running service, and one that is
     # installed but not started leaves the phone without a fallback route
     # until the next reboot, which is exactly the failure it exists to prevent.
-    systemctl enable --now furios-mobile-route.service >/dev/null 2>&1 || true
-    systemctl enable --now furios-mobile-context.service >/dev/null 2>&1 || true
+    #
+    # But not on a phone recorded as "shipped". The watchers are half of that
+    # profile - "modemctl set shipped" disables them - and this used to enable
+    # and start them on every upgrade regardless: the next apt upgrade put the
+    # fallback route and the data-call supervisor back on a phone whose owner
+    # had switched them off, for good, since enable survives the reboot that
+    # "modemctl boot" would otherwise have used to set things straight.
+    if [ "$(/usr/bin/modemctl profile 2>/dev/null | sed -n 's/^recorded: *//p')" != shipped ]; then
+        systemctl enable --now furios-mobile-route.service >/dev/null 2>&1 || true
+        systemctl enable --now furios-mobile-context.service >/dev/null 2>&1 || true
+    fi
     # "enable --now" does NOT restart a unit that is already running, so an
     # upgrade would install new code and leave the old process in charge - and
     # the old process is exactly the one with the bug that was just fixed.

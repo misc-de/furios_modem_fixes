@@ -296,6 +296,38 @@ else
     fail "postinst does not honour the recorded profile"
 fi
 
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q '"\$BIN/modemctl" boot' "$ROOT/install.sh" \
+   && ! grep -q '"\$BIN/modemctl" apply' "$ROOT/install.sh"; then
+    ok "and so does install.sh"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "install.sh runs apply" \
+         "re-installing over a recorded 'shipped' is undone at the next boot"
+fi
+
+# The watchers are half of the profile, and "set shipped" is what disables
+# them. The postinst used to enable and start them on every upgrade whatever
+# was recorded, so the next apt upgrade put them back on a shipped phone for
+# good. Run for real, with modemctl and systemctl lying about the phone.
+PI_WORK=$(mktemp -d)
+PI_REC="$PI_WORK/systemctl.args"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\nexit 0\n' "$PI_REC" > "$PI_WORK/systemctl"
+postinst_enables() {
+    # postinst_enables <recorded profile>: the watcher units it enabled
+    printf '#!/bin/sh\n[ "$1" = profile ] && printf "recorded: %s\\nactual:   %s\\n"\nexit 0\n' \
+        "$1" "$1" > "$PI_WORK/modemctl"
+    chmod +x "$PI_WORK/systemctl" "$PI_WORK/modemctl"
+    rm -f "$PI_REC"
+    frag=$(sed -n '/^cat > "\$STAGE\/DEBIAN\/postinst"/,/^POST$/p' "$BUILD" | sed '1d;$d' \
+           | sed "s|/usr/bin/modemctl|$PI_WORK/modemctl|g")
+    PATH="$PI_WORK:$PATH" sh -c "$frag" postinst configure >/dev/null 2>&1
+    grep '^enable --now furios-mobile' "$PI_REC" 2>/dev/null | wc -l | tr -d ' '
+}
+check "postinst enables both watchers on a fixed phone" 2 "$(postinst_enables fixed)"
+check "and neither on a phone recorded as shipped" 0 "$(postinst_enables shipped)"
+rm -rf "$PI_WORK"
+
 # --- the polkit action ------------------------------------------------------
 #
 # What lets the switch in the app do what "sudo modemctl" does in a terminal.
