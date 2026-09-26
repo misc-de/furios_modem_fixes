@@ -22,6 +22,10 @@ METRIC=$(/usr/local/bin/furios-mobile-route --metric 2>/dev/null || echo 1050)
 sudo ip route del default dev "$(ip -4 route show default metric "$METRIC" \
     | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)" \
     metric "$METRIC" 2>/dev/null || true
+# The recorded profile goes too. Left behind, a "shipped" from an old
+# "modemctl set" is what the next installation finds and obeys: it installs,
+# applies nothing, and keeps the watchers off - a choice made about a package
+# that has since been removed.
 sudo rm -f /etc/systemd/system/furios-modem-fixes.service \
            /etc/systemd/system/furios-mobile-route.service \
            /etc/systemd/system/furios-mobile-context.service \
@@ -30,7 +34,8 @@ sudo rm -f /etc/systemd/system/furios-modem-fixes.service \
            /usr/local/bin/furios-modem-signal \
            /usr/local/bin/furios-mobile-route \
            /usr/local/bin/furios-mobile-context \
-           /usr/share/polkit-1/actions/de.misc-de.modemctl.policy
+           /usr/share/polkit-1/actions/de.misc-de.modemctl.policy \
+           /etc/furios-modem-fixes.profile
 sudo rm -rf /usr/local/share/furios-modem
 sudo systemctl daemon-reload
 

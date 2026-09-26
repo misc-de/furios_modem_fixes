@@ -326,6 +326,32 @@ postinst_enables() {
 }
 check "postinst enables both watchers on a fixed phone" 2 "$(postinst_enables fixed)"
 check "and neither on a phone recorded as shipped" 0 "$(postinst_enables shipped)"
+
+# The recorded profile is written by modemctl, so dpkg has never heard of it.
+# Nothing removed it: a "shipped" recorded before an uninstall was what the
+# next installation found and obeyed. Purge forgets it; remove keeps it, the
+# way configuration is kept.
+postrm_leaves() {
+    # postrm_leaves <dpkg action>: yes when the profile survives it
+    printf 'shipped\n' > "$PI_WORK/profile"
+    frag=$(sed -n '/^cat > "\$STAGE\/DEBIAN\/postrm"/,/^POSTRM$/p' "$BUILD" | sed '1d;$d' \
+           | sed "s|/etc/furios-modem-fixes.profile|$PI_WORK/profile|g")
+    [ -n "$frag" ] && sh -c "$frag" postrm "$1" >/dev/null 2>&1
+    [ -f "$PI_WORK/profile" ] && echo yes || echo no
+}
+check "purge forgets the recorded profile" no "$(postrm_leaves purge)"
+check "remove keeps it" yes "$(postrm_leaves remove)"
+check "the profile the purge removes is the one modemctl writes" \
+      "$(sed -n 's/^PROFILE_FILE=${MODEMCTL_PROFILE:-\(.*\)}$/\1/p' "$ROOT/modemctl")" \
+      "$(grep -o '/etc/furios-modem-fixes.profile' "$BUILD" | head -1)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q '/etc/furios-modem-fixes.profile' "$ROOT/uninstall.sh"; then
+    ok "uninstall.sh forgets it too"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "uninstall.sh leaves the recorded profile behind" \
+         "a later install would obey a 'shipped' nobody remembers setting"
+fi
 rm -rf "$PI_WORK"
 
 # --- the polkit action ------------------------------------------------------

@@ -250,6 +250,21 @@ exit 0
 PRE
 chmod 755 "$STAGE/DEBIAN/prerm"
 
+# The recorded profile is written by modemctl, not shipped, so dpkg does not
+# know it exists and purge would leave it behind for ever. Kept on a plain
+# remove, the way configuration is: a reinstall honours the choice. Purge is
+# the request to forget it - otherwise a "shipped" recorded years ago is what
+# the next installation finds and obeys, applying nothing.
+cat > "$STAGE/DEBIAN/postrm" <<'POSTRM'
+#!/bin/sh
+set -e
+if [ "$1" = purge ]; then
+    rm -f /etc/furios-modem-fixes.profile
+fi
+exit 0
+POSTRM
+chmod 755 "$STAGE/DEBIAN/postrm"
+
 rm -f "$ROOT/packaging/${PKG}_"*.deb
 OUT="$ROOT/packaging/${PKG}_${VERSION}_all.deb"
 dpkg-deb --root-owner-group --build "$STAGE" "$OUT" >/dev/null
