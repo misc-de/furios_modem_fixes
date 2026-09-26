@@ -97,14 +97,34 @@ class Msg:
         self.path = path
 
 
+class FakeHandle:
+    def __init__(self):
+        self.cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+
+
 class FakeLoop:
     """Records what was scheduled instead of waiting ten seconds for it."""
 
     def __init__(self):
         self.later = []
+        self.handles = []
 
     def call_later(self, delay, fn, *args):
         self.later.append((delay, fn, args))
+        self.handles.append(FakeHandle())
+        return self.handles[-1]
+
+    def fire_due(self, only=None):
+        """Run the timers that were not cancelled, the way time would - all of
+        them, or just the one armed at index `only`."""
+        for i, ((_delay, fn, args), handle) in enumerate(zip(self.later, self.handles)):
+            if only is not None and i != only:
+                continue
+            if not handle.cancelled:
+                fn(*args)
 
 
 class FakeEvent:
@@ -508,6 +528,31 @@ bus = make_bus([MODEM], published=False)
 bus.modem_ready(MODEM)
 export(bus, MODEM, VOICE)
 check("a published modem does not arm it again", 0, len(FakeAsyncio.loop.later))
+
+# The timer names a path, not a modem. A modem torn down and rebuilt at the
+# same path inside the ten seconds - oFono restarting, a modem removed and
+# added again - used to have the first modem's timer fire for the second one
+# while it was still being built, and publish it half-done: defect 22, State
+# -1 and Sim '/', and NetworkManager keeps that modem for the rest of the boot.
+FakeAsyncio.loop = FakeLoop()
+bus = make_bus([], published=False)
+export(bus, MODEM, MODEM_IFACE)          # first modem, net armed
+del bus._path_exports[MODEM]
+bus._emit_interface_removed(MODEM, [MODEM_IFACE])   # oFono went away
+export(bus, MODEM, MODEM_IFACE)          # its successor, still being built
+check("the net of a modem that went away is taken down with it", True,
+      FakeAsyncio.loop.handles[0].cancelled)
+check("and only the successor's own net is left", 1,
+      sum(not h.cancelled for h in FakeAsyncio.loop.handles))
+FakeAsyncio.loop.fire_due(only=0)        # ten seconds after the FIRST export
+check("so the half-built successor is not published early", [], heard(bus))
+
+FakeAsyncio.loop = FakeLoop()
+bus = make_bus([], published=False)
+export(bus, MODEM, MODEM_IFACE)
+bus.modem_ready(MODEM)
+check("a modem that reports itself built takes its net down", True,
+      FakeAsyncio.loop.handles[0].cancelled)
 
 # No event loop yet is not a reason to fall over - the Modem interface is
 # exported before anything is running.

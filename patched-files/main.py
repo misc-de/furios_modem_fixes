@@ -68,7 +68,7 @@ class ModemManagerBus(MessageBus):
     bearer, not a half-built modem.
     """
 
-    __slots__ = ('_published', '_waiting', '_name_is_ours')
+    __slots__ = ('_published', '_waiting', '_name_is_ours', '_fallbacks')
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -79,6 +79,8 @@ class ModemManagerBus(MessageBus):
         # unowned, in the order they reported it.
         self._waiting = []
         self._name_is_ours = False
+        # The pending _arm_fallback timer per modem path. See _disarm_fallback.
+        self._fallbacks = {}
 
     def modem_ready(self, path):
         """The modem at this path is built; a client may be told about it.
@@ -149,6 +151,7 @@ class ModemManagerBus(MessageBus):
             return
 
         self._published.add(path)
+        self._disarm_fallback(path)
         self._announce(path, interfaces)
 
     def _arm_fallback(self, path, delay=10):
@@ -162,7 +165,20 @@ class ModemManagerBus(MessageBus):
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.call_later(delay, self.modem_ready, path)
+        self._disarm_fallback(path)
+        self._fallbacks[path] = loop.call_later(delay, self.modem_ready, path)
+
+    def _disarm_fallback(self, path):
+        # The timer names a path, not a modem. Left running after the modem it
+        # was armed for is gone - oFono restarting, or the modem removed and
+        # added again, within the ten seconds - it fires for whatever has been
+        # exported at that path since, and publishes a modem that is still
+        # being built: `State` -1, `Sim` '/', which is defect 22 and costs
+        # the rest of the boot its mobile data. So it lives exactly as long as
+        # the modem it was armed for is unpublished and still there.
+        handle = self._fallbacks.pop(path, None)
+        if handle is not None:
+            handle.cancel()
 
     def _default_get_managed_objects_handler(self, msg, send_reply):
         if msg.path != MM_ROOT:
@@ -232,6 +248,12 @@ class ModemManagerBus(MessageBus):
         # can be withdrawn - and only once its last interface is gone. A modem
         # that merely loses one of the fifteen is still a modem; saying it
         # disappeared would make NetworkManager drop a working connection.
+        if path not in self._path_exports:
+            # Gone entirely, published or not: nothing that was waiting for
+            # this modem may act on its successor at the same path.
+            self._disarm_fallback(path)
+            if path in self._waiting:
+                self._waiting.remove(path)
         if self._disconnected or path not in self._published:
             return
         if path in self._path_exports:
