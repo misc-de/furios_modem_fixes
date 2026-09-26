@@ -746,6 +746,38 @@ check "set fixed puts them back" fixed \
       "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
 check "and records that" fixed "$(cat "$PROFILEF" 2>/dev/null)"
 
+# The watchers are half of the profile. "try shipped" used to revert every
+# file and leave both running - the route watcher kept its default route in
+# and the supervisor kept reviving the data call, on a phone whose profile
+# said "shipped". What the two verbs differ in is only whether it lasts: "try"
+# starts and stops, "set" enables and disables.
+WATCH_REC="$WORK/watchers.args"
+cat > "$STUBDIR/systemctl" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >> "$WATCH_REC"
+exit 0
+STUB
+chmod +x "$STUBDIR/systemctl"
+watch_calls() {
+    # the verbs used on the two watcher units, one per line, in order
+    grep -E 'furios-mobile-(route|context)\.service' "$WATCH_REC" 2>/dev/null \
+        | grep -v '^list-unit-files' | sed 's/ furios-.*//' | tr '\n' ' ' | sed 's/ $//'
+}
+
+rm -f "$WATCH_REC"
+sandbox bash "$ROOT/modemctl" try shipped --quiet --no-restart >/dev/null 2>&1
+check "try shipped stops both watchers, for now" "stop stop" "$(watch_calls)"
+rm -f "$WATCH_REC"
+sandbox bash "$ROOT/modemctl" try fixed --quiet --no-restart >/dev/null 2>&1
+check "try fixed starts them again, for now" "start start" "$(watch_calls)"
+check "and try leaves the recorded profile alone" fixed "$(cat "$PROFILEF" 2>/dev/null)"
+rm -f "$WATCH_REC"
+sandbox bash "$ROOT/modemctl" set fixed --quiet --no-restart >/dev/null 2>&1
+check "set fixed enables them for good" "enable --now enable --now" "$(watch_calls)"
+rm -f "$WATCH_REC"
+
+printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/systemctl"
+
 # A file nobody here wrote. Deciding for ourselves which way it meant is worse
 # than doing nothing, in both directions.
 printf 'sideways\n' > "$PROFILEF"

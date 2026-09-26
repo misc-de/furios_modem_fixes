@@ -605,14 +605,27 @@ actual_profile() {
 # the whole of defect 7 and the supervisor is the whole of defect 9. A phone in
 # the shipped state must not have them running, or it is not in the shipped
 # state.
+#
+# That holds for "try" as much as for "set", and "try" used to leave them
+# alone: "modemctl try shipped" reverted every file and left the route watcher
+# putting its default route back and the supervisor reviving the data call -
+# a phone that said "actual: shipped" while still running two of the repairs,
+# which is the one thing a look at the shipped state must not be. The only
+# difference between the two is whether it lasts, so "try" starts and stops
+# them for now and leaves the enablement - the part the next boot reads - as
+# it was.
 set_watchers() {
-    local want=$1 u
+    local want=$1 remember=$2 u
     for u in $WATCHERS; do
         systemctl list-unit-files "$u" >/dev/null 2>&1 || continue
-        if [ "$want" = on ]; then
+        if [ "$want" = on ] && [ "$remember" = 1 ]; then
             systemctl enable --now "$u" >/dev/null 2>&1 || warn "could not start $u"
-        else
+        elif [ "$want" = on ]; then
+            systemctl start "$u" >/dev/null 2>&1 || warn "could not start $u"
+        elif [ "$remember" = 1 ]; then
             systemctl disable --now "$u" >/dev/null 2>&1 || warn "could not stop $u"
+        else
+            systemctl stop "$u" >/dev/null 2>&1 || warn "could not stop $u"
         fi
     done
 }
@@ -1050,14 +1063,14 @@ cmd_switch() {
     case "$want" in
         fixed)
             cmd_apply || rc=1
-            [ "$remember" = 1 ] && set_watchers on ;;
+            set_watchers on "$remember" ;;
         shipped)
             # --no-restart still means what it says, here as everywhere else:
             # the boot unit and the tests both need a switch that writes files
             # and leaves the running stack alone.
             [ "$NO_RESTART" = 0 ] && DO_RESTART=1
             cmd_revert || rc=1
-            [ "$remember" = 1 ] && set_watchers off
+            set_watchers off "$remember"
             warn "this is the state the phone shipped in, not a working one -"
             warn "     with Wi-Fi off it resolves no names and has no route out" ;;
     esac
