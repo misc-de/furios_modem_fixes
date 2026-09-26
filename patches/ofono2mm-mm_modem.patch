@@ -9,7 +9,21 @@
  from ofono2mm.dbus_interface_properties import DBusInterfaceProperties
  from ofono2mm.types import _BANDS
  
-@@ -61,11 +61,14 @@
+@@ -46,6 +46,13 @@
+         self.ofono_interfaces = {}
+         self.ofono_interface_props = DBusInterfaceProperties(self.ofono_proxy, verbose)
+         self.mm_cell_type = 0 # on runtime unknown MM_CELL_TYPE_UNKNOWN
++        # AT command -> band list. The band getters used to go to the modem on
++        # every read, and every GetManagedObjects reads them: each mmcli call
++        # meant two AT round trips, and each one woke the modem side. The
++        # modem never changes them on its own, so they are read once and
++        # forgotten whenever they can have changed - the AT interface coming
++        # (back) up, a restore, or SetCurrentBands.
++        self._band_cache = {}
+         self.mm_sim_interface = None
+         self.mm_modem3gpp_interface = None
+         self.mm_modem3gpp_ussd_interface = None
+@@ -61,11 +68,14 @@
          self.mm_modem_voice_interface = None
          self.mm_modem_messaging_interface = None
          self.mm_modem_cell_broadcast_interface = None
@@ -24,7 +38,7 @@
  
          self.was_powered = False
          self.enabled = True
-@@ -116,7 +119,7 @@
+@@ -116,7 +126,7 @@
              'Drivers': Variant('as', ['binder']),
              'Plugin': Variant('s', 'ofono2mm'),
              'PrimaryPort': Variant('s', self.modem_name),
@@ -33,7 +47,7 @@
              'EquipmentIdentifier': Variant('s', ''),
              'UnlockRequired': Variant('u', 0), # on runtime unknown MM_MODEM_LOCK_UNKNOWN
              'UnlockRetries': Variant('a{uu}', {}),
-@@ -184,7 +187,8 @@
+@@ -184,7 +194,8 @@
          if self.mm_modem_signal_interface:
              self.mm_modem_signal_interface.ofono_interface_props = self.ofono_interface_props
  
@@ -43,7 +57,7 @@
              self.ofono_interface_props[iface].on('*', self.ofono_interface_changed(iface))
  
          if self.mm_modem3gpp_interface:
-@@ -194,6 +198,40 @@
+@@ -194,7 +205,42 @@
          if self.mm_modem_signal_interface and iface == "org.ofono.NetworkMonitor":
              await self.mm_modem_signal_interface.set_props()
  
@@ -82,9 +96,19 @@
 +            await self.set_props()
 +
          if iface == "org.ofono.FuriLabs.AT":
++            self._band_cache.clear()
              self.loop.create_task(self._restore_saved_bands())
  
-@@ -355,10 +393,15 @@
+     async def _restore_saved_bands(self):
+@@ -215,6 +261,7 @@
+                 retries_left -= 1
+                 await asyncio.sleep(0.5)
+ 
++        self._band_cache.clear()
+         ofono2mm_print("Successfully restored saved bands", self.verbose)
+ 
+     async def init_connection_manager(self):
+@@ -355,10 +402,15 @@
      async def init_mm_signal_interface(self):
          ofono2mm_print("Initialize Signal interface", self.verbose)
  
@@ -101,7 +125,7 @@
      async def init_mm_location_interface(self):
          ofono2mm_print("Initialize Location interface", self.verbose)
  
-@@ -390,6 +433,11 @@
+@@ -390,6 +442,11 @@
          self.loop.create_task(self.init_cell_broadcast())
  
      def unexport_mm_interface_objects(self):
@@ -113,7 +137,7 @@
          self.mm_sim_interface = None
          self.mm_modem3gpp_interface = None
          self.mm_modem3gpp_ussd_interface = None
-@@ -423,6 +471,29 @@
+@@ -423,6 +480,29 @@
      def get_mm_modem_simple_interface(self):
          return self.mm_modem_simple_interface
  
@@ -143,7 +167,7 @@
      async def check_ofono_contexts(self):
          ofono2mm_print("Checking ofono contexts", self.verbose)
  
-@@ -471,6 +542,7 @@
+@@ -471,6 +551,7 @@
  
                  ipv4_method = 0
                  ipv4_address = ''
@@ -151,7 +175,7 @@
                  ipv4_dns = []
                  ipv4_gateway = ''
  
-@@ -485,6 +557,9 @@
+@@ -485,6 +566,9 @@
                      if 'Address' in settings:
                          ipv4_address = settings['Address'].value
  
@@ -161,7 +185,7 @@
                      if 'DomainNameServers' in settings:
                          for dns in settings['DomainNameServers'].value:
                              ipv4_dns.append(dns)
-@@ -500,6 +575,8 @@
+@@ -500,6 +584,8 @@
                  if 'IPv6.Settings' in ctx[1] and ctx[1]['IPv6.Settings'].value:
                      ipv6_settings = ctx[1]['IPv6.Settings'].value
  
@@ -170,7 +194,7 @@
                      if 'Address' in ipv6_settings and ipv6_settings['Address'].value:
                          ipv6_method = 2  # static
                          ipv6_address = ipv6_settings['Address'].value
-@@ -517,6 +594,7 @@
+@@ -517,6 +603,7 @@
                      "Ip4Config": Variant('a{sv}', {
                          "method": Variant('u', ipv4_method),
                          "address": Variant('s', ipv4_address),
@@ -178,7 +202,7 @@
                          "dns1": Variant('s', ipv4_dns[0] if len(ipv4_dns) > 0 else ''),
                          "dns2": Variant('s', ipv4_dns[1] if len(ipv4_dns) > 1 else ''),
                          "dns3": Variant('s', ipv4_dns[2] if len(ipv4_dns) > 2 else ''),
-@@ -535,12 +613,6 @@
+@@ -535,12 +622,6 @@
                      })
                  })
  
@@ -191,7 +215,7 @@
                  ofono_ctx_interface = self.ofono_client["ofono_context"][ctx[0]]["org.ofono.ConnectionContext"]
                  ofono_ctx_interface.on_property_changed(mm_bearer_interface.ofono_context_changed)
                  mm_bearer_interface.ofono_ctx = ctx[0]
-@@ -556,6 +628,8 @@
+@@ -556,6 +637,8 @@
  
                  bearer_i += 1
  
@@ -200,7 +224,7 @@
          if self.props['Bearers'].value != old_bearer_list:
              self.emit_properties_changed({'Bearers': self.props['Bearers'].value})
  
-@@ -574,6 +648,7 @@
+@@ -574,6 +657,7 @@
  
              ipv4_method = 0
              ipv4_address = ''
@@ -208,7 +232,7 @@
              ipv4_dns = []
              ipv4_gateway = ''
  
-@@ -588,6 +663,9 @@
+@@ -588,6 +672,9 @@
                  if 'Address' in settings:
                      ipv4_address = settings['Address'].value
  
@@ -218,7 +242,7 @@
                  if 'DomainNameServers' in settings:
                      for dns in settings['DomainNameServers'].value:
                          ipv4_dns.append(dns)
-@@ -603,6 +681,8 @@
+@@ -603,6 +690,8 @@
              if 'IPv6.Settings' in properties and properties['IPv6.Settings'].value:
                  ipv6_settings = properties['IPv6.Settings'].value
  
@@ -227,7 +251,7 @@
                  if 'Address' in ipv6_settings and ipv6_settings['Address'].value:
                      ipv6_method = 2  # static
                      ipv6_address = ipv6_settings['Address'].value
-@@ -620,6 +700,7 @@
+@@ -620,6 +709,7 @@
                  "Ip4Config": Variant('a{sv}', {
                      "method": Variant('u', ipv4_method),
                      "address": Variant('s', ipv4_address),
@@ -235,7 +259,7 @@
                      "dns1": Variant('s', ipv4_dns[0] if len(ipv4_dns) > 0 else ''),
                      "dns2": Variant('s', ipv4_dns[1] if len(ipv4_dns) > 1 else ''),
                      "dns3": Variant('s', ipv4_dns[2] if len(ipv4_dns) > 2 else ''),
-@@ -638,12 +719,6 @@
+@@ -638,12 +728,6 @@
                  })
              })
  
@@ -248,7 +272,7 @@
              ofono_ctx_interface = self.ofono_client["ofono_context"][path]['org.ofono.ConnectionContext']
              ofono_ctx_interface.on_property_changed(mm_bearer_interface.ofono_context_changed)
              mm_bearer_interface.ofono_ctx = path
-@@ -658,6 +733,7 @@
+@@ -658,6 +742,7 @@
                  self.mm_interface_objects.append(object_path)
  
              bearer_i += 1
@@ -256,7 +280,7 @@
              self.emit_properties_changed({'Bearers': self.props['Bearers'].value})
  
      async def sim_unlocked(self):
-@@ -674,27 +750,30 @@
+@@ -674,27 +759,30 @@
          await self.release_request_modemmanager()
  
      async def release_request_modemmanager(self):
@@ -308,7 +332,7 @@
  
      async def set_props(self):
          ofono2mm_print("Setting properties", self.verbose)
-@@ -710,7 +789,16 @@
+@@ -710,7 +798,16 @@
                      try:
                          await self.ofono_proxy['org.ofono.Modem'].call_set_property('Online', Variant('b', True))
                          self.was_powered = True
@@ -326,7 +350,7 @@
                      except Exception as e:
                          # Might happen in airplane mode although powered should be false. Just coverin' our bases.
                          ofono2mm_print(f"Failed to set Online to True: {e}", self.verbose)
-@@ -727,6 +815,15 @@
+@@ -727,6 +824,15 @@
                                          self.props['State'] = Variant('i', 8) # modem is registered MM_MODEM_STATE_REGISTERED
                                          if 'Strength' in self.ofono_interface_props['org.ofono.NetworkRegistration'].props:
                                              self.props['SignalQuality'] = Variant('(ub)', [self.ofono_interface_props['org.ofono.NetworkRegistration']['Strength'].value, True])
@@ -342,7 +366,7 @@
                                      elif self.ofono_interface_props['org.ofono.NetworkRegistration']['Status'].value == 'searching':
                                          self.props['State'] = Variant('i', 7) # modem is searching MM_MODEM_STATE_SEARCHING
                                      else:
-@@ -973,6 +1070,31 @@
+@@ -973,6 +1079,31 @@
          if changed_props:
              self.emit_properties_changed(changed_props)
  
@@ -374,7 +398,7 @@
      @method()
      async def Enable(self, enable: 'b'):
          ofono2mm_print(f"Enable with state {enable}", self.verbose)
-@@ -1054,6 +1176,9 @@
+@@ -1054,6 +1185,9 @@
              if name.lower() == "internet":
                  ofono_ctx = ctx[0]
                  ofono_ctx_interface = self.ofono_client["ofono_context"][ofono_ctx]['org.ofono.ConnectionContext']
@@ -384,7 +408,7 @@
                  await ofono_ctx_interface.call_set_property("Active", Variant('b', False))
                  await ofono_ctx_interface.call_set_property("Protocol", Variant('s', protocol))
                  await ofono_ctx_interface.call_set_property("Active", Variant('b', True))
-@@ -1064,6 +1189,7 @@
+@@ -1064,6 +1198,7 @@
              try:
                  ofono_ctx = await self.ofono_proxy['org.ofono.ConnectionManager'].call_add_context("internet")
                  ofono_ctx_interface = self.ofono_client["ofono_context"][ofono_ctx]['org.ofono.ConnectionContext']
@@ -392,7 +416,7 @@
                  if 'apn' in properties:
                      await ofono_ctx_interface.call_set_property("AccessPointName", properties['apn'])
                  await ofono_ctx_interface.call_set_property("Protocol", Variant('s', protocol))
-@@ -1075,6 +1201,18 @@
+@@ -1075,6 +1210,18 @@
          if ofono_ctx is not None:
              mm_bearer_interface.ofono_ctx = ofono_ctx
  
@@ -411,7 +435,77 @@
          object_path = f'/org/freedesktop/ModemManager1/Bearer/{bearer_i}'
          mm_bearer_interface.own_object_path = object_path
          self.bus.export(object_path, mm_bearer_interface)
-@@ -1557,7 +1695,55 @@
+@@ -1255,6 +1402,7 @@
+ 
+         # We also want to set ERAT to 22 to ensure all RATs are enabled
+         await self._send_at_command("AT+ERAT=22")
++        self._band_cache.clear()
+ 
+     @method()
+     def SetPrimarySimSlot(self, sim_slot: 'u'):
+@@ -1505,19 +1653,32 @@
+                     output_bytes.append(int(group[j:j+2], 16))
+         return output_bytes
+ 
++    async def _read_bands(self, command):
++        # Only a parsed, non-empty answer is kept: a failed or empty read is
++        # asked again next time instead of being remembered as "no bands".
++        if command in self._band_cache:
++            return list(self._band_cache[command])
++
++        answer = await self._send_at_command(command)
++        if not answer:
++            return None
++
++        band_bytes = self._parse_epbseh(answer)
++        output = []
++        for band in _BANDS:
++            byte = band_bytes[band[1]]
++            if byte & 1 << band[2]:
++                output.append(band[0])
++
++        if output:
++            self._band_cache[command] = list(output)
++        return output
++
+     @dbus_property(access=PropertyAccess.READ)
+     async def SupportedBands(self) -> 'au':
+         try:
+-            supported_bands = await self._send_at_command("AT+EPBSEH=?")
+-            if supported_bands:
+-                supported_bands = self._parse_epbseh(supported_bands)
+-                output = []
+-
+-                for band in _BANDS:
+-                    byte = supported_bands[band[1]]
+-                    if byte & 1 << band[2]:
+-                        output.append(band[0])
+-
++            output = await self._read_bands("AT+EPBSEH=?")
++            if output is not None:
+                 return output
+         except Exception as e:
+             ofono2mm_print(f"Failed to get supported bands from AT: {str(e)}, returning dummy list", self.verbose)
+@@ -1526,16 +1687,8 @@
+     @dbus_property(access=PropertyAccess.READ)
+     async def CurrentBands(self) -> 'au':
+         try:
+-            current_bands = await self._send_at_command("AT+EPBSEH?")
+-            if current_bands:
+-                current_bands = self._parse_epbseh(current_bands)
+-                output = []
+-
+-                for band in _BANDS:
+-                    byte = current_bands[band[1]]
+-                    if byte & 1 << band[2]:
+-                        output.append(band[0])
+-
++            output = await self._read_bands("AT+EPBSEH?")
++            if output is not None:
+                 return output
+         except Exception as e:
+             ofono2mm_print(f"Failed to get current bands from AT: {str(e)}, returning dummy list", self.verbose)
+@@ -1557,7 +1710,55 @@
              protocol = 1
          return protocol
  

@@ -46,6 +46,13 @@ class MMModemInterface(ServiceInterface):
         self.ofono_interfaces = {}
         self.ofono_interface_props = DBusInterfaceProperties(self.ofono_proxy, verbose)
         self.mm_cell_type = 0 # on runtime unknown MM_CELL_TYPE_UNKNOWN
+        # AT command -> band list. The band getters used to go to the modem on
+        # every read, and every GetManagedObjects reads them: each mmcli call
+        # meant two AT round trips, and each one woke the modem side. The
+        # modem never changes them on its own, so they are read once and
+        # forgotten whenever they can have changed - the AT interface coming
+        # (back) up, a restore, or SetCurrentBands.
+        self._band_cache = {}
         self.mm_sim_interface = None
         self.mm_modem3gpp_interface = None
         self.mm_modem3gpp_ussd_interface = None
@@ -233,6 +240,7 @@ class MMModemInterface(ServiceInterface):
             await self.set_props()
 
         if iface == "org.ofono.FuriLabs.AT":
+            self._band_cache.clear()
             self.loop.create_task(self._restore_saved_bands())
 
     async def _restore_saved_bands(self):
@@ -253,6 +261,7 @@ class MMModemInterface(ServiceInterface):
                 retries_left -= 1
                 await asyncio.sleep(0.5)
 
+        self._band_cache.clear()
         ofono2mm_print("Successfully restored saved bands", self.verbose)
 
     async def init_connection_manager(self):
@@ -1393,6 +1402,7 @@ class MMModemInterface(ServiceInterface):
 
         # We also want to set ERAT to 22 to ensure all RATs are enabled
         await self._send_at_command("AT+ERAT=22")
+        self._band_cache.clear()
 
     @method()
     def SetPrimarySimSlot(self, sim_slot: 'u'):
@@ -1643,19 +1653,32 @@ class MMModemInterface(ServiceInterface):
                     output_bytes.append(int(group[j:j+2], 16))
         return output_bytes
 
+    async def _read_bands(self, command):
+        # Only a parsed, non-empty answer is kept: a failed or empty read is
+        # asked again next time instead of being remembered as "no bands".
+        if command in self._band_cache:
+            return list(self._band_cache[command])
+
+        answer = await self._send_at_command(command)
+        if not answer:
+            return None
+
+        band_bytes = self._parse_epbseh(answer)
+        output = []
+        for band in _BANDS:
+            byte = band_bytes[band[1]]
+            if byte & 1 << band[2]:
+                output.append(band[0])
+
+        if output:
+            self._band_cache[command] = list(output)
+        return output
+
     @dbus_property(access=PropertyAccess.READ)
     async def SupportedBands(self) -> 'au':
         try:
-            supported_bands = await self._send_at_command("AT+EPBSEH=?")
-            if supported_bands:
-                supported_bands = self._parse_epbseh(supported_bands)
-                output = []
-
-                for band in _BANDS:
-                    byte = supported_bands[band[1]]
-                    if byte & 1 << band[2]:
-                        output.append(band[0])
-
+            output = await self._read_bands("AT+EPBSEH=?")
+            if output is not None:
                 return output
         except Exception as e:
             ofono2mm_print(f"Failed to get supported bands from AT: {str(e)}, returning dummy list", self.verbose)
@@ -1664,16 +1687,8 @@ class MMModemInterface(ServiceInterface):
     @dbus_property(access=PropertyAccess.READ)
     async def CurrentBands(self) -> 'au':
         try:
-            current_bands = await self._send_at_command("AT+EPBSEH?")
-            if current_bands:
-                current_bands = self._parse_epbseh(current_bands)
-                output = []
-
-                for band in _BANDS:
-                    byte = current_bands[band[1]]
-                    if byte & 1 << band[2]:
-                        output.append(band[0])
-
+            output = await self._read_bands("AT+EPBSEH?")
+            if output is not None:
                 return output
         except Exception as e:
             ofono2mm_print(f"Failed to get current bands from AT: {str(e)}, returning dummy list", self.verbose)
