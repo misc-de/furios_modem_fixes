@@ -443,7 +443,22 @@
  
      @method()
      def SetPrimarySimSlot(self, sim_slot: 'u'):
-@@ -1505,19 +1653,32 @@
+@@ -1308,6 +1456,14 @@
+             received_data = await self.ofono_interfaces['org.ofono.FuriLabs.AT'].call_send_command(f"{cmd}\r\n")
+         except Exception:
+             return ''
++        finally:
++            # A raw command is the fourth way the bands can change, and the
++            # one the cache never heard about: `mmcli --command='AT+EPBSEH=...'`
++            # or `AT+ERAT=...` rewrites them behind SetCurrentBands' back, and
++            # CurrentBands kept serving the old list until ModemManager was
++            # restarted. Nothing here parses what the command was, so any
++            # command drops the cache - the price is one extra read.
++            self._band_cache.clear()
+ 
+         data = received_data.strip()
+         data_print = data.replace('\n', ' ')
+@@ -1505,19 +1661,32 @@
                      output_bytes.append(int(group[j:j+2], 16))
          return output_bytes
  
@@ -486,7 +501,7 @@
                  return output
          except Exception as e:
              ofono2mm_print(f"Failed to get supported bands from AT: {str(e)}, returning dummy list", self.verbose)
-@@ -1526,16 +1687,8 @@
+@@ -1526,16 +1695,8 @@
      @dbus_property(access=PropertyAccess.READ)
      async def CurrentBands(self) -> 'au':
          try:
@@ -505,7 +520,7 @@
                  return output
          except Exception as e:
              ofono2mm_print(f"Failed to get current bands from AT: {str(e)}, returning dummy list", self.verbose)
-@@ -1557,7 +1710,55 @@
+@@ -1557,7 +1718,55 @@
              protocol = 1
          return protocol
  

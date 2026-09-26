@@ -1456,6 +1456,14 @@ class MMModemInterface(ServiceInterface):
             received_data = await self.ofono_interfaces['org.ofono.FuriLabs.AT'].call_send_command(f"{cmd}\r\n")
         except Exception:
             return ''
+        finally:
+            # A raw command is the fourth way the bands can change, and the
+            # one the cache never heard about: `mmcli --command='AT+EPBSEH=...'`
+            # or `AT+ERAT=...` rewrites them behind SetCurrentBands' back, and
+            # CurrentBands kept serving the old list until ModemManager was
+            # restarted. Nothing here parses what the command was, so any
+            # command drops the cache - the price is one extra read.
+            self._band_cache.clear()
 
         data = received_data.strip()
         data_print = data.replace('\n', ' ')

@@ -153,9 +153,37 @@ def clears_cache(func):
 
 
 # Setting bands, restoring the saved ones at start, and the AT interface coming
-# (back) up after an oFono or modem restart are the three ways they change.
-for func in ("SetCurrentBands", "_restore_saved_bands", "add_ofono_interface"):
+# (back) up after an oFono or modem restart are three ways they change. The
+# fourth is the one this list first forgot, because it shared the cache's own
+# idea of who writes bands: the Command method hands any AT string straight to
+# the modem, and "mmcli --command='AT+EPBSEH=...'" left CurrentBands reporting
+# the old list until ModemManager was restarted.
+for func in ("SetCurrentBands", "_restore_saved_bands", "add_ofono_interface", "Command"):
     check(f"{func} drops the cache", True, clears_cache(func))
+
+# And by behaviour, not only by the presence of a call: a band change sent as
+# a raw command is seen by the next read.
+NS_CMD = load("Command")
+
+
+class AtIface:
+    def __init__(self, fail=False):
+        self.fail = fail
+
+    async def call_send_command(self, _cmd):
+        if self.fail:
+            raise RuntimeError("modem gone")
+        return "OK"
+
+
+for fail in (False, True):
+    m = Modem([ANSWER, ANSWER])
+    m.ofono_interfaces = {"org.ofono.FuriLabs.AT": AtIface(fail)}
+    run(m.CurrentBands())
+    run(NS_CMD["Command"](m, 'AT+EPBSEH="00","00","00","00"', 0))
+    run(m.CurrentBands())
+    check("a raw command " + ("that fails " if fail else "")
+          + "makes the next read ask the modem", 2, len(m.sent))
 
 print(f"\n  {RUN} checks, {FAILED} failed")
 sys.exit(1 if FAILED else 0)
