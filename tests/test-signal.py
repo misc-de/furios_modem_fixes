@@ -262,5 +262,135 @@ check("an empty answer keeps the last reading", 0.0,
       kept.props["Lte"].value["rsrp"].value)
 check("an empty answer reports no quality", None, modem.quality)
 
+print("\n\033[1m== the modem is only asked when somebody can see the bar\033[0m")
+# Measured with the screen off: every Strength change set off a full cell query,
+# nine a minute, and the modem woke the phone out of suspend each time.
+import tempfile  # noqa: E402
+
+SCREEN = os.path.join(tempfile.mkdtemp(), "screen")
+sig.SCREEN_STATE_FILE = SCREEN
+
+
+def screen(state):
+    if state is None:
+        if os.path.exists(SCREEN):
+            os.unlink(SCREEN)
+        return
+    with open(SCREEN, "w") as f:
+        f.write(state + "\n")
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+clock = Clock()
+sig.time = clock
+
+
+class CountingMonitor(FakeNetworkMonitor):
+    def __init__(self):
+        super().__init__({"Technology": Variant("s", "lte"), "Strength": Variant("y", 15)})
+        self.calls = 0
+
+    async def call_get_serving_cell_information(self):
+        self.calls += 1
+        return self.cellinfo
+
+
+def fresh_iface():
+    props = FakeInterfaceProps({
+        "org.ofono.SimManager": FakeProps({
+            "Present": Variant("b", True),
+            "PinRequired": Variant("s", "none"),
+        }),
+    })
+    mon = CountingMonitor()
+    iface = sig.MMModemSignalInterface(
+        "/ril_0", {"org.ofono.NetworkMonitor": mon}, props, False, FakeModem())
+    return iface, mon
+
+
+screen("yes")
+check("the file says yes: screen on", True, sig._screen_is_on())
+screen("no")
+check("the file says no: screen off", False, sig._screen_is_on())
+screen(None)
+check("no file (no batman): treated as on", True, sig._screen_is_on())
+
+screen("yes")
+iface, mon = fresh_iface()
+asyncio.run(iface.refresh())
+check("a change with the screen on asks", 1, mon.calls)
+clock.now += 3
+asyncio.run(iface.refresh())
+check("a second change three seconds later does not", 1, mon.calls)
+clock.now += sig.SIGNAL_REFRESH_MIN_GAP
+asyncio.run(iface.refresh())
+check("one after the gap does", 2, mon.calls)
+
+screen("no")
+clock.now += 3600
+asyncio.run(iface.refresh())
+check("with the screen off a change never asks", 2, mon.calls)
+
+
+class Stop(Exception):
+    pass
+
+
+def run_poll(iface, ticks, on_tick=None):
+    """Run poll_signal for a number of sleeps, the clock moving with them."""
+    count = [0]
+    real_asyncio = sig.asyncio
+
+    async def fake_sleep(seconds):
+        count[0] += 1
+        if count[0] > ticks:
+            raise Stop
+        clock.now += seconds
+        if on_tick:
+            on_tick(count[0])
+
+    sig.asyncio = type("A", (), {"sleep": staticmethod(fake_sleep),
+                                  "CancelledError": real_asyncio.CancelledError,
+                                  "create_task": real_asyncio.create_task})
+    try:
+        real_asyncio.run(iface.poll_signal())
+    except Stop:
+        pass
+    finally:
+        sig.asyncio = real_asyncio
+
+
+screen("no")
+iface, mon = fresh_iface()
+iface.have_measurement = True
+iface.last_query = clock.now
+# Ten minutes of screen off, in 5 s ticks.
+run_poll(iface, sig.SIGNAL_POLL_SCREEN_OFF_INTERVAL // sig.SIGNAL_POLL_TICK - 1)
+check("ten minutes with the screen off: no query", 0, mon.calls)
+run_poll(iface, 1)
+check("but the safety net asks once after that", 1, mon.calls)
+
+screen("no")
+iface, mon = fresh_iface()
+iface.have_measurement = True
+iface.last_query = clock.now
+run_poll(iface, 3, on_tick=lambda n: screen("yes") if n == 2 else None)
+check("the screen coming on asks straight away", 1, mon.calls)
+
+screen("yes")
+iface, mon = fresh_iface()
+iface.have_measurement = True
+iface.last_query = clock.now
+# Two minutes with the screen on: every SIGNAL_POLL_INTERVAL, not every tick.
+run_poll(iface, 120 // sig.SIGNAL_POLL_TICK)
+check("with the screen on it polls every 30 s", 120 // sig.SIGNAL_POLL_INTERVAL, mon.calls)
+
 print(f"\n  {RUN} checks, {FAILED} failed")
 sys.exit(1 if FAILED else 0)

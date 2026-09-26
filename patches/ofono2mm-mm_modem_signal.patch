@@ -1,6 +1,12 @@
 --- a/ofono2mm/mm_modem_signal.py
 +++ b/ofono2mm/mm_modem_signal.py
-@@ -8,14 +8,128 @@
+@@ -1,4 +1,5 @@
+ import asyncio
++import time
+ 
+ from copy import deepcopy
+ 
+@@ -8,14 +9,156 @@
  
  from ofono2mm.logging import ofono2mm_print
  
@@ -19,6 +25,26 @@
 +# forever.
 +SIGNAL_POLL_STARTUP_INTERVAL = 3
 +SIGNAL_POLL_STARTUP_TRIES = 20
++
++# Every one of those half seconds of cell reporting is modem traffic, and modem
++# traffic wakes the phone. Measured with the screen off: oFono's Strength
++# changed about nine times a minute and every change set off a full cell query,
++# the modem interrupted the AP more than once a second, and suspend never
++# lasted a quarter of a second.
++#
++# So: a query set off by a change comes at most every SIGNAL_REFRESH_MIN_GAP
++# seconds, and with the screen off nobody sees the bar and nothing is asked
++# except a slow safety net - should the screen file ever go stale, the bar is
++# at most that old. When the screen comes on the loop notices within
++# SIGNAL_POLL_TICK seconds and asks straight away. Reading the file costs no
++# modem traffic, so the tick is cheap.
++SIGNAL_REFRESH_MIN_GAP = 10
++SIGNAL_POLL_TICK = 5
++SIGNAL_POLL_SCREEN_OFF_INTERVAL = 600
++
++# batman writes "yes" or "no" here on every display change; oFono's own device
++# monitor reads the same file. No batman, no file: behave as with the screen on.
++SCREEN_STATE_FILE = '/var/lib/batman/screen'
 +
 +# Plausible ranges, used to throw away the "unknown" placeholders the HAL likes
 +# to send (0, 99, 0x7fffffff, ...) instead of feeding them to ModemManager.
@@ -42,6 +68,13 @@
 +    (-113.0, 0.0), (-107.0, 10.0), (-98.0, 30.0),
 +    (-89.0, 50.0), (-80.0, 70.0), (-70.0, 90.0), (-60.0, 100.0),
 +)
++
++def _screen_is_on(path=None):
++    try:
++        with open(path or SCREEN_STATE_FILE) as f:
++            return f.read().strip() != 'no'
++    except OSError:
++        return True
 +
 +def _signed_level(variant, valid_range):
 +    """
@@ -127,10 +160,11 @@
 +        self.mm_modem = mm_modem
          self.is_busy = False
 +        self.have_measurement = False
++        self.last_query = None
          self.verbose = verbose
          self.props = {
              'Rate': Variant('u', 0),
-@@ -46,6 +160,22 @@
+@@ -46,6 +189,22 @@
              })
          }
  
@@ -153,7 +187,15 @@
      async def set_props(self):
          ofono2mm_print("Setting properties", self.verbose)
  
-@@ -79,18 +209,58 @@
+@@ -68,6 +227,7 @@
+ 
+         if 'org.ofono.NetworkMonitor' in self.ofono_interfaces:
+             self.is_busy = True
++            self.last_query = time.monotonic()
+             old_props = deepcopy(self.props)
+ 
+             cellinfo = {}
+@@ -79,18 +239,58 @@
                  self.is_busy = False
  
              tech = cellinfo.get('Technology', Variant('s', '')).value
@@ -222,10 +264,28 @@
  
              changed_props = {}
              for prop in self.props:
-@@ -100,6 +270,28 @@
+@@ -100,6 +300,56 @@
              if changed_props:
                  self.emit_properties_changed(changed_props)
  
++    def _since_last_query(self):
++        if self.last_query is None:
++            return None
++        return time.monotonic() - self.last_query
++
++    async def refresh(self):
++        """
++        A change asks for fresh numbers. Honour it only when somebody can see
++        the bar and the last query is not too recent - see
++        SIGNAL_REFRESH_MIN_GAP. What is dropped here the poll picks up.
++        """
++        if not _screen_is_on():
++            return
++        since = self._since_last_query()
++        if since is not None and since < SIGNAL_REFRESH_MIN_GAP:
++            return
++        await self.set_props()
++
 +    async def poll_signal(self):
 +        """
 +        Keep the measurements fresh. oFono pushes no signal strength at all on
@@ -234,20 +294,42 @@
 +        """
 +        tries = 0
 +
-+        while True:
-+            if self.have_measurement or tries >= SIGNAL_POLL_STARTUP_TRIES:
-+                await asyncio.sleep(SIGNAL_POLL_INTERVAL)
-+            else:
-+                tries += 1
-+                await asyncio.sleep(SIGNAL_POLL_STARTUP_INTERVAL)
++        while not self.have_measurement and tries < SIGNAL_POLL_STARTUP_TRIES:
++            tries += 1
++            await asyncio.sleep(SIGNAL_POLL_STARTUP_INTERVAL)
++            await self._poll_once()
 +
-+            try:
-+                await self.set_props()
-+            except asyncio.CancelledError:
-+                raise
-+            except Exception as e:
-+                ofono2mm_print(f"Failed to poll signal: {e}", self.verbose)
++        screen_was_on = _screen_is_on()
++        while True:
++            await asyncio.sleep(SIGNAL_POLL_TICK)
++            screen_on = _screen_is_on()
++            interval = SIGNAL_POLL_INTERVAL if screen_on else SIGNAL_POLL_SCREEN_OFF_INTERVAL
++            since = self._since_last_query()
++            due = since is None or since >= interval or (screen_on and not screen_was_on)
++            screen_was_on = screen_on
++            if due:
++                await self._poll_once()
++
++    async def _poll_once(self):
++        try:
++            await self.set_props()
++        except asyncio.CancelledError:
++            raise
++        except Exception as e:
++            ofono2mm_print(f"Failed to poll signal: {e}", self.verbose)
 +
      @method()
      def Setup(self, rate: 'u'):
          ofono2mm_print(f"Setup with rate {rate}", self.verbose)
+@@ -139,9 +389,9 @@
+         return self.props['Nr5g'].value
+ 
+     def ofono_changed(self, _name, _varval):
+-        asyncio.create_task(self.set_props())
++        asyncio.create_task(self.refresh())
+ 
+     def ofono_interface_changed(self, _iface):
+         def ch(_name, _varval):
+-            asyncio.create_task(self.set_props())
++            asyncio.create_task(self.refresh())
+         return ch
