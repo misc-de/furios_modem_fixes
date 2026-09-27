@@ -555,7 +555,10 @@ prune_backups() {
 # a phone to the shipped state.
 recorded_profile() {
     local p
-    [ -f "$PROFILE_FILE" ] || { echo fixed; return; }
+    # Nothing recorded is nothing chosen: after an installation every option
+    # is off until somebody switches it on. It used to read "fixed", so an
+    # installation put every repair in by itself.
+    [ -f "$PROFILE_FILE" ] || { echo shipped; return; }
     p=$(head -1 "$PROFILE_FILE" 2>/dev/null | tr -d '[:space:]')
     case " $PROFILES " in
         *" $p "*) echo "$p" ;;
@@ -1044,6 +1047,25 @@ cmd_profile() {
     return 0
 }
 
+# For phones an earlier version set up. That one read "nothing recorded" as
+# "fixed" and put the repairs in by itself, so a phone running them may have no
+# file saying so - and with "nothing recorded" now meaning "off", the next boot
+# would take them out of a phone that has been relying on them. Run by
+# install.sh and the postinst, never by boot: after a "try fixed" boot must
+# still go back to off, and a file written here would make the try permanent.
+cmd_adopt() {
+    local act
+    [ -f "$PROFILE_FILE" ] && return 0
+    act=$(actual_profile)
+    [ "$act" = shipped ] && return 0
+    need_write adopt
+    printf 'fixed\n' > "$PROFILE_FILE" || { bad "could not record the profile in $PROFILE_FILE"; return 1; }
+    chmod 644 "$PROFILE_FILE" 2>/dev/null || true
+    say "The repairs were already in place (an earlier version switched them on"
+    say "by itself) - recorded as \"fixed\" so they stay. Off: modemctl set shipped"
+    return 0
+}
+
 # set = say what the phone should be, and make it so. try = make it so now and
 # let the next boot put it back. The difference is one file.
 cmd_switch() {
@@ -1486,6 +1508,8 @@ modemctl $VERSION - keeps the FuriOS modem fixes applied
   modemctl signal          what the radio really receives, cross-checked
   modemctl boot            make the phone match the recorded profile
                            (used by the boot unit and the apt hook)
+  modemctl adopt           record "fixed" if an earlier version put the
+                           repairs in without recording it (installers)
   modemctl settle          after restarting ModemManager by hand: put
                            NetworkManager back in order and say who else
                            lost the modem
@@ -1527,6 +1551,7 @@ case "$CMD" in
     set)          cmd_switch "${1:-}" 1 ;;
     try)          cmd_switch "${1:-}" "" ;;
     boot)         cmd_boot ;;
+    adopt)        cmd_adopt ;;
     settle)       cmd_settle ;;
     check)        cmd_check ;;
     signal)       cmd_signal ;;

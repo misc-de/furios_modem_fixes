@@ -709,23 +709,40 @@ patch_count() {
 rm -f "$PROFILEF" "$DBUSD"/furios-modem-cellbroadcast.conf
 write_cbs_db "$SHIPPED" "$SHIPPED"
 reset_tree original 1.4
-check "with no file recorded, the phone is meant to be fixed" "recorded: fixed" \
+check "with no file recorded, nothing is chosen - the repairs are off" "recorded: shipped" \
       "$(sandbox bash "$ROOT/modemctl" profile | head -1)"
 
-# boot is what the unit and the hook run. With nothing recorded it applies.
+# boot is what the unit and the hook run. After an installation everything is
+# off until somebody switches it on, so with nothing recorded it adds nothing.
 sandbox bash "$ROOT/modemctl" boot --quiet --no-restart >/dev/null 2>&1
-check "and boot puts the repairs in" fixed \
+check "and boot leaves them out" shipped \
       "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+check "adopt on an untouched phone records nothing" no \
+      "$(sandbox bash "$ROOT/modemctl" adopt >/dev/null 2>&1; [ -f "$PROFILEF" ] && echo yes || echo no)"
 
 # try: switch now, record nothing.
-sandbox bash "$ROOT/modemctl" try shipped --quiet --no-restart >/dev/null 2>&1
-check "try shipped takes them out" shipped \
+sandbox bash "$ROOT/modemctl" try fixed --quiet --no-restart >/dev/null 2>&1
+check "try fixed puts them in" fixed \
       "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
 check "and records nothing" no \
       "$([ -f "$PROFILEF" ] && echo yes || echo no)"
 sandbox bash "$ROOT/modemctl" boot --quiet --no-restart >/dev/null 2>&1
-check "so the next boot brings them back" fixed \
+check "so the next boot takes them out again" shipped \
       "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+
+# A phone an earlier version switched on by itself: repairs in, no file. The
+# installers adopt that as "fixed" - otherwise the first boot after the update
+# would take away what the phone has been relying on.
+sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+sandbox bash "$ROOT/modemctl" adopt >/dev/null 2>&1
+check "adopt records a phone that already runs the repairs" fixed "$(cat "$PROFILEF" 2>/dev/null)"
+sandbox bash "$ROOT/modemctl" boot --quiet --no-restart >/dev/null 2>&1
+check "and boot keeps them" fixed \
+      "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+printf 'shipped\n' > "$PROFILEF"
+sandbox bash "$ROOT/modemctl" adopt >/dev/null 2>&1
+check "adopt never overrides a recorded choice" shipped "$(cat "$PROFILEF" 2>/dev/null)"
+rm -f "$PROFILEF"
 
 # set: switch now, and mean it.
 sandbox bash "$ROOT/modemctl" set shipped --quiet --no-restart >/dev/null 2>&1

@@ -195,7 +195,10 @@ if [ "$1" = configure ]; then
     # fallback route and the data-call supervisor back on a phone whose owner
     # had switched them off, for good, since enable survives the reboot that
     # "modemctl boot" would otherwise have used to set things straight.
-    if [ "$(/usr/bin/modemctl profile 2>/dev/null | sed -n 's/^recorded: *//p')" != shipped ]; then
+    # Only on a phone recorded as "fixed": after an installation everything
+    # is off. adopt keeps a phone an earlier version switched on by itself.
+    /usr/bin/modemctl adopt --quiet >/dev/null 2>&1 || true
+    if [ "$(/usr/bin/modemctl profile 2>/dev/null | sed -n 's/^recorded: *//p')" = fixed ]; then
         systemctl enable --now furios-mobile-route.service >/dev/null 2>&1 || true
         systemctl enable --now furios-mobile-context.service >/dev/null 2>&1 || true
     fi

@@ -92,8 +92,12 @@ sudo systemctl enable furios-modem-fixes.service >/dev/null
 # Unless the phone is recorded as "shipped": the watchers are half of that
 # profile, and "modemctl set shipped" is how they were switched off. Re-running
 # this to update used to switch them back on for good.
+# After an installation everything is off: nothing recorded means "shipped",
+# and the watchers only run on a phone recorded as "fixed". adopt first, so a
+# phone an earlier version switched on by itself keeps what it relies on.
+sudo "$BIN/modemctl" adopt
 RECORDED=$("$BIN/modemctl" profile 2>/dev/null | sed -n 's/^recorded: *//p')
-if [ "$RECORDED" != shipped ]; then
+if [ "$RECORDED" = fixed ]; then
     sudo systemctl enable --now furios-mobile-route.service >/dev/null
     sudo systemctl enable --now furios-mobile-context.service >/dev/null
 fi
@@ -105,9 +109,9 @@ sudo systemctl try-restart furios-mobile-route.service furios-mobile-context.ser
 # apt hook run. With apply, re-running this on a phone recorded as "shipped"
 # put every repair back, said "Installed", and the boot unit took them all out
 # again at the next start: a phone that changed state across a reboot for no
-# reason anybody could see. With nothing recorded, boot is apply.
+# reason anybody could see. With nothing recorded, boot leaves everything off.
 sudo "$BIN/modemctl" boot
-[ "$RECORDED" = shipped ] && echo "Recorded profile is shipped - switch with: sudo modemctl set fixed"
+[ "$RECORDED" = fixed ] || echo "The repairs are off - switch them on with: sudo modemctl set fixed"
 
 echo
 echo "Installed. Check any time with:  modemctl status"

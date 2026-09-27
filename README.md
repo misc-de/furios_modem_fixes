@@ -25,10 +25,17 @@ or as a package:
 
     ./packaging/build-deb.sh --install
 
-Both apply everything immediately and enable three units: one that restores the
-patches after a package update, one that keeps a default route on mobile data,
-and one that brings the data context back when it drops. Undo with
-`./uninstall.sh` or `apt remove furios-modem-fixes`.
+Both install and change nothing: after an installation the repairs are off.
+Switch them on with
+
+    sudo modemctl set fixed
+
+which applies the patches, records the choice, and starts the two watchers
+(a default route on mobile data, and bringing the data context back when it
+drops). From then on a boot unit and an apt hook keep the recorded profile in
+place across package updates. A phone that an earlier version had already
+switched on keeps its repairs - the installers record that as "fixed". Undo
+with `./uninstall.sh` or `apt remove furios-modem-fixes`.
 
 ## Usage
 

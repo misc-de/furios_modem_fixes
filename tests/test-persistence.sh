@@ -326,6 +326,9 @@ postinst_enables() {
 }
 check "postinst enables both watchers on a fixed phone" 2 "$(postinst_enables fixed)"
 check "and neither on a phone recorded as shipped" 0 "$(postinst_enables shipped)"
+# After an installation everything is off: an unknown or empty answer is not
+# a licence to start them.
+check "and neither when nothing is recorded" 0 "$(postinst_enables "")"
 
 # The recorded profile is written by modemctl, so dpkg has never heard of it.
 # Nothing removed it: a "shipped" recorded before an uninstall was what the
