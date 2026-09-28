@@ -815,7 +815,7 @@ check "half applied is called half applied" mixed \
 rm -f "$PROFILEF"
 
 # The two words the app on the phone reads this by. It lives in another
-# package (furios_pipewire), so these keys are a contract between two
+# package (furios_audio), so these keys are a contract between two
 # repositories - and a contract only one side checks is a hope. The other half
 # asserts that the app parses exactly these two; this half asserts that they
 # are what gets printed.
