@@ -40,7 +40,7 @@ sudo rm -f /etc/systemd/system/furios-modem-fixes.service \
            /usr/share/polkit-1/actions/de.misc-de.modemctl.policy \
            /etc/furios-modem-fixes.profile \
            /etc/furios-modem-fixes.sim
-sudo rm -rf /usr/local/share/furios-modem
+sudo rm -rf /usr/local/share/furios-modem /var/lib/furios-modem-fixes
 sudo systemctl daemon-reload
 
 echo "Shipped state restored. Takes effect after: sudo systemctl restart ModemManager"

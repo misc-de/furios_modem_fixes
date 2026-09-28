@@ -107,4 +107,54 @@ check_status "two slot sections are refused" 1 mc sim 1 --no-restart
 check "and left as they were" same "$(cmp -s "$WORK/two" "$CONF" && echo same || echo differs)"
 check "the query says so" unknown "$(key active)"
 
+# --- names ------------------------------------------------------------------
+cp "$SHIPPED" "$CONF"; rm -f "$SIMF"
+NAMES="$WORK/sim-names"
+DB="$WORK/providers.xml"
+cat > "$DB" <<'XML'
+<serviceproviders>
+<country code="de">
+<provider><name>1&amp;1 Mobile</name><gsm><network-id mcc="262" mnc="23"/>
+<apn value="x"><name>not this one</name></apn></gsm></provider>
+<provider><name>Vodafone</name><gsm><network-id mcc="262" mnc="02"/></gsm></provider>
+<provider><name>Some reseller</name><gsm><network-id mcc="262" mnc="02"/></gsm></provider>
+</country>
+</serviceproviders>
+XML
+cat > "$STUB/getprop" <<'STUB'
+#!/bin/sh
+case "$1" in
+  ro.telephony.sim.count)          echo 2 ;;
+  gsm.sim.preiccid_0)              echo 8949360 ;;
+  gsm.sim.preiccid_1)              echo "${FAKE_ICCID_1:-8949024}" ;;
+  vendor.gsm.ril.uicc.mccmnc)      echo 26202 ;;
+  vendor.gsm.ril.uicc.mccmnc.1)    echo "${FAKE_MCCMNC_1:-26223}" ;;
+esac
+STUB
+mcn() {
+    env PATH="$STUB:$PATH" MODEMCTL_TARGET="$WORK/target" MODEMCTL_RADIO_CONF="$CONF" \
+        MODEMCTL_SIM="$SIMF" MODEMCTL_SIM_NAMES="$NAMES" MODEMCTL_CBS_DB="$DB" \
+        MODEMCTL_SHARE="$ROOT" bash "$ROOT/modemctl" sim 2>/dev/null | sed -n "s/^$1: *//p"
+}
+check "a code with one provider gives its name, entities decoded" "1&1 Mobile" "$(mcn name2)"
+check "a code shared with a reseller gives no name at all" "" "$(mcn name1)"
+
+printf '2\t8949024\tRemembered\n' > "$NAMES"
+check "a remembered name wins over the database" Remembered "$(mcn name2)"
+check "a swapped card does not inherit it" "1&1 Mobile" "$(FAKE_ICCID_1=8949111 mcn name2)"
+
+# The active slot asks oFono, and what the SIM says is text from outside.
+cat > "$STUB/dbus-send" <<'STUB'
+#!/bin/sh
+case "$*" in
+  *GetModems*)    echo '         object path "/ril_0"' ;;
+  *SimManager*)   echo '         string "ServiceProviderName"'
+                  printf '         variant             string "Live\033]0;x\007 SIM"\n' ;;
+  *)              exit 1 ;;
+esac
+STUB
+chmod +x "$STUB/dbus-send"
+check "the active slot shows what its SIM says, control bytes stripped" \
+      "Live]0;x SIM" "$(mcn name1)"
+
 summary

@@ -17,7 +17,7 @@ if [ "$(id -u)" -eq 0 ]; then
     for v in MODEMCTL_TARGET MODEMCTL_RADIO_CONF MODEMCTL_SHARE MODEMCTL_PATCHES \
              MODEMCTL_NM_CONF_D MODEMCTL_RESOLV MODEMCTL_NM_RESOLV \
              MODEMCTL_DBUS_CONF_D MODEMCTL_CBS_DB MODEMCTL_PROFILE \
-             MODEMCTL_SYSTEMD_CONF_D MODEMCTL_SHELL_SYSTEM_UNIT MODEMCTL_SIM; do
+             MODEMCTL_SYSTEMD_CONF_D MODEMCTL_SHELL_SYSTEM_UNIT MODEMCTL_SIM MODEMCTL_SIM_NAMES; do
         if [ -n "${!v:-}" ]; then
             echo "refusing to honour $v as root - that would be an arbitrary-file patch" >&2
             exit 3
@@ -135,6 +135,8 @@ WATCHERS="furios-mobile-route.service furios-mobile-context.service"
 # Which SIM slot oFono talks to: "2", or nothing. Nothing recorded is slot 1,
 # the one the phone shipped with, and then boot leaves the config alone.
 SIM_FILE=${MODEMCTL_SIM:-/etc/furios-modem-fixes.sim}
+# What each slot's card was called when it was last the active one.
+SIM_NAMES=${MODEMCTL_SIM_NAMES:-/var/lib/furios-modem-fixes/sim-names}
 
 QUIET=0
 NO_RESTART=0
@@ -398,6 +400,91 @@ sim_recorded() {
     local r
     r=$(cat "$SIM_FILE" 2>/dev/null)
     case "$r" in [2-9]) echo "$r" ;; *) echo 1 ;; esac
+}
+
+# --- SIM names --------------------------------------------------------------
+#
+# "SIM 1" and "SIM 2" say which slot, not which card. The name is easy for the
+# card oFono uses - the SIM carries it - and not there at all for the other,
+# because oFono only ever sees one slot. So: the live name for the active slot,
+# the name remembered from when a slot was last active (for as long as the
+# same card is in it), and otherwise the network code the RIL read from the
+# card, looked up in the provider database - only when that gives exactly one
+# name, since most codes are shared by a network and its resellers.
+
+# Text from a SIM ends up in a program running as root and on the screen: one
+# printable line, no longer than a name has to be.
+sim_clean_name() {
+    tr -cd '[:print:]' | cut -c1-32 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+sim_iccid_prefix() {
+    getprop "gsm.sim.preiccid_$(( $1 - 1 ))" 2>/dev/null | tr -cd '0-9'
+}
+
+# The card oFono is using right now: what it says it is, or failing that the
+# network it is registered on.
+sim_live_name() {
+    local modem name
+    modem=$(modem_path) || return 1
+    name=$(timeout 5 dbus-send --system --print-reply --dest=org.ofono "$modem" \
+        org.ofono.SimManager.GetProperties 2>/dev/null \
+        | grep -A1 '"ServiceProviderName"' | sed -n 's/.*variant *string "\(.*\)"$/\1/p')
+    if [ -z "$name" ]; then
+        name=$(timeout 5 dbus-send --system --print-reply --dest=org.ofono "$modem" \
+            org.ofono.NetworkRegistration.GetProperties 2>/dev/null \
+            | grep -A1 '"Name"' | sed -n 's/.*variant *string "\(.*\)"$/\1/p')
+    fi
+    name=$(printf '%s' "$name" | sim_clean_name)
+    [ -n "$name" ] && printf '%s' "$name"
+}
+
+# The RIL reads MCC+MNC from every unlocked card, whichever slot oFono uses:
+# vendor.gsm.ril.uicc.mccmnc for slot 1, .1 for slot 2.
+sim_db_name() {
+    local n=$1 prop mccmnc
+    prop=vendor.gsm.ril.uicc.mccmnc
+    [ "$n" -gt 1 ] && prop="$prop.$(( n - 1 ))"
+    mccmnc=$(getprop "$prop" 2>/dev/null | tr -cd '0-9')
+    [ ${#mccmnc} -ge 5 ] && [ -f "$CBS_DB" ] || return 1
+    awk -v mcc="${mccmnc:0:3}" -v mnc="${mccmnc:3}" '
+        /<provider[ >]/ { inp = 1; name = ""; hit = 0 }
+        inp && name == "" && /<name[ >]/ {
+            name = $0
+            sub(/.*<name[^>]*>/, "", name); sub(/<\/name>.*/, "", name)
+            gsub(/&amp;/, "\\&", name)
+        }
+        inp && /<network-id/ && index($0, "mcc=\"" mcc "\"") && index($0, "mnc=\"" mnc "\"") { hit = 1 }
+        /<\/provider>/ { if (hit && name != "") names[tolower(name)] = name; inp = 0 }
+        END { for (k in names) { c++; last = names[k] } if (c == 1) print last }
+    ' "$CBS_DB" | sim_clean_name
+}
+
+# Remembered per slot together with the card's ICCID prefix, so a card that
+# was swapped does not keep the old one's name. Root only - the file is in
+# /var/lib - and silently skipped otherwise: a name is a convenience.
+sim_remember_name() {
+    local n=$1 name=$2 prefix tmp
+    [ -n "$name" ] || return 0
+    prefix=$(sim_iccid_prefix "$n")
+    mkdir -p "$(dirname "$SIM_NAMES")" 2>/dev/null || return 0
+    tmp=$( { grep -v "^$n	" "$SIM_NAMES" 2>/dev/null; printf '%s\t%s\t%s\n' "$n" "$prefix" "$name"; } )
+    printf '%s\n' "$tmp" > "$SIM_NAMES" 2>/dev/null || return 0
+    chmod 644 "$SIM_NAMES" 2>/dev/null || true
+}
+
+sim_name() {
+    local n=$1 active=$2 name prefix
+    if [ "$n" = "$active" ]; then
+        name=$(sim_live_name) && { printf '%s' "$name"; return 0; }
+    fi
+    prefix=$(sim_iccid_prefix "$n")
+    if [ -n "$prefix" ] && [ -f "$SIM_NAMES" ]; then
+        name=$(awk -F '\t' -v n="$n" -v p="$prefix" '$1 == n && $2 == p { print $3 }' "$SIM_NAMES" \
+               | tail -1 | sim_clean_name)
+        [ -n "$name" ] && { printf '%s' "$name"; return 0; }
+    fi
+    sim_db_name "$n"
 }
 
 # The config for slot N, on stdout. Slot 1 gives the file back as it shipped:
@@ -1276,6 +1363,9 @@ cmd_sim() {
         printf 'active: %s\n' "$active"
         printf 'recorded: %s\n' "$(sim_recorded)"
         printf 'present: %s\n' "${present:-none}"
+        for i in $(seq 1 "$count"); do
+            sim_present "$i" && printf 'name%s: %s\n' "$i" "$(sim_name "$i" "$active")"
+        done
         return 0
     fi
 
@@ -1291,6 +1381,10 @@ cmd_sim() {
     fi
 
     head_ "SIM slot"
+    # The name of the card being left, while oFono can still read it.
+    active=$(sim_conf_slot)
+    [ "$active" != "$want" ] && [ "$NO_RESTART" -eq 0 ] && \
+        sim_remember_name "$active" "$(sim_live_name)"
     sim_conf_set "$want" || return 1
     if [ "$want" = 1 ]; then
         rm -f "$SIM_FILE" || { bad "could not remove $SIM_FILE"; return 1; }
@@ -1305,6 +1399,8 @@ cmd_sim() {
         sim_present "$want" || warn "no SIM detected in slot $want"
         if [ "$NO_RESTART" -eq 0 ]; then
             sim_restart_stack || rc=1
+            MODEM_PATH=
+            sim_remember_name "$want" "$(sim_live_name)"
         else
             say "Changed but not restarted. Takes effect with: systemctl restart ofono ModemManager"
         fi
