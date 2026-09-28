@@ -8,6 +8,9 @@ cd "$(dirname "$0")"
 # Revert first - afterwards modemctl and the patches are gone and the ofono2mm
 # files would stay patched with nothing left to undo them.
 sudo /usr/local/bin/modemctl revert || true
+# oFono back on slot 1, from the next boot on: restarting oFono by hand
+# leaves the modem offline.
+sudo /usr/local/bin/modemctl sim 1 --no-restart || true
 
 sudo systemctl disable --now furios-modem-fixes.service 2>/dev/null || true
 sudo systemctl disable --now furios-mobile-route.service 2>/dev/null || true
@@ -35,11 +38,13 @@ sudo rm -f /etc/systemd/system/furios-modem-fixes.service \
            /usr/local/bin/furios-mobile-route \
            /usr/local/bin/furios-mobile-context \
            /usr/share/polkit-1/actions/de.misc-de.modemctl.policy \
-           /etc/furios-modem-fixes.profile
+           /etc/furios-modem-fixes.profile \
+           /etc/furios-modem-fixes.sim
 sudo rm -rf /usr/local/share/furios-modem
 sudo systemctl daemon-reload
 
 echo "Shipped state restored. Takes effect after: sudo systemctl restart ModemManager"
+echo "A SIM slot other than 1 goes back to slot 1 at the next reboot."
 echo
 echo "Note: the data connection flaps again on the shipped radioInterface 1.4."
 echo "That is the state the phone came in, not a working one."

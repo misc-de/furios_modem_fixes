@@ -17,7 +17,7 @@ if [ "$(id -u)" -eq 0 ]; then
     for v in MODEMCTL_TARGET MODEMCTL_RADIO_CONF MODEMCTL_SHARE MODEMCTL_PATCHES \
              MODEMCTL_NM_CONF_D MODEMCTL_RESOLV MODEMCTL_NM_RESOLV \
              MODEMCTL_DBUS_CONF_D MODEMCTL_CBS_DB MODEMCTL_PROFILE \
-             MODEMCTL_SYSTEMD_CONF_D MODEMCTL_SHELL_SYSTEM_UNIT; do
+             MODEMCTL_SYSTEMD_CONF_D MODEMCTL_SHELL_SYSTEM_UNIT MODEMCTL_SIM; do
         if [ -n "${!v:-}" ]; then
             echo "refusing to honour $v as root - that would be an arbitrary-file patch" >&2
             exit 3
@@ -131,6 +131,10 @@ PATCHES=${MODEMCTL_PATCHES:-$SHARE/patches}
 PROFILE_FILE=${MODEMCTL_PROFILE:-/etc/furios-modem-fixes.profile}
 PROFILES="fixed shipped"
 WATCHERS="furios-mobile-route.service furios-mobile-context.service"
+
+# Which SIM slot oFono talks to: "2", or nothing. Nothing recorded is slot 1,
+# the one the phone shipped with, and then boot leaves the config alone.
+SIM_FILE=${MODEMCTL_SIM:-/etc/furios-modem-fixes.sim}
 
 QUIET=0
 NO_RESTART=0
@@ -346,6 +350,157 @@ call_in_progress() {
     calls=$(timeout 5 dbus-send --system --print-reply --dest=org.ofono "$modem" \
         org.ofono.VoiceCallManager.GetCalls 2>/dev/null) || return 1
     printf '%s' "$calls" | grep -q 'object path'
+}
+
+# --- SIM slot ---------------------------------------------------------------
+#
+# The phone has two SIM slots but one radio (DSDS), and FuriOS only ever gives
+# oFono the first. Using both at once would mean a second modem that the
+# shell, ModemManager's clients and every repair here know nothing about. So
+# this chooses one: the config names the other slot and keeps the path
+# /ril_0, and nothing above oFono can tell the difference.
+#
+# The binder plugin takes the HAL instance from the section name - [slot2]
+# connects to IRadio/slot2 - and "slot" is the index oFono gives it. Measured
+# 28.9.: with [slot2] oFono spoke to the second slot (empty then: SIM not
+# present, the radio refused power with OPERATION_NOT_ALLOWED) and the phone
+# came back on slot 1 with the file restored.
+#
+# IgnoreSlots is not decoration. /etc/ofono/binder.conf, which belongs to
+# another package, has its own [slot1] with path /ril_0; without it that
+# section would bring up a second modem at the same path.
+
+# How many slots the hardware has. Android knows; without an answer, one.
+sim_slot_count() {
+    local n
+    n=$(getprop ro.telephony.sim.count 2>/dev/null)
+    case "$n" in [1-9]) echo "$n" ;; *) echo 1 ;; esac
+}
+
+# Whether a card is in slot N (1-based). The MTK RIL reads the ICCID prefix of
+# every card at start, whichever slot oFono is using - so this answers for the
+# slot that is not active too, which oFono cannot.
+sim_present() {
+    [ -n "$(getprop "gsm.sim.preiccid_$(( $1 - 1 ))" 2>/dev/null)" ]
+}
+
+# The slot the config file points oFono at, or "unknown" when the file does not
+# have exactly one [slotN] section. A file this does not understand is left
+# alone - the same rule as a patch that no longer fits.
+sim_conf_slot() {
+    [ -f "$RADIO_CONF" ] || { echo unknown; return; }
+    local found
+    found=$(sed -n 's/^\[slot\([0-9]\)\][[:space:]]*$/\1/p' "$RADIO_CONF")
+    case "$found" in [1-9]) echo "$found" ;; *) echo unknown ;; esac
+}
+
+sim_recorded() {
+    local r
+    r=$(cat "$SIM_FILE" 2>/dev/null)
+    case "$r" in [2-9]) echo "$r" ;; *) echo 1 ;; esac
+}
+
+# The config for slot N, on stdout. Slot 1 gives the file back as it shipped:
+# no IgnoreSlots, [slot1], slot = 0 - so going to slot 2 and back leaves no
+# trace.
+sim_conf_render() {
+    local n=$1 count
+    count=$(sim_slot_count)
+    grep -q '^ExpectSlots *=' "$RADIO_CONF" || return 1
+    awk -v n="$n" -v count="$count" '
+        /^\[Settings\]/           { sec = "settings"; print; next }
+        /^\[slot[0-9]\][ \t]*$/   { sec = "slot"; print "[slot" n "]"; next }
+        /^\[/                     { sec = "other"; print; next }
+        sec == "settings" && /^IgnoreSlots *=/ { next }
+        sec == "settings" && /^ExpectSlots *=/ {
+            print "ExpectSlots = slot" n
+            if (n != 1) {
+                other = ""
+                for (i = 1; i <= count; i++)
+                    if (i != n) other = other (other == "" ? "" : ",") "slot" i
+                print "IgnoreSlots = " other
+            }
+            next
+        }
+        sec == "slot" && /^slot *=/ { print "slot = " (n - 1); next }
+        { print }
+    ' "$RADIO_CONF"
+}
+
+# Restart oFono on the new slot and bring everything above it along. oFono
+# comes back offline after a restart and nothing puts it online by itself;
+# ModemManager (which is ofono2mm) and NetworkManager keep what they knew of
+# the old modem - the same two repairs "settle" makes.
+sim_restart_stack() {
+    local modem i present restarted_at failed=0
+    head_ "restart"
+    if ! systemctl restart ofono; then
+        bad "could not restart oFono"
+        return 1
+    fi
+    ok "oFono restarted"
+
+    present=false
+    for i in $(seq 1 20); do
+        sleep 2
+        MODEM_PATH=
+        modem=$(modem_path) || continue
+        timeout 5 dbus-send --system --print-reply --dest=org.ofono "$modem" \
+            org.ofono.SimManager.GetProperties 2>/dev/null \
+            | grep -A1 '"Present"' | grep -q 'boolean true' && { present=true; break; }
+    done
+    if [ "$present" = true ]; then
+        if timeout 10 dbus-send --system --print-reply --dest=org.ofono "$modem" \
+               org.ofono.Modem.SetProperty string:Online variant:boolean:true >/dev/null 2>&1; then
+            ok "SIM found, modem online"
+        else
+            bad "SIM found, but the modem did not go online"
+            failed=1
+        fi
+    else
+        warn "no SIM in this slot - the modem stays offline"
+    fi
+
+    restarted_at=$(date +%s)
+    if systemctl restart ModemManager; then
+        ok "ModemManager restarted (that is ofono2mm)"
+        # Without a card the cellular device is "unavailable" for good, which
+        # settle would read as stuck and answer by restarting NetworkManager -
+        # a Wi-Fi blip for nothing. Measured 28.9. on the empty slot 2.
+        if [ "$present" = true ]; then
+            settle_networkmanager || failed=1
+        else
+            skip "no SIM - leaving NetworkManager alone"
+        fi
+        settle_shell "$restarted_at" || failed=1
+    else
+        bad "could not restart ModemManager"
+        failed=1
+    fi
+    return $failed
+}
+
+# Point the config at slot N. Returns 0 when the file now says N, whether it
+# had to be written or not; "changed" tells the caller which.
+SIM_CHANGED=0
+sim_conf_set() {
+    local n=$1 cur new
+    SIM_CHANGED=0
+    cur=$(sim_conf_slot)
+    if [ "$cur" = unknown ]; then
+        bad "$RADIO_CONF has no single [slotN] section - leaving it alone"
+        return 1
+    fi
+    [ "$cur" = "$n" ] && return 0
+    new=$(sim_conf_render "$n") || {
+        bad "$RADIO_CONF has no ExpectSlots line - leaving it alone"; return 1; }
+    printf '%s\n' "$new" > "$RADIO_CONF" || { bad "could not write $RADIO_CONF"; return 1; }
+    if [ "$(sim_conf_slot)" != "$n" ]; then
+        bad "wrote $RADIO_CONF but it does not say slot $n - check by hand"
+        return 1
+    fi
+    SIM_CHANGED=1
+    return 0
 }
 
 # Restarting ModemManager breaks mobile data until NetworkManager is
@@ -1106,6 +1261,74 @@ cmd_switch() {
     return $rc
 }
 
+# Which SIM oFono uses. Without an argument: what there is, as "key: value"
+# lines the app reads. With one: switch to that slot and remember it - a SIM
+# choice that went back at the next boot would only be a surprise.
+cmd_sim() {
+    local want=${1:-} count active present="" i rc=0
+    count=$(sim_slot_count)
+    if [ -z "$want" ]; then
+        active=$(sim_conf_slot)
+        for i in $(seq 1 "$count"); do
+            sim_present "$i" && present="${present:+$present }$i"
+        done
+        printf 'slots: %s\n' "$count"
+        printf 'active: %s\n' "$active"
+        printf 'recorded: %s\n' "$(sim_recorded)"
+        printf 'present: %s\n' "${present:-none}"
+        return 0
+    fi
+
+    case "$want" in
+        [1-9]) [ "$want" -le "$count" ] || {
+                   echo "this phone has $count SIM slot(s), not $want" >&2; exit 2; } ;;
+        *)     echo "usage: modemctl sim [1-$count]" >&2; exit 2 ;;
+    esac
+    need_write "sim $want"
+    if [ "$NO_RESTART" -eq 0 ] && call_in_progress; then
+        bad "a call is in progress - not switching the SIM now"
+        return 1
+    fi
+
+    head_ "SIM slot"
+    sim_conf_set "$want" || return 1
+    if [ "$want" = 1 ]; then
+        rm -f "$SIM_FILE" || { bad "could not remove $SIM_FILE"; return 1; }
+    else
+        printf '%s\n' "$want" > "$SIM_FILE" || { bad "could not record the slot in $SIM_FILE"; return 1; }
+        chmod 644 "$SIM_FILE" 2>/dev/null || true
+    fi
+    if [ "$SIM_CHANGED" -eq 0 ]; then
+        skip "oFono already uses slot $want"
+    else
+        ok "oFono now uses slot $want"
+        sim_present "$want" || warn "no SIM detected in slot $want"
+        if [ "$NO_RESTART" -eq 0 ]; then
+            sim_restart_stack || rc=1
+        else
+            say "Changed but not restarted. Takes effect with: systemctl restart ofono ModemManager"
+        fi
+    fi
+    say ""
+    say "SIM $want recorded. This survives a reboot."
+    return $rc
+}
+
+# The SIM half of boot: only when a slot other than 1 was chosen. Runs before
+# oFono (the boot unit is ordered so), so writing the file is all it takes.
+# An oFono package update that replaced the config lands here via the apt
+# hook and gets the chosen slot back.
+boot_sim() {
+    local want
+    [ -f "$SIM_FILE" ] || return 0
+    want=$(sim_recorded)
+    [ "$want" -le "$(sim_slot_count)" ] || {
+        warn "recorded SIM slot $want does not exist here - leaving the config alone"; return 0; }
+    sim_conf_set "$want" || return 0
+    [ "$SIM_CHANGED" -eq 1 ] && say "SIM slot $want written back into $RADIO_CONF"
+    return 0
+}
+
 # What the boot unit and the apt hook run: make the phone match what was
 # recorded, and nothing else. Deliberately does NOT touch the units - their
 # enablement is already persistent, and enabling a service from a oneshot that
@@ -1113,6 +1336,7 @@ cmd_switch() {
 # deadlock that survived the reboot.
 cmd_boot() {
     local rec act
+    boot_sim
     rec=$(recorded_profile)
     act=$(actual_profile)
     case "$rec" in
@@ -1195,6 +1419,21 @@ cmd_status() {
         *)       bad "radioInterface not $RADIO_INTERFACE_WANTED"
                  bad_count=$((bad_count+1)) ;;
     esac
+
+    local slot
+    slot=$(sim_conf_slot)
+    if [ "$slot" = unknown ]; then
+        # Not a shape this writes - somebody else's config, and no claim to
+        # make about it either way.
+        skip "SIM slot: $(basename "$RADIO_CONF") has no single [slotN] section"
+    elif [ "$(sim_slot_count)" -gt 1 ] || [ "$slot" != 1 ]; then
+        if [ "$slot" = "$(sim_recorded)" ]; then
+            ok "SIM slot $slot of $(sim_slot_count)"
+        else
+            bad "SIM slot $slot in use, $(sim_recorded) recorded"
+            bad_count=$((bad_count+1))
+        fi
+    fi
 
     head_ "what the stack says"
     local q
@@ -1506,6 +1745,9 @@ modemctl $VERSION - keeps the FuriOS modem fixes applied
   modemctl revert          back to the shipped state
   modemctl check           status plus runtime checks (polling, loops)
   modemctl signal          what the radio really receives, cross-checked
+  modemctl sim             SIM slots: how many, which is used, where a card is
+  modemctl sim <n>         use the SIM in slot n and remember it (one at a
+                           time - the phone has one radio for both slots)
   modemctl boot            make the phone match the recorded profile
                            (used by the boot unit and the apt hook)
   modemctl adopt           record "fixed" if an earlier version put the
@@ -1555,6 +1797,7 @@ case "$CMD" in
     settle)       cmd_settle ;;
     check)        cmd_check ;;
     signal)       cmd_signal ;;
+    sim)          cmd_sim "${1:-}" ;;
     version|-V|--version)
         # VERSION is this script's own interface version and moves rarely. The
         # question people actually ask here is "which build is on this phone",

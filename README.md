@@ -46,6 +46,17 @@ with `./uninstall.sh` or `apt remove furios-modem-fixes`.
     modemctl signal     what the radio really receives, cross-checked
     modemctl settle     after restarting ModemManager by hand: puts
                         NetworkManager back in order (needs root)
+    modemctl sim        SIM slots: how many, which is used, where a card is
+    modemctl sim <n>    use the SIM in slot n and remember it (needs root)
+
+The FLX1 has two SIM slots but one radio (dual SIM dual standby), and FuriOS
+only ever uses the first. `modemctl sim 2` points oFono at the second slot
+instead - one at a time, never both: during a call on one SIM the other would
+be unreachable anyway, and a second modem is something the shell, the apps and
+the repairs here do not know how to handle. The modem keeps its path `/ril_0`,
+so nothing above oFono notices the change. Switching restarts the modem stack
+(about half a minute without mobile network) and is refused during a call.
+The app shows the choice as a list once two cards are in.
 
 `modemctl signal` is the one worth knowing. Neither the icon nor
 `mmcli --signal-get` could be trusted before these fixes, so it reads oFono

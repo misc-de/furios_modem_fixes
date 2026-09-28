@@ -230,6 +230,12 @@ remove)
     systemctl disable --now furios-mobile-route.service >/dev/null 2>&1 || true
     systemctl disable --now furios-mobile-context.service >/dev/null 2>&1 || true
     /usr/bin/modemctl revert --quiet || true
+    # oFono's config back to slot 1 - the only file of another package the
+    # SIM switch writes. The record stays, like the profile, so a reinstall
+    # honours it; "sim 1" would delete it, hence the copy.
+    rec=$(cat /etc/furios-modem-fixes.sim 2>/dev/null || true)
+    /usr/bin/modemctl sim 1 --quiet --no-restart >/dev/null 2>&1 || true
+    [ -z "$rec" ] || printf '%s\n' "$rec" > /etc/furios-modem-fixes.sim || true
     ;;
 upgrade)
     # dpkg runs this from the OLD package, before the new one is unpacked -
@@ -262,7 +268,7 @@ cat > "$STAGE/DEBIAN/postrm" <<'POSTRM'
 #!/bin/sh
 set -e
 if [ "$1" = purge ]; then
-    rm -f /etc/furios-modem-fixes.profile
+    rm -f /etc/furios-modem-fixes.profile /etc/furios-modem-fixes.sim
 fi
 exit 0
 POSTRM
