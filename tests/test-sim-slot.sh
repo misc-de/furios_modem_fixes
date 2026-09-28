@@ -49,7 +49,8 @@ chmod +x "$STUB"/*
 
 mc() {
     env PATH="$STUB:$PATH" MODEMCTL_TARGET="$WORK/target" MODEMCTL_RADIO_CONF="$CONF" \
-        MODEMCTL_SIM="$SIMF" MODEMCTL_SHARE="$ROOT" bash "$ROOT/modemctl" "$@"
+        MODEMCTL_SIM="$SIMF" MODEMCTL_SIM_LOCK="$WORK/lock" MODEMCTL_SHARE="$ROOT" \
+        bash "$ROOT/modemctl" "$@"
 }
 key() { mc sim 2>/dev/null | sed -n "s/^$1: *//p"; }
 
@@ -85,6 +86,26 @@ check_status "a one-slot phone has no slot 2" 2 mc sim 2 --no-restart
 unset FAKE_SLOTS
 check "refusals leave the file alone" same \
       "$(cmp -s "$SHIPPED" "$CONF" && echo same || echo differs)"
+
+# A real switch (not --no-restart) to a slot with no card is refused: that is
+# a phone without mobile network. Seen 28.9. with the tray pulled out.
+check_status "a switch to an empty slot is refused" 1 mc sim 2
+check "and leaves the file alone" same \
+      "$(cmp -s "$SHIPPED" "$CONF" && echo same || echo differs)"
+check "and records nothing" no "$([ -e "$SIMF" ] && echo yes || echo no)"
+# Only the file, card or not: that is how uninstall puts slot 1 back.
+check_status "--no-restart writes the file without a card" 0 \
+    mc sim 2 --no-restart
+mc sim 1 --no-restart >/dev/null 2>&1
+
+# Two at once restart oFono under each other.
+( flock 9; sleep 3 ) 9>"$WORK/lock" &
+sleep 0.5
+export FAKE_ICCID_1=894900
+check_status "a second switch while one runs is refused" 1 mc sim 2 --no-restart
+unset FAKE_ICCID_1
+wait
+check "and changed nothing" same "$(cmp -s "$SHIPPED" "$CONF" && echo same || echo differs)"
 
 # A package update puts the shipped file back. boot is what the apt hook and
 # the boot unit run, and it has to bring the chosen slot back.
@@ -134,6 +155,7 @@ STUB
 mcn() {
     env PATH="$STUB:$PATH" MODEMCTL_TARGET="$WORK/target" MODEMCTL_RADIO_CONF="$CONF" \
         MODEMCTL_SIM="$SIMF" MODEMCTL_SIM_NAMES="$NAMES" MODEMCTL_CBS_DB="$DB" \
+        MODEMCTL_SIM_LOCK="$WORK/lock" \
         MODEMCTL_SHARE="$ROOT" bash "$ROOT/modemctl" sim 2>/dev/null | sed -n "s/^$1: *//p"
 }
 check "a code with one provider gives its name, entities decoded" "1&1 Mobile" "$(mcn name2)"

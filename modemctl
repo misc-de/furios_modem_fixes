@@ -17,7 +17,7 @@ if [ "$(id -u)" -eq 0 ]; then
     for v in MODEMCTL_TARGET MODEMCTL_RADIO_CONF MODEMCTL_SHARE MODEMCTL_PATCHES \
              MODEMCTL_NM_CONF_D MODEMCTL_RESOLV MODEMCTL_NM_RESOLV \
              MODEMCTL_DBUS_CONF_D MODEMCTL_CBS_DB MODEMCTL_PROFILE \
-             MODEMCTL_SYSTEMD_CONF_D MODEMCTL_SHELL_SYSTEM_UNIT MODEMCTL_SIM MODEMCTL_SIM_NAMES; do
+             MODEMCTL_SYSTEMD_CONF_D MODEMCTL_SHELL_SYSTEM_UNIT MODEMCTL_SIM MODEMCTL_SIM_NAMES MODEMCTL_SIM_LOCK; do
         if [ -n "${!v:-}" ]; then
             echo "refusing to honour $v as root - that would be an arbitrary-file patch" >&2
             exit 3
@@ -137,11 +137,15 @@ WATCHERS="furios-mobile-route.service furios-mobile-context.service"
 SIM_FILE=${MODEMCTL_SIM:-/etc/furios-modem-fixes.sim}
 # What each slot's card was called when it was last the active one.
 SIM_NAMES=${MODEMCTL_SIM_NAMES:-/var/lib/furios-modem-fixes/sim-names}
+# One switch at a time. Two overlapping ones restart oFono under each other,
+# and the one that finishes last decides the slot - whichever that is.
+SIM_LOCK=${MODEMCTL_SIM_LOCK:-/run/furios-modem-fixes.sim.lock}
 
 QUIET=0
 NO_RESTART=0
 PATCHES_ONLY=0
 DO_RESTART=0
+FORCE=0
 
 # Colour only when someone is watching. A boot unit's journal should not be
 # full of escape codes.
@@ -1375,6 +1379,20 @@ cmd_sim() {
         *)     echo "usage: modemctl sim [1-$count]" >&2; exit 2 ;;
     esac
     need_write "sim $want"
+    exec 9>"$SIM_LOCK" && flock -n 9 || {
+        bad "another SIM switch is still running - try again when it is done"
+        return 1
+    }
+    # Never to a slot without a card: that is a phone without mobile network
+    # until somebody switches back. Seen 28.9. - the tray came out, slot 1 went
+    # empty, and a switch to the now empty slot 2 went through. With
+    # --no-restart it is only the file (uninstall puts slot 1 back that way,
+    # card or not); --force is for testing a slot on purpose.
+    if [ "$NO_RESTART" -eq 0 ] && [ "$FORCE" -eq 0 ] && ! sim_present "$want"; then
+        bad "no card detected in slot $want - not switching"
+        say "     (the tray holds both slots; is it pushed all the way in?)"
+        return 1
+    fi
     if [ "$NO_RESTART" -eq 0 ] && call_in_progress; then
         bad "a call is in progress - not switching the SIM now"
         return 1
@@ -1843,7 +1861,8 @@ modemctl $VERSION - keeps the FuriOS modem fixes applied
   modemctl signal          what the radio really receives, cross-checked
   modemctl sim             SIM slots: how many, which is used, where a card is
   modemctl sim <n>         use the SIM in slot n and remember it (one at a
-                           time - the phone has one radio for both slots)
+                           time - the phone has one radio for both slots);
+                           refused for a slot without a card unless --force
   modemctl boot            make the phone match the recorded profile
                            (used by the boot unit and the apt hook)
   modemctl adopt           record "fixed" if an earlier version put the
@@ -1862,6 +1881,7 @@ Options
       --no-restart         change files, leave the services alone
       --restart            revert: restart the modem stack afterwards
       --patches-only       revert: ofono2mm's files only, not the config
+      --force              sim: switch to a slot even without a card in it
 
 The fixes live in files owned by the ofono2mm package, so an update of that
 package removes them. A boot unit and an apt hook run "boot" for you; both do
@@ -1878,6 +1898,7 @@ for a in "$@"; do
         --no-restart)   NO_RESTART=1 ;;
         --patches-only) PATCHES_ONLY=1 ;;
         --restart)      DO_RESTART=1 ;;
+        --force)        FORCE=1 ;;
     esac
 done
 
