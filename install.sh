@@ -66,6 +66,11 @@ sed "s|/usr/bin/modemctl|$BIN/modemctl|g" apt/99furios-modem-fixes | sudo tee \
     /etc/apt/apt.conf.d/99furios-modem-fixes >/dev/null
 sudo chmod 644 /etc/apt/apt.conf.d/99furios-modem-fixes
 
+sed "s|^ExecStart=/usr/bin/modemctl|ExecStart=$BIN/modemctl|" \
+    systemd/furios-modem-sim-check.service | sudo tee \
+    /etc/systemd/system/furios-modem-sim-check.service >/dev/null
+sudo chmod 644 /etc/systemd/system/furios-modem-sim-check.service
+
 sed "s|^ExecStart=/usr/bin/furios-mobile-route|ExecStart=$BIN/furios-mobile-route|" \
     systemd/furios-mobile-route.service | sudo tee \
     /etc/systemd/system/furios-mobile-route.service >/dev/null
@@ -85,6 +90,7 @@ sudo chmod 644 /usr/share/polkit-1/actions/de.misc-de.modemctl.policy
 sudo systemctl daemon-reload
 # enable, not start: applying happens below, with output you can read.
 sudo systemctl enable furios-modem-fixes.service >/dev/null
+sudo systemctl enable furios-modem-sim-check.service >/dev/null
 # This one is enable --now: it is a watcher, not a one-shot, and a watcher that
 # is running but was never enabled is a fix that disappears at the next boot
 # without telling anybody.

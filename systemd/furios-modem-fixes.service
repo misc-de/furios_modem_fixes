@@ -15,6 +15,10 @@ Wants=ofono.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# A oneshot has no start timeout of its own, and oFono and ModemManager are
+# ordered after this one. On a timeout they start anyway (Before=, not
+# Requires=) - with the phone as shipped rather than not at all.
+TimeoutStartSec=60
 # --no-restart because systemd is starting those services right after this
 # anyway. Restarting them from inside a unit they are ordered against is how
 # you build a deadlock, and we have built that one before.

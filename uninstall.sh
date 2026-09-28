@@ -13,6 +13,7 @@ sudo /usr/local/bin/modemctl revert || true
 sudo /usr/local/bin/modemctl sim 1 --no-restart || true
 
 sudo systemctl disable --now furios-modem-fixes.service 2>/dev/null || true
+sudo systemctl disable furios-modem-sim-check.service 2>/dev/null || true
 sudo systemctl disable --now furios-mobile-route.service 2>/dev/null || true
 sudo systemctl disable --now furios-mobile-context.service 2>/dev/null || true
 # The watcher's route goes with it. Leaving a default route behind that nothing
@@ -30,6 +31,8 @@ sudo ip route del default dev "$(ip -4 route show default metric "$METRIC" \
 # applies nothing, and keeps the watchers off - a choice made about a package
 # that has since been removed.
 sudo rm -f /etc/systemd/system/furios-modem-fixes.service \
+           /etc/systemd/system/furios-modem-sim-check.service \
+           /etc/ofono/binder.d/zz-furios-sim.conf \
            /etc/systemd/system/furios-mobile-route.service \
            /etc/systemd/system/furios-mobile-context.service \
            /etc/apt/apt.conf.d/99furios-modem-fixes \

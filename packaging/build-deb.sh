@@ -61,6 +61,8 @@ install -Dm644 systemd/furios-mobile-route.service \
     "$STAGE/usr/lib/systemd/system/furios-mobile-route.service"
 install -Dm644 systemd/furios-mobile-context.service \
     "$STAGE/usr/lib/systemd/system/furios-mobile-context.service"
+install -Dm644 systemd/furios-modem-sim-check.service \
+    "$STAGE/usr/lib/systemd/system/furios-modem-sim-check.service"
 install -Dm644 apt/99furios-modem-fixes \
     "$STAGE/etc/apt/apt.conf.d/99furios-modem-fixes"
 # Straight into place, not under /usr/share/furios-modem: polkit reads its
@@ -185,6 +187,7 @@ set -e
 if [ "$1" = configure ]; then
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl enable furios-modem-fixes.service >/dev/null 2>&1 || true
+    systemctl enable furios-modem-sim-check.service >/dev/null 2>&1 || true
     # --now for the watcher: it is a long-running service, and one that is
     # installed but not started leaves the phone without a fallback route
     # until the next reboot, which is exactly the failure it exists to prevent.
@@ -211,7 +214,10 @@ if [ "$1" = configure ]; then
     # Apply now rather than at the next boot. Quiet, and never fatal: a
     # package that fails to configure because a patch did not fit would leave
     # dpkg half-done, which is a worse problem than an unpatched modem.
-    /usr/bin/modemctl boot --quiet || \
+    # --no-restart: restarting ModemManager and NetworkManager in the middle
+    # of a dpkg run is not the package manager's business. The files are in
+    # place; they take effect at the next start of the modem stack.
+    timeout 120 /usr/bin/modemctl boot --quiet --no-restart || \
         echo "furios-modem-fixes: could not apply everything - run 'modemctl status'" >&2
 fi
 exit 0
@@ -229,6 +235,7 @@ remove)
     systemctl disable --now furios-modem-fixes.service >/dev/null 2>&1 || true
     systemctl disable --now furios-mobile-route.service >/dev/null 2>&1 || true
     systemctl disable --now furios-mobile-context.service >/dev/null 2>&1 || true
+    systemctl disable furios-modem-sim-check.service >/dev/null 2>&1 || true
     /usr/bin/modemctl revert --quiet || true
     # oFono's config back to slot 1 - the only file of another package the
     # SIM switch writes. The record stays, like the profile, so a reinstall

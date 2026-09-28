@@ -17,7 +17,7 @@ if [ "$(id -u)" -eq 0 ]; then
     for v in MODEMCTL_TARGET MODEMCTL_RADIO_CONF MODEMCTL_SHARE MODEMCTL_PATCHES \
              MODEMCTL_NM_CONF_D MODEMCTL_RESOLV MODEMCTL_NM_RESOLV \
              MODEMCTL_DBUS_CONF_D MODEMCTL_CBS_DB MODEMCTL_PROFILE \
-             MODEMCTL_SYSTEMD_CONF_D MODEMCTL_SHELL_SYSTEM_UNIT MODEMCTL_SIM MODEMCTL_SIM_NAMES MODEMCTL_SIM_LOCK; do
+             MODEMCTL_SYSTEMD_CONF_D MODEMCTL_SHELL_SYSTEM_UNIT MODEMCTL_SIM MODEMCTL_SIM_NAMES MODEMCTL_SIM_LOCK MODEMCTL_SIM_DROPIN; do
         if [ -n "${!v:-}" ]; then
             echo "refusing to honour $v as root - that would be an arbitrary-file patch" >&2
             exit 3
@@ -140,6 +140,11 @@ SIM_NAMES=${MODEMCTL_SIM_NAMES:-/var/lib/furios-modem-fixes/sim-names}
 # One switch at a time. Two overlapping ones restart oFono under each other,
 # and the one that finishes last decides the slot - whichever that is.
 SIM_LOCK=${MODEMCTL_SIM_LOCK:-/run/furios-modem-fixes.sim.lock}
+# The slot choice itself: a drop-in of our own next to oFono's config, read
+# after it (zz-) so its keys win. oFono's file belongs to a FuriLabs package
+# (adaptation-radon-configs) and stays exactly as shipped - an update of it
+# brings no conffile question, and the way back to slot 1 is deleting this.
+SIM_DROPIN=${MODEMCTL_SIM_DROPIN:-$(dirname "$RADIO_CONF")/zz-furios-sim.conf}
 
 QUIET=0
 NO_RESTART=0
@@ -202,10 +207,19 @@ patch_state() {
     fi
 }
 
+# applied / missing / foreign / absent. "missing" is only the 1.6 an earlier
+# version of this wrote (see RADIO_INTERFACE_WANTED). Any other value is
+# FuriLabs' choice - a new vendor HAL may well need one - and is left alone:
+# forcing 1.4 onto it would be the one change here that could cost the modem.
 radio_state() {
     [ -f "$RADIO_CONF" ] || { echo absent; return; }
-    grep -q "^radioInterface *= *$RADIO_INTERFACE_WANTED\$" "$RADIO_CONF" \
-        && echo applied || echo missing
+    local v
+    v=$(sed -n 's/^radioInterface *= *\([0-9.]*\) *$/\1/p' "$RADIO_CONF" | head -1)
+    case "$v" in
+        "$RADIO_INTERFACE_WANTED") echo applied ;;
+        1.6)                       echo missing ;;
+        *)                         echo foreign ;;
+    esac
 }
 
 #   applied / missing / absent
@@ -376,10 +390,15 @@ call_in_progress() {
 # another package, has its own [slot1] with path /ril_0; without it that
 # section would bring up a second modem at the same path.
 
+# Android's properties, never waited on for long: this runs on the boot path.
+gp() {
+    timeout 3 getprop "$@" 2>/dev/null
+}
+
 # How many slots the hardware has. Android knows; without an answer, one.
 sim_slot_count() {
     local n
-    n=$(getprop ro.telephony.sim.count 2>/dev/null)
+    n=$(gp ro.telephony.sim.count)
     case "$n" in [1-9]) echo "$n" ;; *) echo 1 ;; esac
 }
 
@@ -387,17 +406,40 @@ sim_slot_count() {
 # every card at start, whichever slot oFono is using - so this answers for the
 # slot that is not active too, which oFono cannot.
 sim_present() {
-    [ -n "$(getprop "gsm.sim.preiccid_$(( $1 - 1 ))" 2>/dev/null)" ]
+    [ -n "$(gp "gsm.sim.preiccid_$(( $1 - 1 ))")" ]
 }
 
 # The slot the config file points oFono at, or "unknown" when the file does not
 # have exactly one [slotN] section. A file this does not understand is left
 # alone - the same rule as a patch that no longer fits.
 sim_conf_slot() {
+    local found
+    if [ -f "$SIM_DROPIN" ]; then
+        found=$(sed -n 's/^\[slot\([0-9]\)\][[:space:]]*$/\1/p' "$SIM_DROPIN")
+        case "$found" in [1-9]) echo "$found" ;; *) echo unknown ;; esac
+        return
+    fi
+    [ -f "$RADIO_CONF" ] || { echo unknown; return; }
+    found=$(sed -n 's/^\[slot\([0-9]\)\][[:space:]]*$/\1/p' "$RADIO_CONF")
+    case "$found" in [1-9]) echo "$found" ;; *) echo unknown ;; esac
+}
+
+# The slot oFono's own file names. Not 1 only on a phone an earlier version of
+# this switched by editing that file directly.
+sim_shipped_slot() {
     [ -f "$RADIO_CONF" ] || { echo unknown; return; }
     local found
     found=$(sed -n 's/^\[slot\([0-9]\)\][[:space:]]*$/\1/p' "$RADIO_CONF")
     case "$found" in [1-9]) echo "$found" ;; *) echo unknown ;; esac
+}
+
+# Write a file whole or not at all: a half-written oFono config is a phone
+# without a modem.
+write_atomic() {
+    local target=$1 content=$2 tmp
+    tmp=$(mktemp "$(dirname "$target")/.furios-sim.XXXXXX") || return 1
+    printf '%s\n' "$content" > "$tmp" && chmod 644 "$tmp" && mv -f "$tmp" "$target" \
+        || { rm -f "$tmp"; return 1; }
 }
 
 sim_recorded() {
@@ -423,7 +465,7 @@ sim_clean_name() {
 }
 
 sim_iccid_prefix() {
-    getprop "gsm.sim.preiccid_$(( $1 - 1 ))" 2>/dev/null | tr -cd '0-9'
+    gp "gsm.sim.preiccid_$(( $1 - 1 ))" | tr -cd '0-9'
 }
 
 # The card oFono is using right now: what it says it is, or failing that the
@@ -449,7 +491,7 @@ sim_db_name() {
     local n=$1 prop mccmnc
     prop=vendor.gsm.ril.uicc.mccmnc
     [ "$n" -gt 1 ] && prop="$prop.$(( n - 1 ))"
-    mccmnc=$(getprop "$prop" 2>/dev/null | tr -cd '0-9')
+    mccmnc=$(gp "$prop" | tr -cd '0-9')
     [ ${#mccmnc} -ge 5 ] && [ -f "$CBS_DB" ] || return 1
     awk -v mcc="${mccmnc:0:3}" -v mnc="${mccmnc:3}" '
         /<provider[ >]/ { inp = 1; name = ""; hit = 0 }
@@ -532,7 +574,7 @@ sim_restart_stack() {
     ok "oFono restarted"
 
     present=false
-    for i in $(seq 1 20); do
+    for i in $(seq 1 "${SIM_RESTART_WAIT:-20}"); do
         sleep 2
         MODEM_PATH=
         modem=$(modem_path) || continue
@@ -571,26 +613,58 @@ sim_restart_stack() {
     return $failed
 }
 
-# Point the config at slot N. Returns 0 when the file now says N, whether it
-# had to be written or not; "changed" tells the caller which.
+# Point oFono at slot N. Returns 0 when it now says N, whether anything had
+# to be written or not; SIM_CHANGED tells the caller which.
 SIM_CHANGED=0
 sim_conf_set() {
-    local n=$1 cur new
+    local n=$1 cur shipped iface mpath other i count new
     SIM_CHANGED=0
     cur=$(sim_conf_slot)
-    if [ "$cur" = unknown ]; then
-        bad "$RADIO_CONF has no single [slotN] section - leaving it alone"
-        return 1
+
+    # An earlier version wrote the slot into oFono's own file. Put that file
+    # back to slot 1 first; from here on the choice lives in the drop-in.
+    shipped=$(sim_shipped_slot)
+    if [ "$shipped" != 1 ] && [ "$shipped" != unknown ]; then
+        new=$(sim_conf_render 1) && write_atomic "$RADIO_CONF" "$new" \
+            || { bad "could not put $RADIO_CONF back to slot 1"; return 1; }
+        SIM_CHANGED=1
     fi
-    [ "$cur" = "$n" ] && return 0
-    new=$(sim_conf_render "$n") || {
-        bad "$RADIO_CONF has no ExpectSlots line - leaving it alone"; return 1; }
-    printf '%s\n' "$new" > "$RADIO_CONF" || { bad "could not write $RADIO_CONF"; return 1; }
+
+    if [ "$n" = 1 ]; then
+        if [ -e "$SIM_DROPIN" ]; then
+            rm -f "$SIM_DROPIN" || { bad "could not remove $SIM_DROPIN"; return 1; }
+            SIM_CHANGED=1
+        fi
+    else
+        [ "$cur" = "$n" ] && [ "$SIM_CHANGED" = 0 ] && return 0
+        # The interface version oFono's file gives its slot, so the other slot
+        # speaks the same one. Only when it is missing, the shipped 1.4.
+        iface=$(sed -n 's/^radioInterface *= *\([0-9.]*\) *$/\1/p' "$RADIO_CONF" 2>/dev/null | head -1)
+        # The path oFono's file gives the modem - kept, so nothing above
+        # oFono sees the switch. Without one there is nothing safe to write.
+        mpath=$(sed -n 's/^path *= *\(\/[^ ]*\) *$/\1/p' "$RADIO_CONF" 2>/dev/null | head -1)
+        [ -n "$mpath" ] || { bad "$RADIO_CONF names no modem path - leaving it alone"; return 1; }
+        count=$(sim_slot_count)
+        other=""
+        for i in $(seq 1 "$count"); do
+            [ "$i" = "$n" ] || other="${other:+$other,}slot$i"
+        done
+        write_atomic "$SIM_DROPIN" "# Written by modemctl sim - which SIM slot oFono uses.
+# Delete this file to go back to slot 1, the one FuriOS ships with.
+[Settings]
+ExpectSlots = slot$n
+IgnoreSlots = ${other:-slot1}
+
+[slot$n]
+path = $mpath
+slot = $(( n - 1 ))
+radioInterface = ${iface:-1.4}" || { bad "could not write $SIM_DROPIN"; return 1; }
+        SIM_CHANGED=1
+    fi
     if [ "$(sim_conf_slot)" != "$n" ]; then
-        bad "wrote $RADIO_CONF but it does not say slot $n - check by hand"
+        bad "wrote the SIM choice but oFono's config does not say slot $n - check by hand"
         return 1
     fi
-    SIM_CHANGED=1
     return 0
 }
 
@@ -911,6 +985,7 @@ cmd_apply() {
     head_ "ofono radioInterface"
     case "$(radio_state)" in
         applied) skip "radioInterface already $RADIO_INTERFACE_WANTED" ;;
+        foreign) skip "radioInterface is not ours to set - FuriLabs' value left alone" ;;
         absent)  bad "$RADIO_CONF not found"; failed=1 ;;
         missing)
             cp -a "$RADIO_CONF" "$RADIO_CONF.bak.$ts"
@@ -938,6 +1013,22 @@ $RADIO_CONF.bak.$ts)"
             failed=1
         fi
     done
+    # Only with our main.py. The shipped one gives the bus name up whenever
+    # oFono is not there yet (defect 16), and under Type=dbus systemd stops
+    # the unit when the name goes - with Restart=always that is a restart
+    # loop every second. After an update whose main.py our patch no longer
+    # fits, the drop-in goes too and the unit is as shipped.
+    if [ "$(patch_state main)" != applied ] \
+       && [ -f "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$ORDER_DROPIN" ]; then
+        if rm -f "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$ORDER_DROPIN"; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            touched=1
+            warn "main.py is not patched - start order drop-in removed, $ORDER_UNIT as shipped"
+        fi
+    fi
+    if [ "$(patch_state main)" != applied ]; then
+        skip "start order left as shipped - main.py is not patched"
+    else
     case "$(ordering_state)" in
         covered) skip "$ORDER_UNIT already takes the bus name for systemd" ;;
         absent)  skip "$SYSTEMD_CONF_D not found - no systemd?" ;;
@@ -981,6 +1072,7 @@ $RADIO_CONF.bak.$ts)"
                 failed=1
             fi ;;
     esac
+    fi
 
     head_ "DNS"
     case "$(resolvconf_state)" in
@@ -1378,7 +1470,14 @@ cmd_sim() {
                    echo "this phone has $count SIM slot(s), not $want" >&2; exit 2; } ;;
         *)     echo "usage: modemctl sim [1-$count]" >&2; exit 2 ;;
     esac
-    need_write "sim $want"
+    # Only oFono's config directory has to be writable. need_write asks about
+    # ofono2mm's files too, and a phone whose ofono2mm moved or went must still
+    # be able to go back to slot 1.
+    if [ ! -w "$(dirname "$SIM_DROPIN")" ]; then
+        echo "cannot write $(dirname "$SIM_DROPIN")" >&2
+        [ "$(id -u)" -ne 0 ] && echo "try: sudo $0 sim $want" >&2
+        exit 1
+    fi
     exec 9>"$SIM_LOCK" && flock -n 9 || {
         bad "another SIM switch is still running - try again when it is done"
         return 1
@@ -1388,7 +1487,10 @@ cmd_sim() {
     # empty, and a switch to the now empty slot 2 went through. With
     # --no-restart it is only the file (uninstall puts slot 1 back that way,
     # card or not); --force is for testing a slot on purpose.
-    if [ "$NO_RESTART" -eq 0 ] && [ "$FORCE" -eq 0 ] && ! sim_present "$want"; then
+    # Slot 1 is exempt: it is the default the phone shipped with, and the way
+    # back must not depend on a property a FuriLabs update could rename.
+    if [ "$want" != 1 ] && [ "$NO_RESTART" -eq 0 ] && [ "$FORCE" -eq 0 ] \
+       && ! sim_present "$want"; then
         bad "no card detected in slot $want - not switching"
         say "     (the tray holds both slots; is it pushed all the way in?)"
         return 1
@@ -1440,6 +1542,35 @@ boot_sim() {
         warn "recorded SIM slot $want does not exist here - leaving the config alone"; return 0; }
     sim_conf_set "$want" || return 0
     [ "$SIM_CHANGED" -eq 1 ] && say "SIM slot $want written back into $RADIO_CONF"
+    return 0
+}
+
+# After the modem stack is up: a slot other than 1 that shows no card is a
+# phone without mobile network - the card was moved, or an update changed how
+# oFono reads its config. Back to slot 1, the shipped default, and the choice
+# is forgotten so the next boot does not do it again. Run by
+# furios-modem-sim-check.service; waits at most SIM_CHECK_WAIT seconds.
+SIM_CHECK_WAIT=${SIM_CHECK_WAIT:-90}
+cmd_sim_check() {
+    local slot modem i
+    [ -f "$SIM_FILE" ] || return 0
+    slot=$(sim_conf_slot)
+    [ "$slot" = 1 ] && return 0
+    for i in $(seq 1 $(( SIM_CHECK_WAIT / 3 ))); do
+        MODEM_PATH=
+        if modem=$(modem_path) && timeout 5 dbus-send --system --print-reply \
+               --dest=org.ofono "$modem" org.ofono.SimManager.GetProperties 2>/dev/null \
+               | grep -A1 '"Present"' | grep -q 'boolean true'; then
+            say "SIM slot $slot has a card - nothing to do"
+            return 0
+        fi
+        sleep 3
+    done
+    warn "SIM slot $slot shows no card after ${SIM_CHECK_WAIT}s - back to slot 1"
+    logger -t modemctl "SIM slot $slot showed no card - fell back to slot 1" 2>/dev/null || true
+    sim_conf_set 1 || return 1
+    rm -f "$SIM_FILE"
+    [ "$NO_RESTART" -eq 0 ] && sim_restart_stack
     return 0
 }
 
@@ -1530,6 +1661,7 @@ cmd_status() {
     done
     case "$(radio_state)" in
         applied) ok "radioInterface = $RADIO_INTERFACE_WANTED" ;;
+        foreign) skip "radioInterface as FuriLabs set it - not ours to change" ;;
         *)       bad "radioInterface not $RADIO_INTERFACE_WANTED"
                  bad_count=$((bad_count+1)) ;;
     esac
@@ -1860,6 +1992,8 @@ modemctl $VERSION - keeps the FuriOS modem fixes applied
   modemctl check           status plus runtime checks (polling, loops)
   modemctl signal          what the radio really receives, cross-checked
   modemctl sim             SIM slots: how many, which is used, where a card is
+  modemctl sim-check       after boot: back to slot 1 if the chosen slot
+                           shows no card (furios-modem-sim-check.service)
   modemctl sim <n>         use the SIM in slot n and remember it (one at a
                            time - the phone has one radio for both slots);
                            refused for a slot without a card unless --force
@@ -1915,6 +2049,7 @@ case "$CMD" in
     check)        cmd_check ;;
     signal)       cmd_signal ;;
     sim)          cmd_sim "${1:-}" ;;
+    sim-check)    cmd_sim_check ;;
     version|-V|--version)
         # VERSION is this script's own interface version and moves rarely. The
         # question people actually ask here is "which build is on this phone",

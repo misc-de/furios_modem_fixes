@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=Back to SIM slot 1 when the chosen slot came up without a card
+Documentation=file:/usr/share/doc/furios-modem-fixes/README.md
+# Only on a phone where a slot other than 1 was chosen.
+ConditionPathExists=/etc/furios-modem-fixes.sim
+After=ofono.service ModemManager.service
+Wants=ofono.service
+
+[Service]
+# simple, not oneshot: a oneshot wanted by multi-user.target holds that
+# target until it is done, and this waits up to 90 s for a card on purpose.
+Type=simple
+ExecStart=/usr/bin/modemctl sim-check
+RuntimeMaxSec=300
+
+[Install]
+WantedBy=multi-user.target

@@ -256,6 +256,18 @@ for f in $FILES; do
     fi
 done
 check "apply sets radioInterface" "radioInterface = 1.4" "$(cat "$RADIO")"
+
+# Any value but our own old 1.6 is FuriLabs' choice. A new vendor HAL may need
+# one, and forcing 1.4 onto it would be the one change here that costs the
+# modem - so apply leaves it, and status does not count it against the phone.
+printf 'radioInterface = 1.5\n' > "$RADIO"
+MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+    bash "$ROOT/modemctl" apply --no-restart >/dev/null 2>&1
+check "apply leaves a radioInterface FuriLabs set" "radioInterface = 1.5" "$(cat "$RADIO")"
+check "and status does not fail on it" yes \
+    "$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" bash "$ROOT/modemctl" status 2>&1 \
+       | grep -q 'radioInterface as FuriLabs set it' && echo yes || echo no)"
+printf 'radioInterface = 1.4\n' > "$RADIO"
 TESTS_RUN=$((TESTS_RUN + 1))
 if ls "$TREE"/mm_modem.py.bak.* >/dev/null 2>&1; then
     ok "apply keeps a backup"
@@ -1294,6 +1306,19 @@ env PATH="$STUB:$PATH" MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
     MODEMCTL_SYSTEMD_CONF_D="$SYSD" MODEMCTL_SHARE="$ROOT" \
     bash "$ROOT/modemctl" revert -q >/dev/null 2>&1
 check "revert takes it away again" yes \
+      "$([ -f "$SYSD/ModemManager.service.d/$DROPIN" ] && echo no || echo yes)"
+
+# After an ofono2mm update our main.py patch may no longer fit. The shipped
+# main.py gives the bus name up while oFono is not there, and under Type=dbus
+# that is a restart loop - so the drop-in has to go with the patch.
+env PATH="$STUB:$PATH" MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+    MODEMCTL_SYSTEMD_CONF_D="$SYSD" MODEMCTL_SHARE="$ROOT" \
+    bash "$ROOT/modemctl" apply -q >/dev/null 2>&1
+printf '# an ofono2mm our patch does not fit\n' > "$(tree_path main)"
+env PATH="$STUB:$PATH" MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+    MODEMCTL_SYSTEMD_CONF_D="$SYSD" MODEMCTL_SHARE="$ROOT" \
+    bash "$ROOT/modemctl" apply -q >/dev/null 2>&1
+check "a main.py the patch no longer fits takes the drop-in out" yes \
       "$([ -f "$SYSD/ModemManager.service.d/$DROPIN" ] && echo no || echo yes)"
 
 summary
