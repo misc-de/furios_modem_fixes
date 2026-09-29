@@ -17,7 +17,7 @@ if [ "$(id -u)" -eq 0 ]; then
     for v in MODEMCTL_TARGET MODEMCTL_RADIO_CONF MODEMCTL_SHARE MODEMCTL_PATCHES \
              MODEMCTL_NM_CONF_D MODEMCTL_RESOLV MODEMCTL_NM_RESOLV \
              MODEMCTL_DBUS_CONF_D MODEMCTL_CBS_DB MODEMCTL_PROFILE \
-             MODEMCTL_SYSTEMD_CONF_D MODEMCTL_SHELL_SYSTEM_UNIT MODEMCTL_SIM MODEMCTL_SIM_NAMES MODEMCTL_SIM_LOCK MODEMCTL_SIM_DROPIN; do
+             MODEMCTL_SYSTEMD_CONF_D MODEMCTL_SHELL_SYSTEM_UNIT MODEMCTL_SIM MODEMCTL_SIM_NAMES MODEMCTL_SIM_LOCK MODEMCTL_SIM_DROPIN MODEMCTL_NR MODEMCTL_NRPROBE; do
         if [ -n "${!v:-}" ]; then
             echo "refusing to honour $v as root - that would be an arbitrary-file patch" >&2
             exit 3
@@ -145,6 +145,23 @@ SIM_LOCK=${MODEMCTL_SIM_LOCK:-/run/furios-modem-fixes.sim.lock}
 # (adaptation-radon-configs) and stays exactly as shipped - an update of it
 # brings no conffile question, and the way back to slot 1 is deleting this.
 SIM_DROPIN=${MODEMCTL_SIM_DROPIN:-$(dirname "$RADIO_CONF")/zz-furios-sim.conf}
+
+# 5G: "on" when NR is to be allowed, nothing when not - off after installing,
+# like everything else that changes what the radio does.
+NR_FILE=${MODEMCTL_NR:-/etc/furios-modem-fixes.nr}
+# The only way in that works (tools/5g/README.md): the RIL's own IRadio 1.6
+# setAllowedNetworkTypesBitmap, on the HAL instance em1 that oFono leaves
+# alone. oFono's plugin cannot send it, and an AT+ERAT from outside is
+# overwritten by the RIL the next time it sets the network type.
+NRPROBE=${MODEMCTL_NRPROBE:-}
+if [ -z "$NRPROBE" ]; then
+    for p in "$SHARE/tools/5g/nrprobe" "${SHARE%/share/furios-modem}/lib/furios-modem/nrprobe"; do
+        [ -x "$p" ] && { NRPROBE=$p; break; }
+    done
+    NRPROBE=${NRPROBE:-/usr/lib/furios-modem/nrprobe}
+fi
+# RadioAccessFamily bit for NR (1 << RIL_RADIO_TECHNOLOGY_NR, which is 20).
+RAF_NR=$((0x100000))
 
 QUIET=0
 NO_RESTART=0
@@ -1574,6 +1591,187 @@ cmd_sim_check() {
     return 0
 }
 
+# --- 5G ---------------------------------------------------------------------
+#
+# FuriOS never gets NR on this phone: oFono asks for it through IRadio 1.4 and
+# the modem answers Error 44 (see tools/5g/README.md), so the RIL keeps its
+# allowed-types bitmap without NR and writes AT+ERAT=6 (G/U/L) at every start.
+# Allowing NR through 1.6 is only half of it. Measured 29.9. in a 1&1 cell
+# where a phone next to this one showed 5G: with NR allowed after the modem
+# had registered, three minutes and 130 MB stayed on LTE; allowed and then
+# registered afresh, oFono and ModemManager said nr within a download. The
+# network learns what the phone can do when it registers, and keeps that.
+
+# The side door of the slot oFono uses: em1 for slot 1, em2 for slot 2 (the
+# vendor manifest pairs them so). Each has its own bitmap - read 29.9. with
+# slot 1 active: em1 without NR as oFono left it, em2 with NR, untouched.
+# Never slotN itself: that is oFono's, and a probe on slot2 once reset the
+# modem (nrprobe refuses it anyway).
+nr_probe() {
+    local slot
+    slot=$(sim_conf_slot)
+    case "$slot" in [1-9]) ;; *) return 1 ;; esac
+    NRPROBE_INSTANCE=em$slot timeout 15 "$NRPROBE" "$@"
+}
+
+# The allowed-types bitmap, as a number. Fails when the HAL does not answer.
+nr_bitmap() {
+    local v
+    [ -x "$NRPROBE" ] || return 1
+    v=$(nr_probe get 2>/dev/null \
+        | sed -n 's/.*response 194 .* error 0 .* value \(-\{0,1\}[0-9]*\) .*/\1/p' | tail -1)
+    [ -n "$v" ] || return 1
+    printf '%s' "$v"
+}
+
+nr_allowed_now() {
+    local v
+    v=$(nr_bitmap) || { echo unknown; return 0; }
+    [ $(( v & RAF_NR )) -ne 0 ] && echo yes || echo no
+}
+
+nr_recorded() {
+    [ "$(cat "$NR_FILE" 2>/dev/null)" = on ] && echo on || echo off
+}
+
+# Put the NR bit to on or off and leave every other bit as the RIL has it.
+# NR_CHANGED says whether anything had to be sent.
+NR_CHANGED=0
+nr_set() {
+    local want=$1 cur new
+    NR_CHANGED=0
+    if [ ! -x "$NRPROBE" ]; then
+        bad "nrprobe missing ($NRPROBE)"
+        return 1
+    fi
+    cur=$(nr_bitmap) || { bad "the radio HAL did not say which networks it allows"; return 1; }
+    if [ "$want" = on ]; then new=$(( cur | RAF_NR )); else new=$(( cur & ~RAF_NR )); fi
+    if [ "$new" -eq "$cur" ]; then
+        skip "the modem already has 5G $([ "$want" = on ] && echo allowed || echo "not allowed")"
+        return 0
+    fi
+    nr_probe setallowed "$(printf '%#x' "$new")" >/dev/null 2>&1
+    cur=$(nr_bitmap) || cur=-1
+    if [ "$cur" -ne "$new" ]; then
+        bad "the modem did not take $(printf '%#x' "$new") (it says $(printf '%#x' "$cur"))"
+        return 1
+    fi
+    NR_CHANGED=1
+    ok "5G $([ "$want" = on ] && echo allowed || echo "no longer allowed") ($(printf '%#x' "$new"))"
+}
+
+nr_registered() {
+    local modem
+    modem=$(modem_path) || return 1
+    timeout 5 dbus-send --system --print-reply --dest=org.ofono "$modem" \
+        org.ofono.NetworkRegistration.GetProperties 2>/dev/null \
+        | grep -A1 '"Status"' | grep -qE '"(registered|roaming)"'
+}
+
+# Radio off and on again, the way flight mode does it, so the network hears
+# what the phone can do now. Never during a call - that is the call.
+# The data call drops with it; furios-mobile-context and NetworkManager bring
+# it back, seen 29.9. (ccmni0 -> ccmni1 within the minute).
+nr_reregister() {
+    local modem i
+    modem=$(modem_path) || { bad "no modem"; return 1; }
+    if call_in_progress; then
+        warn "a call is in progress - 5G follows at the next registration"
+        return 2
+    fi
+    timeout 10 dbus-send --system --print-reply --dest=org.ofono "$modem" \
+        org.ofono.Modem.SetProperty string:Online variant:boolean:false >/dev/null 2>&1
+    sleep "${NR_OFF_SECONDS:-5}"
+    if ! timeout 10 dbus-send --system --print-reply --dest=org.ofono "$modem" \
+            org.ofono.Modem.SetProperty string:Online variant:boolean:true >/dev/null 2>&1; then
+        bad "the radio did not come back on - flight mode off by hand"
+        return 1
+    fi
+    for i in $(seq 1 "${NR_REG_WAIT:-30}"); do
+        nr_registered && { ok "registered again"; return 0; }
+        sleep 2
+    done
+    warn "radio is on, but not registered yet"
+    return 0
+}
+
+cmd_nr() {
+    local want=${1:-} rc=0
+    if [ -z "$want" ]; then
+        printf 'recorded: %s\n' "$(nr_recorded)"
+        printf 'allowed: %s\n' "$(nr_allowed_now)"
+        return 0
+    fi
+    case "$want" in
+        on|off) ;;
+        *) echo "usage: modemctl nr [on|off]" >&2; exit 2 ;;
+    esac
+    if [ ! -w "$(dirname "$NR_FILE")" ]; then
+        echo "cannot write $(dirname "$NR_FILE")" >&2
+        [ "$(id -u)" -ne 0 ] && echo "try: sudo $0 nr $want" >&2
+        exit 1
+    fi
+    head_ "5G"
+    if [ "$want" = on ]; then
+        write_atomic "$NR_FILE" on || { bad "could not record the choice in $NR_FILE"; return 1; }
+    else
+        rm -f "$NR_FILE" || { bad "could not remove $NR_FILE"; return 1; }
+    fi
+    if [ "$NO_RESTART" -eq 0 ]; then
+        nr_set "$want" || rc=1
+        [ "$rc" -eq 0 ] && [ "$NR_CHANGED" -eq 1 ] && { nr_reregister || [ $? -eq 2 ] || rc=1; }
+    else
+        say "Recorded, the modem is left alone. Takes effect at the next boot."
+    fi
+    say ""
+    say "5G $want recorded. This survives a reboot."
+    return $rc
+}
+
+# After boot, from furios-modem-nr.service, and again whenever oFono restarts
+# (the unit is PartOf it): oFono sets its own network type when it brings the
+# modem up, and the RIL turns that into a bitmap without NR. So: wait until
+# the modem is registered - by then oFono has said its piece - allow NR, and
+# register once more. Then look again a little later, because the start is
+# not always over when registration is.
+NR_BOOT_WAIT=${NR_BOOT_WAIT:-180}
+cmd_nr_boot() {
+    local i try
+    [ "$(nr_recorded)" = on ] || return 0
+    for i in $(seq 1 $(( NR_BOOT_WAIT / 3 ))); do
+        MODEM_PATH=
+        nr_registered && break
+        sleep 3
+    done
+    nr_registered || { warn "the modem did not register within ${NR_BOOT_WAIT}s - leaving 5G alone"; return 0; }
+    sleep "${NR_SETTLE:-15}"
+    local fresh=0
+    for try in 1 2 3; do
+        nr_set on || return 1
+        # Only when NR had to be added: then the modem registered without it,
+        # and the network will not ask again on its own. Already there means
+        # it was there before registration - the day FuriOS allows NR by
+        # itself, this is a no-op that leaves the radio alone.
+        if [ "$NR_CHANGED" -eq 1 ]; then
+            nr_reregister
+            [ $? -eq 1 ] && return 1
+            fresh=1
+        fi
+        sleep "${NR_RECHECK:-30}"
+        if [ "$(nr_allowed_now)" = yes ]; then
+            if [ "$fresh" -eq 1 ]; then
+                logger -t modemctl "5G allowed, registered afresh" 2>/dev/null || true
+            else
+                logger -t modemctl "5G was already allowed - radio left alone" 2>/dev/null || true
+            fi
+            return 0
+        fi
+        warn "something took 5G away again - try $((try+1)) of 3"
+    done
+    bad "5G does not stay allowed"
+    return 1
+}
+
 # What the boot unit and the apt hook run: make the phone match what was
 # recorded, and nothing else. Deliberately does NOT touch the units - their
 # enablement is already persistent, and enabling a service from a oneshot that
@@ -1723,6 +1921,19 @@ cmd_status() {
 and no 5G"; bad_count=$((bad_count+1)) ;;
         *)    ok "radio technology preference: $pref" ;;
     esac
+
+    # 5G is a choice, not a repair: off is fine. On and not allowed is not -
+    # something took it away after nr-boot put it there.
+    if [ "$(nr_recorded)" = on ]; then
+        case "$(nr_allowed_now)" in
+            yes) ok "5G switched on and allowed by the modem" ;;
+            no)  bad "5G switched on, but the modem does not allow it - sudo modemctl nr on"
+                 bad_count=$((bad_count+1)) ;;
+            *)   warn "5G switched on, but the radio HAL did not answer" ;;
+        esac
+    else
+        skip "5G not switched on (sudo modemctl nr on)"
+    fi
 
     # The cellular profile by type, NOT the first one listed - that is the
     # Wi-Fi connection on any phone that has ever joined a network, and
@@ -1997,6 +2208,12 @@ modemctl $VERSION - keeps the FuriOS modem fixes applied
   modemctl sim <n>         use the SIM in slot n and remember it (one at a
                            time - the phone has one radio for both slots);
                            refused for a slot without a card unless --force
+  modemctl nr              5G: whether it is switched on, and whether the
+                           modem allows it right now
+  modemctl nr on|off       allow 5G (NR) or not, and remember it; the radio
+                           registers afresh once, which drops data briefly
+  modemctl nr-boot         after boot: allow 5G again if it is switched on
+                           (furios-modem-nr.service)
   modemctl boot            make the phone match the recorded profile
                            (used by the boot unit and the apt hook)
   modemctl adopt           record "fixed" if an earlier version put the
@@ -2050,6 +2267,8 @@ case "$CMD" in
     signal)       cmd_signal ;;
     sim)          cmd_sim "${1:-}" ;;
     sim-check)    cmd_sim_check ;;
+    nr)           cmd_nr "${1:-}" ;;
+    nr-boot)      cmd_nr_boot ;;
     version|-V|--version)
         # VERSION is this script's own interface version and moves rarely. The
         # question people actually ask here is "which build is on this phone",

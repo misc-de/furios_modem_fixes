@@ -11,9 +11,12 @@ sudo /usr/local/bin/modemctl revert || true
 # oFono back on slot 1, from the next boot on: restarting oFono by hand
 # leaves the modem offline.
 sudo /usr/local/bin/modemctl sim 1 --no-restart || true
+# 5G back to what oFono asks for, while nrprobe is still here to do it.
+[ -f /etc/furios-modem-fixes.nr ] && sudo /usr/local/bin/modemctl nr off || true
 
 sudo systemctl disable --now furios-modem-fixes.service 2>/dev/null || true
 sudo systemctl disable furios-modem-sim-check.service 2>/dev/null || true
+sudo systemctl disable furios-modem-nr.service 2>/dev/null || true
 sudo systemctl disable --now furios-mobile-route.service 2>/dev/null || true
 sudo systemctl disable --now furios-mobile-context.service 2>/dev/null || true
 # The watcher's route goes with it. Leaving a default route behind that nothing
@@ -32,6 +35,7 @@ sudo ip route del default dev "$(ip -4 route show default metric "$METRIC" \
 # that has since been removed.
 sudo rm -f /etc/systemd/system/furios-modem-fixes.service \
            /etc/systemd/system/furios-modem-sim-check.service \
+           /etc/systemd/system/furios-modem-nr.service \
            /etc/ofono/binder.d/zz-furios-sim.conf \
            /etc/systemd/system/furios-mobile-route.service \
            /etc/systemd/system/furios-mobile-context.service \
@@ -42,8 +46,9 @@ sudo rm -f /etc/systemd/system/furios-modem-fixes.service \
            /usr/local/bin/furios-mobile-context \
            /usr/share/polkit-1/actions/de.misc-de.modemctl.policy \
            /etc/furios-modem-fixes.profile \
-           /etc/furios-modem-fixes.sim
-sudo rm -rf /usr/local/share/furios-modem /var/lib/furios-modem-fixes
+           /etc/furios-modem-fixes.sim \
+           /etc/furios-modem-fixes.nr
+sudo rm -rf /usr/local/share/furios-modem /usr/local/lib/furios-modem /var/lib/furios-modem-fixes
 sudo systemctl daemon-reload
 
 echo "Shipped state restored. Takes effect after: sudo systemctl restart ModemManager"

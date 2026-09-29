@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=Allow 5G (NR) once the modem has registered
+Documentation=file:/usr/share/doc/furios-modem-fixes/README.md
+# Only on a phone where 5G was switched on ("modemctl nr on").
+ConditionPathExists=/etc/furios-modem-fixes.nr
+After=ofono.service ModemManager.service
+Wants=ofono.service
+# oFono sets its own network type whenever it brings the modem up, and that
+# takes NR away again: a restart of oFono (a SIM switch does one) restarts
+# this too.
+PartOf=ofono.service
+
+[Service]
+# simple, not oneshot: a oneshot wanted by multi-user.target holds that
+# target until it is done, and this waits for the modem to register.
+Type=simple
+RemainAfterExit=yes
+ExecStart=/usr/bin/modemctl nr-boot
+# Bounded by modemctl itself: at most NR_BOOT_WAIT for registration, then
+# three rounds of allow, register afresh, look again.
+
+[Install]
+WantedBy=multi-user.target

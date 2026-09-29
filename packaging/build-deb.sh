@@ -1,8 +1,10 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
 # SPDX-License-Identifier: MIT
-# Builds a .deb from the work tree. Architecture-independent - this ships
-# patches and two scripts, nothing compiled.
+# Builds a .deb from the work tree. Mostly patches and scripts; the one
+# compiled piece is nrprobe, which allows 5G through the radio HAL - so the
+# package is built for this machine's architecture. Needs gcc and the
+# libgbinder headers (sudo apt install libgbinder-dev libglibutil-dev).
 set -e
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -23,7 +25,13 @@ trap 'rm -rf "$STAGE"' EXIT
 # "./". Nothing should be able to learn the root directory's permissions from
 # a package of ours.
 chmod 755 "$STAGE"
-echo "package $PKG $VERSION (all)"
+ARCH=$(dpkg --print-architecture)
+echo "package $PKG $VERSION ($ARCH)"
+
+tools/5g/build.sh >/dev/null
+install -Dm755 tools/5g/nrprobe "$STAGE/usr/lib/furios-modem/nrprobe"
+# The library it links against, at the version it was built with.
+GBINDER_DEP=$(dpkg-query -W -f='libgbinder (>= ${Version})' libgbinder)
 
 install -Dm755 modemctl                  "$STAGE/usr/bin/modemctl"
 install -Dm755 tools/furios-modem-signal "$STAGE/usr/bin/furios-modem-signal"
@@ -63,6 +71,8 @@ install -Dm644 systemd/furios-mobile-context.service \
     "$STAGE/usr/lib/systemd/system/furios-mobile-context.service"
 install -Dm644 systemd/furios-modem-sim-check.service \
     "$STAGE/usr/lib/systemd/system/furios-modem-sim-check.service"
+install -Dm644 systemd/furios-modem-nr.service \
+    "$STAGE/usr/lib/systemd/system/furios-modem-nr.service"
 install -Dm644 apt/99furios-modem-fixes \
     "$STAGE/etc/apt/apt.conf.d/99furios-modem-fixes"
 # Straight into place, not under /usr/share/furios-modem: polkit reads its
@@ -157,11 +167,11 @@ mkdir -p "$STAGE/DEBIAN"
 cat > "$STAGE/DEBIAN/control" <<CONTROL
 Package: $PKG
 Version: $VERSION
-Architecture: all
+Architecture: $ARCH
 Maintainer: misc-de <11610690+misc-de@users.noreply.github.com>
 Section: net
 Priority: optional
-Depends: ofono2mm, ofono, patch, python3, python3-dbus, modemmanager, dbus-bin | dbus, network-manager, iproute2
+Depends: ofono2mm, ofono, patch, python3, python3-dbus, modemmanager, dbus-bin | dbus, network-manager, iproute2, $GBINDER_DEP
 Description: Keeps fifteen fixes to the FuriOS modem stack applied
  Defects in ofono2mm, in oFono's binder configuration, in oFono itself, in how
  FuriOS wires up DNS, in ModemManager's own bus policy and in the database the
@@ -188,6 +198,8 @@ if [ "$1" = configure ]; then
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl enable furios-modem-fixes.service >/dev/null 2>&1 || true
     systemctl enable furios-modem-sim-check.service >/dev/null 2>&1 || true
+    # Does nothing until "modemctl nr on" - ConditionPathExists.
+    systemctl enable furios-modem-nr.service >/dev/null 2>&1 || true
     # --now for the watcher: it is a long-running service, and one that is
     # installed but not started leaves the phone without a fallback route
     # until the next reboot, which is exactly the failure it exists to prevent.
@@ -236,6 +248,9 @@ remove)
     systemctl disable --now furios-mobile-route.service >/dev/null 2>&1 || true
     systemctl disable --now furios-mobile-context.service >/dev/null 2>&1 || true
     systemctl disable furios-modem-sim-check.service >/dev/null 2>&1 || true
+    # The 5G record stays, like the SIM slot; the modem goes back to oFono's
+    # own network type at the next start of oFono.
+    systemctl disable furios-modem-nr.service >/dev/null 2>&1 || true
     /usr/bin/modemctl revert --quiet || true
     # oFono's config back to slot 1 - the only file of another package the
     # SIM switch writes. The record stays, like the profile, so a reinstall
@@ -275,7 +290,7 @@ cat > "$STAGE/DEBIAN/postrm" <<'POSTRM'
 #!/bin/sh
 set -e
 if [ "$1" = purge ]; then
-    rm -f /etc/furios-modem-fixes.profile /etc/furios-modem-fixes.sim
+    rm -f /etc/furios-modem-fixes.profile /etc/furios-modem-fixes.sim /etc/furios-modem-fixes.nr
     rm -rf /var/lib/furios-modem-fixes
 fi
 exit 0
@@ -283,7 +298,7 @@ POSTRM
 chmod 755 "$STAGE/DEBIAN/postrm"
 
 rm -f "$ROOT/packaging/${PKG}_"*.deb
-OUT="$ROOT/packaging/${PKG}_${VERSION}_all.deb"
+OUT="$ROOT/packaging/${PKG}_${VERSION}_${ARCH}.deb"
 dpkg-deb --root-owner-group --build "$STAGE" "$OUT" >/dev/null
 echo "done: $OUT"
 

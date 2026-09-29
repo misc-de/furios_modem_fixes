@@ -1,0 +1,115 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+#
+# 5G field test. Run it where there is 5G coverage:
+#
+#   nr-test status     what the modem allows and what it is on - changes nothing
+#   nr-test on         allow NR (IRadio 1.6 setAllowedNetworkTypesBitmap on em1)
+#   nr-test watch [s]  log registration every 5 s (default 120 s)
+#   nr-test off        back to the state the phone boots into
+#   nr-test run        status, on, watch 180 with a 50 MB download, off
+#
+# Everything is appended to ~/nr-test.log.
+#
+# Why this way, measured 2026-09-28:
+#  - The modem accepts NR. Over the side instance em1 both the 1.4 call
+#    (setPreferredNetworkTypeBitmap) and the 1.6 one (setAllowedNetworkTypesBitmap,
+#    code 187, answered as 193) return NONE and read back with the NR bit set;
+#    AT+ERAT goes to 22,128. oFono's own 1.4 request on slot1 gets Error 44 for
+#    the same bitmap - why is still open.
+#  - oFono keeps its preference "lte" cached and only reads the modem back on
+#    start, so it does not fight this setting. An oFono restart ends the test.
+#  - Every switch drops the data call for a few seconds; furios-mobile-context
+#    brings it back on its own.
+#  - The boot state is ERAT 22,0 (written by ofono2mm) with an RIL bitmap of
+#    GSM|UMTS|LTE; "off" restores exactly that.
+set -u
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+PROBE=$HERE/nrprobe
+LOG=$HOME/nr-test.log
+
+RAF_WITH_NR=0x19ce0e      # GSM|UMTS|LTE families + NR, as Android sends it
+RAF_BOOT=0x9ce0e          # what the RIL reports after boot
+ERAT_BOOT=22              # what ofono2mm writes at every start
+
+log() { echo "$@" | tee -a "$LOG"; }
+
+at() {
+    dbus-send --system --print-reply --dest=org.ofono /ril_0 \
+        org.ofono.FuriLabs.AT.SendCommand string:"$1"$'\r\n' 2>&1 \
+        | sed -n 's/^ *\(+[A-Z0-9]*:.*\)/\1/p;s/.*Error.*/&/p' | tr -d '"'
+}
+
+prop() {   # interface property
+    dbus-send --system --print-reply --dest=org.ofono /ril_0 "org.ofono.$1.GetProperties" \
+        2>/dev/null | grep -A1 "\"$2\"" | tail -1 | sed 's/.*variant *[a-z0-9]* *//;s/"//g'
+}
+
+in_call() {
+    dbus-send --system --print-reply --dest=org.ofono /ril_0 \
+        org.ofono.VoiceCallManager.GetCalls 2>/dev/null | grep -q "object path"
+}
+
+guard() {
+    [ -x "$PROBE" ] || { log "nrprobe missing - run $HERE/build.sh"; exit 1; }
+    if in_call; then
+        log "a call is active - not touching the modem"
+        exit 1
+    fi
+}
+
+status() {
+    log "== $(date '+%F %T')"
+    log "  oFono:  tech $(prop NetworkRegistration Technology), strength $(prop NetworkRegistration Strength)%, cell $(prop NetworkRegistration CellId), pref $(prop RadioSettings TechnologyPreference)"
+    log "  net:    $(at 'AT+COPS?')   (26223 = 1&1 own cells, 26202 = Vodafone)"
+    log "  cell:   $(at 'AT+CEREG?')   (5th = AcT, 13 = EN-DC anchor)  $(at 'AT+ECAINFO?')"
+    log "  nr_ps:  $(at 'AT+EPSCONFIG=0,"nr_ps"')   (255 = no SIM may use NR data, 1 = SIM1)"
+    log "  MM:     $(mmcli -m any 2>/dev/null | sed -n 's/.*access tech: //p')"
+    log "  modem:  $(at 'AT+ERAT?')   (rat 22 = with NR; 2nd-last 128 = NR preferred)"
+    log "  RIL:    $("$PROBE" get 2>&1 | sed -n 's/.*response 194 .*value [0-9]* (\(0x[0-9a-f]*\)).*/allowed \1/p')   (0x19ce0e = with NR, 0x9ce0e = without)"
+    # the RIL logs the data bearer's radio tech: 14 = LTE, 20 = NR
+    local rt
+    rt=$(sudo -n logcat -b all -d -t 400 2>/dev/null | grep -o "dataRadioTech [0-9]*" | tail -1)
+    if [ -n "$rt" ]; then log "  RIL:    last $rt   (14 = LTE, 20 = NR)"; fi
+}
+
+on() {
+    guard
+    log "== $(date '+%T') allowing NR"
+    "$PROBE" setallowed "$RAF_WITH_NR" 2>&1 | grep -- "<-" | tee -a "$LOG"
+    sleep 3
+    log "  modem:  $(at 'AT+ERAT?')"
+}
+
+off() {
+    guard
+    log "== $(date '+%T') back to the boot state"
+    "$PROBE" setallowed "$RAF_BOOT" 2>&1 | grep -- "<-" | tee -a "$LOG"
+    at "AT+ERAT=$ERAT_BOOT" >/dev/null
+    sleep 2
+    log "  modem:  $(at 'AT+ERAT?')"
+}
+
+watch() {
+    local end=$(( $(date +%s) + ${1:-120} ))
+    while [ "$(date +%s)" -lt "$end" ]; do
+        log "  $(date '+%T')  oFono $(prop NetworkRegistration Technology)  MM $(mmcli -m any 2>/dev/null | sed -n 's/.*access tech: //p')  $(at 'AT+ERAT?')  $(at 'AT+COPS?')  $(at 'AT+ECAINFO?')"
+        sleep 5
+    done
+}
+
+case "${1:-}" in
+    status) status ;;
+    on)     on ;;
+    off)    off ;;
+    watch)  watch "${2:-120}" ;;
+    # NSA only adds the NR leg under load, so the run pulls up to 50 MB
+    run)    guard; status; on; trap off EXIT
+            curl -s -o /dev/null -r 0-50000000 --max-time 90 \
+                -w '  download: %{size_download} B at %{speed_download} B/s\n' \
+                https://ash-speed.hetzner.com/100MB.bin >>"$LOG" 2>&1 &
+            watch 180; wait; status ;;
+    *)      sed -n '4,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

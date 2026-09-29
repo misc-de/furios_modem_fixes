@@ -45,6 +45,8 @@ STUB
 # Nothing here may restart anything on the machine running the tests.
 printf '#!/bin/sh\nexit 0\n' > "$STUB/systemctl"
 printf '#!/bin/sh\nexit 1\n' > "$STUB/dbus-send"
+# sim-check reports its fallback through logger; not into this machine's journal.
+printf '#!/bin/sh\nexit 0\n' > "$STUB/logger"
 chmod +x "$STUB"/*
 
 mc() {

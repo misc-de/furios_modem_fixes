@@ -4,3 +4,6 @@ __pycache__/
 
 # Gebaute Pakete
 *.deb
+
+# Gebautes Werkzeug
+tools/5g/nrprobe

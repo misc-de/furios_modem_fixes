@@ -71,6 +71,15 @@ sed "s|^ExecStart=/usr/bin/modemctl|ExecStart=$BIN/modemctl|" \
     /etc/systemd/system/furios-modem-sim-check.service >/dev/null
 sudo chmod 644 /etc/systemd/system/furios-modem-sim-check.service
 
+# 5G: the probe is compiled here (needs gcc and libgbinder-dev), the unit
+# points at this modemctl.
+tools/5g/build.sh >/dev/null
+sudo install -Dm755 tools/5g/nrprobe /usr/local/lib/furios-modem/nrprobe
+sed "s|^ExecStart=/usr/bin/modemctl|ExecStart=$BIN/modemctl|" \
+    systemd/furios-modem-nr.service | sudo tee \
+    /etc/systemd/system/furios-modem-nr.service >/dev/null
+sudo chmod 644 /etc/systemd/system/furios-modem-nr.service
+
 sed "s|^ExecStart=/usr/bin/furios-mobile-route|ExecStart=$BIN/furios-mobile-route|" \
     systemd/furios-mobile-route.service | sudo tee \
     /etc/systemd/system/furios-mobile-route.service >/dev/null
@@ -91,6 +100,7 @@ sudo systemctl daemon-reload
 # enable, not start: applying happens below, with output you can read.
 sudo systemctl enable furios-modem-fixes.service >/dev/null
 sudo systemctl enable furios-modem-sim-check.service >/dev/null
+sudo systemctl enable furios-modem-nr.service >/dev/null
 # This one is enable --now: it is a watcher, not a one-shot, and a watcher that
 # is running but was never enabled is a fix that disappears at the next boot
 # without telling anybody.

@@ -23,6 +23,7 @@ run() {
 run "the patches reproduce what we ship" bash "$HERE/test-patches.sh"
 run "modemctl's judgement"               bash "$HERE/test-modemctl.sh"
 run "the SIM slot switch"                bash "$HERE/test-sim-slot.sh"
+run "the 5G switch"                      bash "$HERE/test-nr.sh"
 run "signal conversions"                 python3 "$HERE/test-signal.py"
 run "the modem's port list"              python3 "$HERE/test-ports.py"
 run "the modem is asked for its bands once" python3 "$HERE/test-band-cache.py"
