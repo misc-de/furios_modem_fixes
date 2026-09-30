@@ -6,7 +6,7 @@ not what the documentation of the parts involved suggests.
 
 Device: FuriPhone FLX1 (radon), MediaTek modem `MOLY.NR15.R3.MP.V189`, SIM
 262-23, APN `web.vodafone.de`. Package versions in
-[paket-versionen.txt](paket-versionen.txt).
+[package-versions.txt](package-versions.txt).
 
 Four symptoms started this, on different days:
 
