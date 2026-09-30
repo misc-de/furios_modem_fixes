@@ -11,8 +11,15 @@ sudo /usr/local/bin/modemctl revert || true
 # oFono back on slot 1, from the next boot on: restarting oFono by hand
 # leaves the modem offline.
 sudo /usr/local/bin/modemctl sim 1 --no-restart || true
-# 5G back to what oFono asks for, while nrprobe is still here to do it.
-[ -f /etc/furios-modem-fixes.nr ] && sudo /usr/local/bin/modemctl nr off || true
+# 5G back to what oFono asks for, while nrprobe is still here to do it - and
+# oFono's own preference back to what "nr on" recorded, which oFono keeps on
+# disk and nothing else would ever put back. Also when only that record is
+# left: an "nr off" that could not reach oFono keeps it for the next try.
+ORIG=/var/lib/furios-modem-fixes/original
+if [ -f /etc/furios-modem-fixes.nr ] \
+   || sudo test -e "$ORIG/ofono-technology-preference.value"; then
+    sudo /usr/local/bin/modemctl nr off || true
+fi
 # The warning channels cellbroadcastd set through our bus policy live on in
 # oFono's own storage; nothing on the shipped policy would ever reset them.
 sudo ./uninstall-cbs.sh || true
@@ -60,6 +67,21 @@ sudo rm -f /etc/systemd/system/furios-modem-fixes.service \
            /etc/furios-modem-fixes.profile \
            /etc/furios-modem-fixes.sim \
            /etc/furios-modem-fixes.nr
+# Whatever is still recorded here describes something that could not be put
+# back - oFono was not answering, or the SIM whose channel list it is is not
+# in the phone. Said, with its content, before it goes: after this nothing
+# remembers it, and a record left behind would be obeyed by the next
+# installation as if it were still true.
+if sudo test -d "$ORIG" && [ -n "$(sudo ls -A "$ORIG" 2>/dev/null)" ]; then
+    echo "Not put back - recorded before the first change, now forgotten:" >&2
+    for r in $(sudo ls -A "$ORIG"); do
+        case "$r" in
+            *.value)  echo "  ${r%.value}: \"$(sudo cat "$ORIG/$r")\"" >&2 ;;
+            *.absent) echo "  ${r%.absent}: did not exist" >&2 ;;
+            *.path)   echo "  ${r%.path}: $(sudo readlink "$ORIG/$r" 2>/dev/null || echo 'a file')" >&2 ;;
+        esac
+    done
+fi
 sudo rm -rf /usr/local/share/furios-modem /usr/local/lib/furios-modem /var/lib/furios-modem-fixes
 # The SIM switch's lock lives in /run and would go at the next boot anyway.
 sudo rm -f /run/furios-modem-fixes.sim.lock

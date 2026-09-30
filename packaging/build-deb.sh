@@ -249,8 +249,18 @@ remove)
     systemctl disable --now furios-mobile-context.service >/dev/null 2>&1 || true
     systemctl disable furios-modem-sim-check.service >/dev/null 2>&1 || true
     # The 5G record stays, like the SIM slot; the modem goes back to oFono's
-    # own network type at the next start of oFono.
+    # own network type at the next start of oFono. oFono's preference does
+    # NOT - oFono keeps it on disk - so "nr off" puts back what "nr on"
+    # recorded, while nrprobe and the record are still here. Only when 5G was
+    # on, or its record is still waiting: nothing touches the radio otherwise.
     systemctl disable furios-modem-nr.service >/dev/null 2>&1 || true
+    nr=$(cat /etc/furios-modem-fixes.nr 2>/dev/null || true)
+    if [ -n "$nr" ] || [ -e /var/lib/furios-modem-fixes/original/ofono-technology-preference.value ]; then
+        timeout 120 /usr/bin/modemctl nr off --quiet >/dev/null 2>&1 || true
+        [ -z "$nr" ] || printf '%s\n' "$nr" > /etc/furios-modem-fixes.nr || true
+    fi
+    # Also puts back resolv.conf and the warning channel list from what apply
+    # recorded before its first change (/var/lib/furios-modem-fixes/original).
     /usr/bin/modemctl revert --quiet || true
     # oFono's config back to slot 1 - the only file of another package the
     # SIM switch writes. The record stays, like the profile, so a reinstall
