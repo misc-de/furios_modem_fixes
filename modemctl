@@ -1106,7 +1106,10 @@ $RADIO_CONF.bak.$ts)"
             # Back up whatever is there now - as a symlink if that is what it
             # is, which is why cp -a and not cp. Without this, revert has
             # nothing to put back and would have to guess.
-            if [ "$dns_ok" -eq 1 ] && { [ -e "$RESOLV" ] || [ -L "$RESOLV" ]; }; then
+            # Not when it already is our link (only the drop-in was missing):
+            # a backup of that is one revert must never put back.
+            if [ "$dns_ok" -eq 1 ] && { [ -e "$RESOLV" ] || [ -L "$RESOLV" ]; } \
+               && [ "$(readlink -f "$RESOLV" 2>/dev/null)" != "$NM_RESOLV" ]; then
                 cp -a "$RESOLV" "$RESOLV.bak.$ts" 2>/dev/null || true
             fi
             if [ "$dns_ok" -eq 1 ] && ln -sfn ../run/NetworkManager/resolv.conf "$RESOLV"; then
@@ -1238,6 +1241,17 @@ inc && lvl && /<channels start="4371" end="4371"\/>/ {
     return $failed
 }
 
+# The newest backup of resolv.conf that is not our own link to
+# NetworkManager's file - what revert puts back. Empty when there is none.
+resolv_backup() {
+    local b
+    for b in $(ls -1td "$RESOLV.bak."* 2>/dev/null); do
+        [ "$(readlink -f "$b" 2>/dev/null)" = "$NM_RESOLV" ] && continue
+        echo "$b"
+        return 0
+    done
+}
+
 cmd_revert() {
     need_write revert
     local restarted_at failed=0
@@ -1274,13 +1288,21 @@ cmd_revert() {
 
 
     head_ "DNS"
-    if [ "$(resolvconf_state)" = applied ]; then
+    # Put back exactly what was there before, not what we assume was there.
+    # The newest backup wins - but not one that is our own link again: apply
+    # also backs up when only the drop-in was missing and the link was already
+    # ours, and "the newest" then put NetworkManager's resolv.conf straight
+    # back. Found on 30.9.2026 on a phone uninstalled a day earlier: drop-in
+    # gone, /etc/resolv.conf still at NetworkManager, four backups next to it
+    # and only the oldest pointing at the resolved stub FuriOS ships. For the
+    # same reason a link of ours with the drop-in already gone still counts
+    # as ours to revert, as long as a backup says what it replaced. ls -1t is
+    # safe here only because nothing but root can write this directory.
+    local back=""
+    back=$(resolv_backup)
+    if [ "$(resolvconf_state)" = applied ] || \
+       { [ -n "$back" ] && [ "$(readlink -f "$RESOLV" 2>/dev/null)" = "$NM_RESOLV" ]; }; then
         rm -f "$NM_CONF_D/$DNS_DROPIN"
-        # Put back exactly what was there before, not what we assume was there.
-        # The newest backup wins; ls -1t is safe here only because nothing but
-        # root can write this directory.
-        local back
-        back=$(ls -1td "$RESOLV.bak."* 2>/dev/null | head -1)
         if [ -n "$back" ]; then
             rm -f "$RESOLV" && cp -a "$back" "$RESOLV"
             ok "resolv.conf restored from $(basename "$back")"

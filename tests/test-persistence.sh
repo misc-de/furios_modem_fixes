@@ -75,8 +75,14 @@ fi
 if command -v apt-config >/dev/null 2>&1; then
     TESTS_RUN=$((TESTS_RUN + 1))
     tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-    cp "$HOOK" "$tmp/99test"
-    if apt-config -c /dev/null -o "Dir::Etc::parts=$tmp" dump 2>/dev/null | grep -q 'DPkg::Post-Invoke::'; then
+    # Through APT_CONFIG, which apt reads before the parts directory. The
+    # "-o Dir::Etc::parts=" this used comes too late: apt had already read
+    # the real /etc/apt/apt.conf.d, so the check passed on any phone with the
+    # hook installed and failed on one without it (30.9.2026).
+    mkdir -p "$tmp/parts"
+    cp "$HOOK" "$tmp/parts/99test"
+    printf 'Dir::Etc::parts "%s/parts";\n' "$tmp" > "$tmp/apt.conf"
+    if APT_CONFIG="$tmp/apt.conf" apt-config dump 2>/dev/null | grep -q 'DPkg::Post-Invoke::'; then
         ok "apt parses the hook and records it as a list entry"
     else
         TESTS_FAILED=$((TESTS_FAILED + 1))

@@ -35,6 +35,7 @@ run "what survives a package update"     bash "$HERE/test-persistence.sh"
 run "the mobile fallback route"          bash "$HERE/test-mobile-route.sh"
 run "reviving the data context"          bash "$HERE/test-mobile-context.sh"
 run "the restart policy of every unit"   bash "$HERE/test-restart-policy.sh"
+run "uninstall takes back what install puts down" python3 "$HERE/test-uninstall-covers-install.py"
 
 # What a file is written in is decided by its shebang, not by the directory it
 # sits in. tools/ held nothing but Python until a shell script moved in there,

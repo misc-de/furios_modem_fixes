@@ -59,6 +59,17 @@ export MODEMCTL_DBUS_CONF_D="$DBUSD"
 # healthy oFono. The missing case is exercised on purpose further down.
 install -m644 "$ROOT/dbus/furios-modem-cellbroadcast.conf" "$DBUSD/"
 
+# The same for DNS. Without these, "status" read the
+# real /etc/resolv.conf and apply tried the real /etc/NetworkManager/conf.d -
+# three checks here depended on whether the phone running them had the fix
+# applied, and failed on a phone that had just been uninstalled (30.9.2026).
+NMD="$WORK/nm-conf.d"; mkdir -p "$NMD" "$WORK/etc" "$WORK/run/NetworkManager"
+NMRESOLV="$WORK/run/NetworkManager/resolv.conf"; echo "nameserver 127.0.0.1" > "$NMRESOLV"
+RC="$WORK/etc/resolv.conf"
+printf 'rc-manager=symlink\n' > "$NMD/99-furios-modem-resolvconf.conf"
+ln -sfn "$NMRESOLV" "$RC"
+export MODEMCTL_NM_CONF_D="$NMD" MODEMCTL_RESOLV="$RC" MODEMCTL_NM_RESOLV="$NMRESOLV"
+
 # The alert channel database. Baseline is a healthy phone, like the policy
 # above; what the distribution actually ships - de and nl subscribing to
 # EU-Alert level 2 with 4371, 4384 and 4385, and not 4372 - is written in
@@ -981,7 +992,8 @@ settle_run() {
     # With no MODEMCTL_* in the environment, because these runs claim to be
     # root and root refuses to honour them - on purpose, as root they would be
     # an arbitrary-file patch. settle touches no file of ours anyway.
-    PATH="$SETTLEBIN:$PATH" env -u MODEMCTL_DBUS_CONF_D -u MODEMCTL_CBS_DB \
+    PATH="$SETTLEBIN:$PATH" env -u MODEMCTL_DBUS_CONF_D -u MODEMCTL_CBS_DB -u MODEMCTL_NM_CONF_D \
+        -u MODEMCTL_RESOLV -u MODEMCTL_NM_RESOLV \
         bash "$ROOT/modemctl" settle 2>&1
 }
 shell_was_killed() {
@@ -1343,5 +1355,29 @@ env PATH="$STUB:$PATH" MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
     bash "$ROOT/modemctl" apply -q >/dev/null 2>&1
 check "a main.py the patch no longer fits takes the drop-in out" yes \
       "$([ -f "$SYSD/ModemManager.service.d/$DROPIN" ] && echo no || echo yes)"
+
+# --- revert puts the shipped resolver back, not our own link ----------------
+#
+# Found on 30.9.2026 on a phone uninstalled the day before: drop-in gone,
+# /etc/resolv.conf still pointing at NetworkManager, and four backups - the
+# newer ones of our own link, taken by applies that found only the drop-in
+# missing. "The newest backup wins" put our link back. The backup that counts
+# is the newest one that is not ours, and a link of ours whose drop-in is
+# already gone is still ours to take back.
+mkdir -p "$WORK/run/systemd/resolve" "$WORK/sysd-dns"
+STUBRESOLV="$WORK/run/systemd/resolve/stub-resolv.conf"; echo "nameserver 127.0.0.53" > "$STUBRESOLV"
+rm -f "$NMD"/*.conf "$RC" "$RC".bak.*
+ln -sfn "$STUBRESOLV" "$RC.bak.20260913-130601"; touch -h -d '2026-09-13 13:06' "$RC.bak.20260913-130601"
+ln -sfn "$NMRESOLV"   "$RC.bak.20260914-200006"; touch -h -d '2026-09-14 20:00' "$RC.bak.20260914-200006"
+ln -sfn "$NMRESOLV" "$RC"
+sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-dns" bash "$ROOT/modemctl" revert --quiet >/dev/null 2>&1
+check "revert skips a backup of our own link" "$STUBRESOLV" "$(readlink -f "$RC")"
+
+# And apply no longer takes such a backup: link already ours, drop-in missing.
+rm -f "$RC".bak.*
+ln -sfn "$NMRESOLV" "$RC"
+sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-dns" bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+check "apply does not back up our own link" 0 "$(ls -1d "$RC".bak.* 2>/dev/null | wc -l)"
+sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-dns" bash "$ROOT/modemctl" revert --quiet >/dev/null 2>&1
 
 summary
