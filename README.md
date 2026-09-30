@@ -92,3 +92,6 @@ package as a whole is GPL-2.0**. The details are in [NOTICE](NOTICE).
 
 Every defect, the measurements behind it and the traps that cost hours are in
 [FINDINGS.md](FINDINGS.md).
+
+Wi-Fi calling does not work yet; what was measured and the plan to get it
+are in [VOWIFI-PLAN.md](VOWIFI-PLAN.md).
