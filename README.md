@@ -37,6 +37,34 @@ place across package updates. A phone that an earlier version had already
 switched on keeps its repairs - the installers record that as "fixed". Undo
 with `./uninstall.sh` or `apt remove furios-modem-fixes`.
 
+## What is changed, and how it goes back
+
+Everything this changes goes back on `./uninstall.sh` and `apt remove` (the
+repairs also on `modemctl set shipped`, 5G on `modemctl nr off`, the SIM slot
+on `modemctl sim 1`) - to what was there before, not to what a default is
+assumed to be. Before the first change, whatever is not ours by name is
+written down in `/var/lib/furios-modem-fixes/original/` (root only, 0700); a
+second apply or a reinstall never overwrites that record, and the way back
+uses it and drops it. A value somebody changed after us is left alone and
+reported. Where there is no record - a phone an older version set up - the old
+behaviour stays, and says that it is guessing.
+
+| change | where | how it goes back |
+|---|---|---|
+| ofono2mm patches | `/usr/lib/ofono2mm/…` (+ `.bak.<time>` beside) | reverse patch, byte for byte; backups go once `dpkg --verify` says shipped |
+| DNS drop-in | `/etc/NetworkManager/conf.d/99-furios-modem-resolvconf.conf` | ours by name, removed |
+| resolv.conf link | `/etc/resolv.conf` | from the record `resolv.conf.path` / `.absent`; only while it still points at NetworkManager |
+| start order drop-in | `/etc/systemd/system/ModemManager.service.d/` | ours by name; the directory only when the record `mm-service-d` says apply made it |
+| cell broadcast bus policy | `/etc/dbus-1/system.d/furios-modem-cellbroadcast.conf` | ours by name, removed |
+| alert channel 4372 | `serviceproviders.xml` | the one marked line, mode and owner kept |
+| warning channel list | oFono, per SIM | from the record `cbs-topics-<IMSI>`, set through oFono, only while it is one of our lists |
+| oFono's TechnologyPreference | oFono (`modemctl nr on`) | from the record `ofono-technology-preference` on `nr off`, only while it is still `nr` |
+| 5G bitmap | radio HAL | none needed: the RIL writes its own at every oFono start |
+| SIM slot | `/etc/ofono/binder.d/zz-furios-sim.conf` | ours by name (and header), removed |
+| units, apt hook, polkit action, tools | `/etc/systemd/system`, `/etc/apt/apt.conf.d`, `/usr/share/polkit-1/actions`, `/usr/local` | ours by name, removed |
+
+Not reversible: the modem's `nr_ps` (see [tools/5g/README.md](tools/5g/README.md)).
+
 ## Usage
 
     modemctl status     what is in place, and what the stack says

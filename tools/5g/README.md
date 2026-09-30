@@ -54,6 +54,21 @@ own request gets Error 44 - answering that would be the clean fix.
 - **Never use `slot2`** (a probe there reset the modem and crashed oFono) and
   never `slot1` (oFono's). `nrprobe` refuses both.
 
+## What switching off puts back, and what it cannot
+
+- The allowed-types bitmap needs no record: the RIL writes its own at every
+  start of oFono, so the shipped one comes back by itself. `modemctl nr off`
+  only clears the NR bit it set.
+- oFono's `TechnologyPreference` is stored on disk by oFono and outlives a
+  reboot and the package. `modemctl nr on` records what it was before the
+  first change (`/var/lib/furios-modem-fixes/original/`), and `nr off` - also
+  run by `uninstall.sh` and the package's `prerm` - puts exactly that back, as
+  long as it is still the `nr` we set.
+- **Not reversible: the modem's `nr_ps`** (`AT+EPSCONFIG=0,"nr_ps"`, read by
+  `nr-test`; 255 = no SIM may use NR data, 1 = SIM1). The modem answers every
+  write to it with `+CME ERROR: 50`, so whatever it holds after 5G was used
+  here stays, uninstall or not. Nothing in this repository writes it.
+
 ## Building nrprobe
 
 The binary is not in git. Either install `libgbinder-dev libglibutil-dev`, or
