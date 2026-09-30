@@ -13,6 +13,9 @@ sudo /usr/local/bin/modemctl revert || true
 sudo /usr/local/bin/modemctl sim 1 --no-restart || true
 # 5G back to what oFono asks for, while nrprobe is still here to do it.
 [ -f /etc/furios-modem-fixes.nr ] && sudo /usr/local/bin/modemctl nr off || true
+# The warning channels cellbroadcastd set through our bus policy live on in
+# oFono's own storage; nothing on the shipped policy would ever reset them.
+sudo ./uninstall-cbs.sh || true
 
 # The older way in was a .deb (packaging/build-deb.sh), with everything under
 # /usr instead of /usr/local and the apt hook as a conffile. Purged, not
