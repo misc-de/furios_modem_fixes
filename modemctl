@@ -17,7 +17,8 @@ if [ "$(id -u)" -eq 0 ]; then
     for v in MODEMCTL_TARGET MODEMCTL_RADIO_CONF MODEMCTL_SHARE MODEMCTL_PATCHES \
              MODEMCTL_NM_CONF_D MODEMCTL_RESOLV MODEMCTL_NM_RESOLV \
              MODEMCTL_DBUS_CONF_D MODEMCTL_CBS_DB MODEMCTL_PROFILE \
-             MODEMCTL_SYSTEMD_CONF_D MODEMCTL_SHELL_SYSTEM_UNIT MODEMCTL_SIM MODEMCTL_SIM_NAMES MODEMCTL_SIM_LOCK MODEMCTL_SIM_DROPIN MODEMCTL_NR MODEMCTL_NRPROBE; do
+             MODEMCTL_SYSTEMD_CONF_D MODEMCTL_SHELL_SYSTEM_UNIT MODEMCTL_SIM MODEMCTL_SIM_NAMES MODEMCTL_SIM_LOCK MODEMCTL_SIM_DROPIN MODEMCTL_NR MODEMCTL_NRPROBE \
+             MODEMCTL_ORIGINAL; do
         if [ -n "${!v:-}" ]; then
             echo "refusing to honour $v as root - that would be an arbitrary-file patch" >&2
             exit 3
@@ -162,6 +163,33 @@ if [ -z "$NRPROBE" ]; then
 fi
 # RadioAccessFamily bit for NR (1 << RIL_RADIO_TECHNOLOGY_NR, which is 20).
 RAF_NR=$((0x100000))
+
+# What the phone had before the first change of ours, for everything that is
+# not ours by name and whose original nobody else keeps: /etc/resolv.conf,
+# oFono's TechnologyPreference, the cell broadcast channel list oFono stores
+# per SIM, and whether ModemManager.service.d existed. The rule (30.9.2026):
+# write down what was there before the FIRST change, never overwrite that on a
+# second run or a reinstall, and put back exactly that - not what a default
+# is assumed to be. Guessing is how revert once put our own resolv.conf link
+# back, and how uninstall-cbs.sh came to hold a channel list measured on one
+# phone and applied to every other.
+#
+# A record exists exactly as long as our change is in place: revert uses it
+# and drops it, so the next apply writes down what the phone has THEN - which
+# may be something its owner chose in between, and is the right thing to go
+# back to next time. A value somebody changed after us is left alone and
+# reported, and its record goes too: it no longer describes anything of ours.
+#
+# Root only (0700): one of the keys is the SIM's IMSI. The ofono2mm files are
+# not here - their way back is the reverse patch, byte for byte, and the
+# .bak.* next to them - and neither are the files that are ours by name.
+ORIG_DIR=${MODEMCTL_ORIGINAL:-/var/lib/furios-modem-fixes/original}
+
+# The warning channel lists cellbroadcastd ends up handing oFono once our bus
+# policy lets it: after the policy alone (4372 lost), and after the
+# serviceproviders.xml fix. The same two uninstall-cbs.sh knows. A list that
+# is one of these is ours; any other one was chosen by somebody else.
+CBS_OURS='919,4370-4371,4373-4392,4396-4397 919,4370-4392,4396-4397'
 
 QUIET=0
 NO_RESTART=0
@@ -314,7 +342,12 @@ cbs_db_edit() {
     if awk -v mark="$CBS_MARK" "$prog" "$CBS_DB" > "$tmp" \
        && python3 -c 'import sys,xml.etree.ElementTree as E; E.parse(sys.argv[1])' "$tmp" 2>/dev/null \
        && [ -s "$tmp" ]; then
-        chmod 644 "$tmp" && mv -f "$tmp" "$CBS_DB" || rc=1
+        # The mode and owner it had, not ones assumed: revert takes the one
+        # line back out through here as well, and has to leave the file
+        # exactly as the package shipped it - dpkg --verify included.
+        { chmod --reference="$CBS_DB" "$tmp" 2>/dev/null || chmod 644 "$tmp"; } \
+            && { chown --reference="$CBS_DB" "$tmp" 2>/dev/null || true; } \
+            && mv -f "$tmp" "$CBS_DB" || rc=1
     else
         rc=1
     fi
@@ -457,6 +490,191 @@ write_atomic() {
     tmp=$(mktemp "$(dirname "$target")/.furios-sim.XXXXXX") || return 1
     printf '%s\n' "$content" > "$tmp" && chmod 644 "$tmp" && mv -f "$tmp" "$target" \
         || { rm -f "$tmp"; return 1; }
+}
+
+# --- the original state -----------------------------------------------------
+#
+# Three kinds of record under ORIG_DIR, one per key:
+#   <key>.path    a copy of the file as it was, cp -a - so a symlink stays a
+#                 symlink with its target written exactly as it was
+#   <key>.absent  there was nothing at that path
+#   <key>.value   a property value, possibly empty (empty is an answer too)
+# Never overwritten: orig_has says whether the first change was recorded
+# already, and every orig_save_* returns early if so.
+orig_has() {
+    [ -e "$ORIG_DIR/$1.path" ] || [ -L "$ORIG_DIR/$1.path" ] \
+        || [ -e "$ORIG_DIR/$1.absent" ] || [ -e "$ORIG_DIR/$1.value" ]
+}
+
+orig_dir() {
+    [ -d "$ORIG_DIR" ] && return 0
+    ( umask 077; mkdir -p "$ORIG_DIR" ) 2>/dev/null
+}
+
+# What is at PATH now, before a change. Fails (and says so) when it cannot be
+# written down - the caller decides whether to go ahead without a record.
+orig_save_path() {
+    local key=$1 path=$2
+    orig_has "$key" && return 0
+    orig_dir || { warn "cannot record the original of $path in $ORIG_DIR"; return 1; }
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        cp -a "$path" "$ORIG_DIR/$key.path" 2>/dev/null \
+            || { warn "cannot record the original of $path in $ORIG_DIR"; return 1; }
+    else
+        : > "$ORIG_DIR/$key.absent" \
+            || { warn "cannot record the original of $path in $ORIG_DIR"; return 1; }
+    fi
+}
+
+orig_save_value() {
+    local key=$1 value=$2
+    orig_has "$key" && return 0
+    orig_dir || { warn "cannot record the original $key in $ORIG_DIR"; return 1; }
+    printf '%s' "$value" > "$ORIG_DIR/$key.value" \
+        || { warn "cannot record the original $key in $ORIG_DIR"; return 1; }
+    chmod 600 "$ORIG_DIR/$key.value" 2>/dev/null || true
+}
+
+orig_value() {
+    [ -e "$ORIG_DIR/$1.value" ] || return 1
+    cat "$ORIG_DIR/$1.value"
+}
+
+# Put PATH back exactly as recorded: the copy, or nothing at all.
+orig_restore_path() {
+    local key=$1 path=$2
+    if [ -e "$ORIG_DIR/$key.absent" ]; then
+        rm -f "$path"
+    elif [ -e "$ORIG_DIR/$key.path" ] || [ -L "$ORIG_DIR/$key.path" ]; then
+        rm -f "$path" && cp -a "$ORIG_DIR/$key.path" "$path"
+    else
+        return 1
+    fi
+}
+
+# What the record says, in words, for a report.
+orig_describe() {
+    local key=$1
+    if [ -e "$ORIG_DIR/$key.absent" ]; then
+        echo "nothing there"
+    elif [ -L "$ORIG_DIR/$key.path" ]; then
+        echo "a link to $(readlink "$ORIG_DIR/$key.path")"
+    elif [ -e "$ORIG_DIR/$key.path" ]; then
+        echo "a regular file:"
+        sed 's/^/          | /' "$ORIG_DIR/$key.path"
+    elif [ -e "$ORIG_DIR/$key.value" ]; then
+        echo "\"$(cat "$ORIG_DIR/$key.value")\""
+    fi
+}
+
+orig_forget() {
+    rm -f "$ORIG_DIR/$1.path" "$ORIG_DIR/$1.absent" "$ORIG_DIR/$1.value"
+    rmdir "$ORIG_DIR" 2>/dev/null || true
+}
+
+# --- the warning channel list oFono keeps -----------------------------------
+#
+# Nothing here ever sets it on the way in: with our bus policy and the 4372
+# fix in place, cellbroadcastd hands its list to the modem through
+# ModemManager, and oFono stores it per SIM in /var/lib/ofono/<IMSI>/cbs.
+# Taking the policy away does not take the list back - on the shipped policy
+# cellbroadcastd is refused and nobody writes it again. So the list that was
+# there before our first change is recorded per SIM, and revert sets exactly
+# that one back through oFono (never by editing the file: oFono rewrites it
+# from memory).
+
+# Every modem oFono has. Empty when oFono does not answer.
+ofono_modems() {
+    timeout 5 dbus-send --system --print-reply --dest=org.ofono / \
+        org.ofono.Manager.GetModems 2>/dev/null \
+        | sed -n 's/^ *object path "\(\/[^"]*\)"$/\1/p'
+}
+
+# The SIM in a modem, by its IMSI - the key oFono files the list under too.
+# Digits only: it becomes part of a file name.
+ofono_imsi() {
+    timeout 5 dbus-send --system --print-reply --dest=org.ofono "$1" \
+        org.ofono.SimManager.GetProperties 2>/dev/null \
+        | grep -A1 '"SubscriberIdentity"' | sed -n 's/.*variant *string "\([0-9]*\)".*/\1/p' | head -1
+}
+
+# The channel list, which may be empty. Fails when there is no answer or no
+# Topics in it - "empty" and "could not ask" are different records.
+cbs_topics() {
+    local reply
+    reply=$(timeout 5 dbus-send --system --print-reply --dest=org.ofono "$1" \
+        org.ofono.CellBroadcast.GetProperties 2>/dev/null) || return 1
+    printf '%s\n' "$reply" | grep -q '"Topics"' || return 1
+    printf '%s\n' "$reply" | grep -A1 '"Topics"' \
+        | sed -n 's/.*variant *string "\(.*\)".*/\1/p' | head -1
+}
+
+cbs_is_ours() {
+    case " $CBS_OURS " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+# Before the first change that lets cellbroadcastd set the list. A list that
+# already is one of ours is no original - a phone an older version set up -
+# and is not written down; revert then says it has nothing to go back to.
+#
+# Returns 2 when oFono is not there to ask - at boot the unit runs before it.
+# That is said, not hidden: apply goes ahead (the policy is ours by name, and
+# the list only changes once cellbroadcastd acts), and revert then reports
+# that it has no record to go back to.
+cbs_record() {
+    local m imsi topics modems
+    modems=$(ofono_modems)
+    [ -n "$modems" ] || return 2
+    for m in $modems; do
+        imsi=$(ofono_imsi "$m")
+        [ -n "$imsi" ] || continue
+        orig_has "cbs-topics-$imsi" && continue
+        topics=$(cbs_topics "$m") || continue
+        cbs_is_ours "$topics" && continue
+        orig_save_value "cbs-topics-$imsi" "$topics" || return 1
+    done
+    return 0
+}
+
+# Back to the recorded list, for the SIM that is in the phone now. Returns 1
+# only when oFono refused.
+cbs_restore() {
+    local m imsi topics rec any=0 rc=0
+    for m in $(ofono_modems); do
+        any=1
+        imsi=$(ofono_imsi "$m")
+        topics=$(cbs_topics "$m") || { skip "$m: oFono gave no channel list - left as it is"; continue; }
+        if [ -z "$imsi" ] || ! orig_has "cbs-topics-$imsi"; then
+            if cbs_is_ours "$topics"; then
+                warn "no record of the channels before the first apply - left at $topics"
+                warn "     (uninstall-cbs.sh falls back to the list measured on 13.9.2026)"
+            else
+                skip "warning channels are not ours to revert"
+            fi
+            continue
+        fi
+        rec=$(orig_value "cbs-topics-$imsi")
+        if [ "$topics" = "$rec" ]; then
+            skip "warning channels are what they were before: ${rec:-none}"
+        elif cbs_is_ours "$topics"; then
+            if timeout 10 dbus-send --system --print-reply --dest=org.ofono "$m" \
+                   org.ofono.CellBroadcast.SetProperty string:Topics \
+                   variant:string:"$rec" >/dev/null 2>&1; then
+                ok "warning channels back to what they were before: ${rec:-none}"
+            else
+                bad "oFono did not take the channel list back - the record stays"
+                rc=1
+                continue
+            fi
+        else
+            warn "the warning channels were changed since apply (now: $topics)"
+            warn "     - left as they are. Before the first apply: ${rec:-none}"
+        fi
+        orig_forget "cbs-topics-$imsi"
+    done
+    [ "$any" = 1 ] || skip "oFono is not answering - warning channels left as they are"
+    return $rc
 }
 
 sim_recorded() {
@@ -649,6 +867,13 @@ sim_conf_set() {
 
     if [ "$n" = 1 ]; then
         if [ -e "$SIM_DROPIN" ]; then
+            # Before us there was no such file, so slot 1 is no file - but
+            # only one that still says it is ours. A hand-edited one is its
+            # editor's, and deleting it would be deciding for them.
+            if ! head -1 "$SIM_DROPIN" 2>/dev/null | grep -q '^# Written by modemctl sim'; then
+                bad "$SIM_DROPIN was not written by modemctl - leaving it alone"
+                return 1
+            fi
             rm -f "$SIM_DROPIN" || { bad "could not remove $SIM_DROPIN"; return 1; }
             SIM_CHANGED=1
         fi
@@ -972,6 +1197,22 @@ set_watchers() {
 
 # --- commands ---------------------------------------------------------------
 
+# Once per apply, before the first of the two changes that make
+# cellbroadcastd set a new warning channel list.
+CBS_RECORDED=0
+cbs_record_before_change() {
+    [ "$CBS_RECORDED" = 1 ] && return 0
+    CBS_RECORDED=1
+    cbs_record
+    case $? in
+        0) ;;
+        2) warn "oFono is not answering - the warning channel list could not be recorded"
+           warn "     before this change; revert will say it has nothing to go back to" ;;
+        *) warn "could not record the warning channel list in $ORIG_DIR" ;;
+    esac
+    return 0
+}
+
 cmd_apply() {
     need_write apply
     local ts restarted_at changed=0 touched=0 failed=0
@@ -1073,7 +1314,9 @@ $RADIO_CONF.bak.$ts)"
             if [ ! -f "$SHARE/systemd/$ORDER_DROPIN" ]; then
                 bad "$ORDER_DROPIN not found in $SHARE/systemd"
                 failed=1
-            elif mkdir -p "$SYSTEMD_CONF_D/$ORDER_UNIT.d" \
+            elif orig_save_value mm-service-d \
+                     "$([ -d "$SYSTEMD_CONF_D/$ORDER_UNIT.d" ] && echo present || echo absent)" \
+                 && mkdir -p "$SYSTEMD_CONF_D/$ORDER_UNIT.d" \
                  && install -m644 "$SHARE/systemd/$ORDER_DROPIN" \
                             "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$ORDER_DROPIN"; then
                 systemctl daemon-reload >/dev/null 2>&1 || true
@@ -1103,19 +1346,30 @@ $RADIO_CONF.bak.$ts)"
                 bad "$DNS_DROPIN not found in $SHARE/networkmanager"
                 dns_ok=0
             fi
-            # Back up whatever is there now - as a symlink if that is what it
-            # is, which is why cp -a and not cp. Without this, revert has
-            # nothing to put back and would have to guess.
+            # Record whatever is there now - as a symlink if that is what it
+            # is, and "nothing" if nothing is - before the first change, and
+            # never again while our link stands: revert puts back exactly
+            # this. It used to be a .bak.<time> next to the file, one per
+            # apply, and revert took "the newest that is not ours" - a guess
+            # that once put our own link back (30.9.2026).
             # Not when it already is our link (only the drop-in was missing):
-            # a backup of that is one revert must never put back.
-            if [ "$dns_ok" -eq 1 ] && { [ -e "$RESOLV" ] || [ -L "$RESOLV" ]; } \
-               && [ "$(readlink -f "$RESOLV" 2>/dev/null)" != "$NM_RESOLV" ]; then
-                cp -a "$RESOLV" "$RESOLV.bak.$ts" 2>/dev/null || true
+            # that is no original, and revert must never put it back. A phone
+            # an older version set up is in exactly that state; revert says
+            # so and falls back to the old backups.
+            # No record, no change: a link revert cannot undo exactly is the
+            # thing this rule exists to prevent.
+            if [ "$dns_ok" -eq 1 ] \
+               && [ "$(readlink -f "$RESOLV" 2>/dev/null)" != "$NM_RESOLV" ] \
+               && ! orig_save_path resolv.conf "$RESOLV"; then
+                bad "leaving $RESOLV alone - nothing to put it back from"
+                rm -f "$dropin"
+                dns_ok=0
+                failed=1
             fi
             if [ "$dns_ok" -eq 1 ] && ln -sfn ../run/NetworkManager/resolv.conf "$RESOLV"; then
                 if [ "$(resolvconf_state)" = applied ]; then
                     touched=1
-                    ok "resolv.conf -> $NM_RESOLV (backup: $(basename "$RESOLV").bak.$ts)"
+                    ok "resolv.conf -> $NM_RESOLV (before: $(orig_describe resolv.conf | head -1))"
                     # Deliberately no reload here. rc-manager is only read when
                     # NetworkManager starts or is reloaded, and a reload makes
                     # oFono clear and re-activate the data context - which on a
@@ -1155,6 +1409,7 @@ $RADIO_CONF.bak.$ts)"
         covered) skip "ModemManager's own policy allows $CB_IFACE now" ;;
         absent)  skip "$DBUS_CONF_D not found - no system bus?" ;;
         missing)
+            cbs_record_before_change
             if [ ! -f "$SHARE/dbus/$CB_DROPIN" ]; then
                 bad "$CB_DROPIN not found in $SHARE/dbus"
                 failed=1
@@ -1184,6 +1439,7 @@ $RADIO_CONF.bak.$ts)"
         unknown) warn "the de/nl alert channel block does not look the way this
       expects - leaving $(basename "$CBS_DB") alone" ;;
         missing)
+            cbs_record_before_change
             if cbs_db_edit '
 /<country code=/            { inc = ($0 ~ /code="(de|nl)"/) ? 1 : 0; lvl = 0 }
 inc && /<level type="extreme">/ { lvl = 1 }
@@ -1289,26 +1545,51 @@ cmd_revert() {
 
     head_ "DNS"
     # Put back exactly what was there before, not what we assume was there.
-    # The newest backup wins - but not one that is our own link again: apply
-    # also backs up when only the drop-in was missing and the link was already
-    # ours, and "the newest" then put NetworkManager's resolv.conf straight
-    # back. Found on 30.9.2026 on a phone uninstalled a day earlier: drop-in
-    # gone, /etc/resolv.conf still at NetworkManager, four backups next to it
-    # and only the oldest pointing at the resolved stub FuriOS ships. For the
-    # same reason a link of ours with the drop-in already gone still counts
-    # as ours to revert, as long as a backup says what it replaced. ls -1t is
-    # safe here only because nothing but root can write this directory.
-    local back=""
+    # That is the record apply took before its first change (see ORIG_DIR),
+    # and only while the link is still ours: a resolv.conf somebody pointed
+    # elsewhere since is theirs, and is left alone and reported.
+    #
+    # The drop-in is ours by name and goes either way - it was not there
+    # before us, and leaving it would keep NetworkManager on rc-manager=symlink
+    # for a phone that is supposed to be as shipped.
+    local ours_now=0 back="" had_dropin=0
+    [ "$(readlink -f "$RESOLV" 2>/dev/null)" = "$NM_RESOLV" ] && ours_now=1
     back=$(resolv_backup)
-    if [ "$(resolvconf_state)" = applied ] || \
-       { [ -n "$back" ] && [ "$(readlink -f "$RESOLV" 2>/dev/null)" = "$NM_RESOLV" ]; }; then
-        rm -f "$NM_CONF_D/$DNS_DROPIN"
+    if [ -f "$NM_CONF_D/$DNS_DROPIN" ]; then
+        had_dropin=1
+        rm -f "$NM_CONF_D/$DNS_DROPIN" && ok "$DNS_DROPIN removed"
+    fi
+    if orig_has resolv.conf; then
+        if [ "$ours_now" = 1 ]; then
+            if orig_restore_path resolv.conf "$RESOLV"; then
+                ok "resolv.conf back to what it was before the first apply: $(orig_describe resolv.conf | head -1)"
+                orig_forget resolv.conf
+                warn "with this undone, mobile data resolves no names once Wi-Fi is off"
+            else
+                bad "could not put $RESOLV back - the record stays in $ORIG_DIR"
+                failed=1
+            fi
+        else
+            warn "$RESOLV was changed since apply (now: $(readlink "$RESOLV" 2>/dev/null || echo 'a regular file'))"
+            warn "     - left as it is. Before the first apply it was $(orig_describe resolv.conf)"
+            orig_forget resolv.conf
+        fi
+    elif [ "$ours_now" = 1 ] && { [ "$had_dropin" = 1 ] || [ -n "$back" ]; }; then
+        # No record: a phone an older version set up, which kept a
+        # .bak.<time> per apply instead. The newest one that is not our own
+        # link is the best there is - apply also backed up when only the
+        # drop-in was missing and the link was already ours, and "the newest"
+        # then put NetworkManager's resolv.conf straight back (found on
+        # 30.9.2026). ls -1t is safe here only because nothing but root can
+        # write this directory. Said out loud, because it is a guess. A link
+        # with neither our drop-in nor a backup beside it was not made here.
+        warn "no record of $RESOLV from before the first apply (an older version set this up)"
         if [ -n "$back" ]; then
             rm -f "$RESOLV" && cp -a "$back" "$RESOLV"
-            ok "resolv.conf restored from $(basename "$back")"
+            ok "resolv.conf restored from the newest backup, $(basename "$back") - check it"
         elif [ -e /run/systemd/resolve/stub-resolv.conf ]; then
             ln -sfn ../run/systemd/resolve/stub-resolv.conf "$RESOLV"
-            ok "resolv.conf back to the systemd-resolved stub"
+            ok "resolv.conf set to the systemd-resolved stub - what FuriOS ships, assumed, not recorded"
         else
             warn "no backup and no resolved stub - leaving $RESOLV alone"
             warn "check it by hand, or DNS stays pointed at a resolver nobody fills"
@@ -1340,14 +1621,31 @@ $0 ~ mark {
     fi
 
     head_ "start order"
+    local mm_d="$SYSTEMD_CONF_D/$ORDER_UNIT.d" removed_order=0
     for legacy in $LEGACY_ORDER_DROPINS; do
-        [ -f "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$legacy" ] || continue
-        rm -f "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$legacy" \
-            && ok "$legacy removed"
+        [ -f "$mm_d/$legacy" ] || continue
+        rm -f "$mm_d/$legacy" && { ok "$legacy removed"; removed_order=1; }
     done
-    if [ -f "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$ORDER_DROPIN" ]; then
-        rm -f "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$ORDER_DROPIN"
-        rmdir "$SYSTEMD_CONF_D/$ORDER_UNIT.d" 2>/dev/null || true
+    if [ -f "$mm_d/$ORDER_DROPIN" ]; then
+        rm -f "$mm_d/$ORDER_DROPIN"
+        removed_order=1
+    fi
+    # The directory too, when apply made it - and only then. A
+    # ModemManager.service.d that was there before us stays, even empty; one
+    # we made goes, unless somebody put a file of their own in since.
+    # Without a record (an older version applied) the old rule: gone if empty.
+    case "$(orig_value mm-service-d 2>/dev/null)" in
+        absent)
+            if [ -d "$mm_d" ] && ! rmdir "$mm_d" 2>/dev/null; then
+                warn "$mm_d holds files that are not ours - left in place"
+            fi
+            orig_forget mm-service-d ;;
+        present)
+            orig_forget mm-service-d ;;
+        *)
+            [ "$removed_order" = 1 ] && rmdir "$mm_d" 2>/dev/null ;;
+    esac
+    if [ "$removed_order" = 1 ]; then
         systemctl daemon-reload >/dev/null 2>&1 || true
         ok "$ORDER_DROPIN removed"
         warn "with this undone, ofono2mm and oFono start at the same time again"
@@ -1366,6 +1664,9 @@ $0 ~ mark {
     else
         skip "no cell broadcast drop-in of ours to remove"
     fi
+    # The list cellbroadcastd set while the policy let it. Only once the
+    # policy is gone, so nothing can set it again behind our back.
+    cbs_restore || failed=1
 
     # Opt-in, because plain "modemctl revert" has always left the running
     # daemon alone and saying so - and a command that quietly started
@@ -1696,19 +1997,50 @@ nr_pref_now() {
         | grep -A1 TechnologyPreference | tail -1 | grep -o '"[a-z]*"$' | tr -d '"'
 }
 
+# The preference is not the modem's, it is oFono's setting, and oFono keeps
+# it on disk: it outlives a reboot, an uninstall and the package. So what it
+# was before the first "on" is recorded, and "off" puts exactly that back -
+# as long as the "nr" is still ours. Without a record (5G switched on by an
+# older version) "off" does what it always did, lte, and says it is assuming.
 nr_pref() {
-    local want=$1 cur target modem
+    local want=$1 cur target modem rec=""
     cur=$(nr_pref_now)
-    case "$want:$cur" in
-        on:lte)  target=nr ;;
-        off:nr)  target=lte ;;
-        *)       return 0 ;;
-    esac
+    if [ "$want" = on ] && [ -n "$cur" ]; then
+        orig_save_value ofono-technology-preference "$cur" || true
+    fi
+    if [ "$want" = off ] && orig_has ofono-technology-preference; then
+        rec=$(orig_value ofono-technology-preference)
+        if [ -z "$cur" ]; then
+            # oFono did not answer: keep the record for the next try.
+            return 0
+        elif [ "$cur" = "$rec" ]; then
+            orig_forget ofono-technology-preference
+            return 0
+        elif [ "$cur" != nr ]; then
+            warn "oFono's preference was changed since 5G was switched on (now: $cur)"
+            warn "     - left as it is. Before: $rec"
+            orig_forget ofono-technology-preference
+            return 0
+        fi
+        target=$rec
+    else
+        case "$want:$cur" in
+            on:lte)  target=nr ;;
+            off:nr)  target=lte
+                     warn "no record of oFono's preference from before 5G was switched on - assuming lte" ;;
+            *)       return 0 ;;
+        esac
+    fi
     modem=$(modem_path) || return 1
     if timeout 10 dbus-send --system --print-reply --dest=org.ofono "$modem" \
             org.ofono.RadioSettings.SetProperty string:TechnologyPreference \
             variant:string:"$target" >/dev/null 2>&1; then
-        ok "oFono's preference: $target (matches the modem)"
+        if [ -n "$rec" ]; then
+            ok "oFono's preference back to $target, what it was before 5G was switched on"
+            orig_forget ofono-technology-preference
+        else
+            ok "oFono's preference: $target (matches the modem)"
+        fi
     else
         bad "oFono kept its preference $cur - it will fight the modem (Error 44)"
         return 1
@@ -1772,9 +2104,22 @@ cmd_nr() {
     else
         rm -f "$NR_FILE" || { bad "could not remove $NR_FILE"; return 1; }
     fi
+    # What is and is not recorded here. The allowed-types bitmap needs no
+    # record: the RIL writes its own at every start of oFono (AT+ERAT), so the
+    # shipped one comes back by itself, and "off" only clears the one bit we
+    # set. oFono's preference is on disk and is recorded (nr_pref). The one
+    # thing that cannot go back is the modem's own nr_ps setting
+    # (AT+EPSCONFIG, 1 = SIM1 may use NR data) - the modem refuses every
+    # write to it with +CME ERROR: 50, so whatever it holds now stays. See
+    # tools/5g/README.md.
     if [ "$NO_RESTART" -eq 0 ]; then
         nr_set "$want" || rc=1
-        [ "$rc" -eq 0 ] && { nr_pref "$want" || rc=1; }
+        # "off" puts the preference back even when the HAL did not answer:
+        # a preference left at nr is oFono fighting the modem (Error 44)
+        # for as long as it runs, package or no package.
+        if [ "$want" = off ] || [ "$rc" -eq 0 ]; then
+            nr_pref "$want" || rc=1
+        fi
         [ "$rc" -eq 0 ] && [ "$NR_CHANGED" -eq 1 ] && { nr_reregister || [ $? -eq 2 ] || rc=1; }
     else
         say "Recorded, the modem is left alone. Takes effect at the next boot."

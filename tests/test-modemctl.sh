@@ -69,6 +69,10 @@ RC="$WORK/etc/resolv.conf"
 printf 'rc-manager=symlink\n' > "$NMD/99-furios-modem-resolvconf.conf"
 ln -sfn "$NMRESOLV" "$RC"
 export MODEMCTL_NM_CONF_D="$NMD" MODEMCTL_RESOLV="$RC" MODEMCTL_NM_RESOLV="$NMRESOLV"
+# And the records of what was there before the first change. Without this,
+# every apply in here would try to write them into the real
+# /var/lib/furios-modem-fixes/original.
+export MODEMCTL_ORIGINAL="$WORK/original"
 
 # The alert channel database. Baseline is a healthy phone, like the policy
 # above; what the distribution actually ships - de and nl subscribing to
@@ -993,7 +997,7 @@ settle_run() {
     # root and root refuses to honour them - on purpose, as root they would be
     # an arbitrary-file patch. settle touches no file of ours anyway.
     PATH="$SETTLEBIN:$PATH" env -u MODEMCTL_DBUS_CONF_D -u MODEMCTL_CBS_DB -u MODEMCTL_NM_CONF_D \
-        -u MODEMCTL_RESOLV -u MODEMCTL_NM_RESOLV \
+        -u MODEMCTL_RESOLV -u MODEMCTL_NM_RESOLV -u MODEMCTL_ORIGINAL \
         bash "$ROOT/modemctl" settle 2>&1
 }
 shell_was_killed() {
