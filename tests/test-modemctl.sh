@@ -125,8 +125,20 @@ reset_tree() {
     printf 'radioInterface = %s\n' "$2" > "$RADIO"
 }
 
+# The radio HAL, never the real one: the built tools/5g/nrprobe would be
+# found otherwise and asked on the device. FAKE_BITS is the allowed-types
+# bitmap; the default is the one FuriOS boots with, without NR.
+cat > "$STUBDIR/nrprobe" <<'STUB'
+#!/bin/sh
+b=${FAKE_BITS:-$((0x9ce0e))}
+echo "  <- response 194 serial 0x4e520003 error 0 (NONE) value $b ($(printf '%#x' $b))"
+STUB
+chmod +x "$STUBDIR/nrprobe"
+# Only for status: settle runs as root and refuses any MODEMCTL_* at all.
+NRENV="MODEMCTL_NRPROBE=$STUBDIR/nrprobe MODEMCTL_NR=$STUBDIR/nr-not-recorded"
+
 run_status() {
-    MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+    env $NRENV MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
         bash "$ROOT/modemctl" status 2>&1
 }
 
@@ -162,10 +174,9 @@ else
     TESTS_FAILED=$((TESTS_FAILED + 1)); fail "patched tree: unexpected verdict" "$out"
 fi
 
-# Asking for NR on this modem is one "Error 44 setting pref mode" a second,
-# for as long as the preference stands, and the phone registers on LTE anyway.
-# That is a failure, not a preference: it has to fail the check, or the noise
-# goes unnoticed the way it did for a day.
+# oFono's preference and the modem's bitmap must agree, or oFono retries its
+# own set every two seconds, forever, with Error 44. Both mismatches have to
+# fail the check, or the noise goes unnoticed the way it did twice.
 cat > "$STUBDIR/dbus-send" <<'STUB'
 #!/bin/sh
 case "$*" in
@@ -179,15 +190,20 @@ esac
 STUB
 chmod +x "$STUBDIR/dbus-send"
 reset_tree patched 1.4
+# The HAL is asked on the slot oFono uses; without one there is no answer.
+printf '[slot1]\npath = /ril_0\nslot = 0\n' >> "$RADIO"
 out=$(run_status)
 TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$out" | grep -q "one Error 44 a second"; then
-    ok "a preference of nr is called out"
+if echo "$out" | grep -q "does not allow NR"; then
+    ok "a preference of nr without NR in the bitmap is called out"
 else
-    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "a preference of nr passed unmentioned" "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "a preference of nr without NR passed unmentioned" "$out"
 fi
 check_status "and it is treated as a failure" 1 \
-    env MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" bash "$ROOT/modemctl" status
+    env $NRENV MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" bash "$ROOT/modemctl" status
+out=$(FAKE_BITS=$((0x19ce0e)) run_status)
+check "nr with NR in the bitmap is fine" 0 \
+    "$(echo "$out" | grep -c "Error 44")"
 # back to the healthy stub for the rest
 cat > "$STUBDIR/dbus-send" <<'STUB'
 #!/bin/sh
@@ -201,6 +217,13 @@ case "$*" in
 esac
 STUB
 chmod +x "$STUBDIR/dbus-send"
+out=$(FAKE_BITS=$((0x19ce0e)) run_status)
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out" | grep -q "oFono's preference is lte"; then
+    ok "lte with NR in the bitmap is called out (30.9.)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "lte with NR in the bitmap passed unmentioned" "$out"
+fi
 
 # --- upstream moved ---------------------------------------------------------
 #

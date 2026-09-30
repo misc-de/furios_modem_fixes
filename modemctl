@@ -1660,6 +1660,39 @@ nr_set() {
     ok "5G $([ "$want" = on ] && echo allowed || echo "no longer allowed") ($(printf '%#x' "$new"))"
 }
 
+# oFono's own preference has to agree with the bitmap, or oFono fights it:
+# whenever something makes it compare (a SIM or radio event - 29.9. 18:48,
+# five hours after nrprobe), it finds NR it did not ask for, sends its own
+# bitmap, gets Error 44, queries, finds NR again, and tries again two seconds
+# later - forever (binder_network.c: set_pref_cb -> query -> check_pref_mode).
+# 41054 log lines overnight. The mirror image of finding 1. So the preference
+# follows the bitmap: nr with 5G, lte without. A preference of umts or gsm is
+# someone's choice and is left alone.
+nr_pref_now() {
+    timeout 5 dbus-send --system --print-reply --dest=org.ofono "$(modem_path)" \
+        org.ofono.RadioSettings.GetProperties 2>/dev/null \
+        | grep -A1 TechnologyPreference | tail -1 | grep -o '"[a-z]*"$' | tr -d '"'
+}
+
+nr_pref() {
+    local want=$1 cur target modem
+    cur=$(nr_pref_now)
+    case "$want:$cur" in
+        on:lte)  target=nr ;;
+        off:nr)  target=lte ;;
+        *)       return 0 ;;
+    esac
+    modem=$(modem_path) || return 1
+    if timeout 10 dbus-send --system --print-reply --dest=org.ofono "$modem" \
+            org.ofono.RadioSettings.SetProperty string:TechnologyPreference \
+            variant:string:"$target" >/dev/null 2>&1; then
+        ok "oFono's preference: $target (matches the modem)"
+    else
+        bad "oFono kept its preference $cur - it will fight the modem (Error 44)"
+        return 1
+    fi
+}
+
 nr_registered() {
     local modem
     modem=$(modem_path) || return 1
@@ -1719,6 +1752,7 @@ cmd_nr() {
     fi
     if [ "$NO_RESTART" -eq 0 ]; then
         nr_set "$want" || rc=1
+        [ "$rc" -eq 0 ] && { nr_pref "$want" || rc=1; }
         [ "$rc" -eq 0 ] && [ "$NR_CHANGED" -eq 1 ] && { nr_reregister || [ $? -eq 2 ] || rc=1; }
     else
         say "Recorded, the modem is left alone. Takes effect at the next boot."
@@ -1748,6 +1782,7 @@ cmd_nr_boot() {
     local fresh=0
     for try in 1 2 3; do
         nr_set on || return 1
+        nr_pref on || return 1
         # Only when NR had to be added: then the modem registered without it,
         # and the network will not ask again on its own. Already there means
         # it was there before registration - the day FuriOS allows NR by
@@ -1904,22 +1939,20 @@ cmd_status() {
         mms)   bad "MMS APN is the placeholder 'mms' again - the mmsd loop is back"; bad_count=$((bad_count+1)) ;;
         *)     ok "MMS APN: $apn" ;;
     esac
-    # The radio technology preference. Not something this project sets - oFono
-    # persists it per SIM - but on this modem asking for NR is not free.
-    # Measured 13.9. at radioInterface 1.4: sixty "Error 44 setting pref mode"
-    # in sixty seconds, one a second for as long as the preference stands, and
-    # the phone registers on LTE anyway. Error 44 is INVALID_ARGUMENTS - the
-    # modem rejecting the argument, not a coverage problem. So nr is a warning
-    # here, not a goal, until the plugin can speak IRadio 1.6.
-    local pref
-    pref=$(dbus-send --system --print-reply --dest=org.ofono "$(modem_path)" \
-        org.ofono.RadioSettings.GetProperties 2>/dev/null \
-        | grep -A1 TechnologyPreference | tail -1 | grep -o '"[a-z]*"$' | tr -d '"')
-    case "$pref" in
-        "")   skip "radio technology preference unreadable" ;;
-        nr)   bad "radio technology preference: nr - one Error 44 a second, \
-and no 5G"; bad_count=$((bad_count+1)) ;;
-        *)    ok "radio technology preference: $pref" ;;
+    # oFono's preference against the modem's bitmap. oFono cannot put NR into
+    # the bitmap itself (its IRadio 1.4 call gets Error 44), so the two must
+    # agree or oFono retries every two seconds, forever: nr without NR in the
+    # bitmap (finding 1, 13.9.), or lte with NR in it (30.9., after nrprobe).
+    local pref allowed
+    pref=$(nr_pref_now)
+    allowed=$(nr_allowed_now)
+    case "$pref:$allowed" in
+        :*)       skip "radio technology preference unreadable" ;;
+        nr:no)    bad "radio technology preference nr, but the modem does not allow NR - \
+Error 44 every two seconds"; bad_count=$((bad_count+1)) ;;
+        lte:yes)  bad "the modem allows NR, but oFono's preference is lte - \
+Error 44 every two seconds (sudo modemctl nr on)"; bad_count=$((bad_count+1)) ;;
+        *)        ok "radio technology preference: $pref" ;;
     esac
 
     # 5G is a choice, not a repair: off is fine. On and not allowed is not -

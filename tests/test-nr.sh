@@ -15,6 +15,7 @@ STUB="$WORK/bin"; mkdir -p "$STUB"
 NRF="$WORK/nr"
 LOG="$WORK/log"          # what reached the "modem"
 BITS="$WORK/bits"        # the RIL's allowed-types bitmap
+PREF="$WORK/pref"        # oFono's TechnologyPreference
 
 # The HAL: remembers the bitmap. FAKE_REFUSE=1 answers but keeps the old
 # value; FAKE_TAKE_AWAY=1 answers the next get without NR, the way oFono's
@@ -45,6 +46,10 @@ case "\$args" in
   *NetworkRegistration.GetProperties*)
                      printf '         string "Status"\n         variant             string "%s"\n' "\${FAKE_REG:-registered}" ;;
   *SetProperty*Online*) echo "online \${args##*boolean:}" >> "$LOG" ;;
+  *RadioSettings.GetProperties*)
+                     printf '         string "TechnologyPreference"\n         variant             string "%s"\n' "\$(cat "$PREF")" ;;
+  *SetProperty*TechnologyPreference*)
+                     p=\${args##*string:}; echo "pref \$p" >> "$LOG"; echo "\$p" > "$PREF" ;;
 esac
 exit 0
 STUB
@@ -62,7 +67,7 @@ mc() {
         bash "$ROOT/modemctl" "$@"
 }
 key() { mc nr 2>/dev/null | sed -n "s/^$1: *//p"; }
-fresh() { echo $((0x9ce0e)) > "$BITS"; : > "$LOG"; }
+fresh() { echo $((0x9ce0e)) > "$BITS"; echo lte > "$PREF"; : > "$LOG"; }
 bits() { printf '%#x' "$(cat "$BITS")"; }
 
 fresh
@@ -77,7 +82,7 @@ fresh
 check_status "nr on"                       0    mc nr on
 check "only the NR bit is added"           0x19ce0e "$(bits)"
 check "then the radio goes off and on again, in that order" \
-      "setallowed 0x19ce0e|online false|online true" "$(paste -sd'|' "$LOG")"
+      "setallowed 0x19ce0e|pref nr|online false|online true" "$(paste -sd'|' "$LOG")"
 
 : > "$LOG"
 check_status "nr on a second time"         0    mc nr on
@@ -87,11 +92,14 @@ echo $((0x19ce0f)) > "$BITS"
 check_status "nr off"                      0    mc nr off
 check "takes only the NR bit away"         0x9ce0f "$(bits)"
 check "and forgets the choice"             no   "$([ -e "$NRF" ] && echo yes || echo no)"
+check "oFono goes back to lte"             lte  "$(cat "$PREF")"
+echo umts > "$PREF"; echo $((0x19ce0e)) > "$BITS"; mc nr off >/dev/null 2>&1
+check "a preference of umts is someone's choice" umts "$(cat "$PREF")"
 
 fresh
 FAKE_CALL=1 mc nr on >/dev/null 2>&1
 check "during a call: allowed"             0x19ce0e "$(bits)"
-check "but the radio stays on"             "setallowed 0x19ce0e" "$(paste -sd'|' "$LOG")"
+check "but the radio stays on"             "setallowed 0x19ce0e|pref nr" "$(paste -sd'|' "$LOG")"
 
 fresh
 check_status "a HAL that does not take it is an error" 1 env FAKE_REFUSE=1 bash -c "$(declare -f mc); $(declare -p ROOT STUB NRF CONF DROPIN); mc nr on"
@@ -118,13 +126,19 @@ check "does not touch the modem"           ""   "$(cat "$LOG")"
 
 echo on > "$NRF"; fresh
 check_status "nr-boot"                     0    mc nr-boot
-check "allows NR and registers afresh"     "setallowed 0x19ce0e|online false|online true" "$(paste -sd'|' "$LOG")"
+check "allows NR, tells oFono, registers afresh" "setallowed 0x19ce0e|pref nr|online false|online true" "$(paste -sd'|' "$LOG")"
 
 # Allowed before the modem registered (a FuriOS that gets NR right by
 # itself): nothing to send, and no reason to drop the connection.
-echo $((0x19ce0e)) > "$BITS"; : > "$LOG"
+echo $((0x19ce0e)) > "$BITS"; echo nr > "$PREF"; : > "$LOG"
 check_status "nr-boot with NR already allowed" 0 mc nr-boot
 check "leaves the radio alone"             ""   "$(cat "$LOG")"
+
+# 30.9.: NR allowed, oFono still on lte - oFono fights it every two seconds.
+# The preference follows; the radio stays on.
+echo $((0x19ce0e)) > "$BITS"; echo lte > "$PREF"; : > "$LOG"
+check_status "nr-boot with oFono still on lte" 0 mc nr-boot
+check "only oFono is told"                 "pref nr" "$(paste -sd'|' "$LOG")"
 
 fresh
 check_status "an unregistered modem is waited for, then left alone" 0 \

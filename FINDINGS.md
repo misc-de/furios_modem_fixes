@@ -63,6 +63,23 @@ The modem advertises IRadio 1.0 through **1.6**.
 `TechnologyPreference = lte`. Nothing else stops the loop, because the loop is
 the request itself.
 
+### The mirror image, 30.9.
+
+With 5G switched on (`modemctl nr on`, 29.9.) the loop came back the other
+way round: nrprobe had put NR into the RIL's bitmap, oFono's preference was
+still `lte`. oFono only compares when something prompts it - here a SIM or
+radio event at 18:48, five hours after nrprobe - and then it finds NR it did
+not ask for, sends its own bitmap without it, gets Error 44, queries, finds NR
+again and tries again two seconds later (`binder_network.c`:
+`set_pref_cb` -> `query_pref_mode` -> `check_pref_mode`). 41,054 lines by the
+next morning. The failed set is why 5G stayed on through all of it.
+
+**Fix:** the preference follows the bitmap. `modemctl nr on` and `nr-boot`
+set `TechnologyPreference = nr` after the bitmap, `nr off` sets `lte` again;
+`status` fails on either mismatch. Set by hand on the device at 06:14: zero
+Error 44 from that second on. So the rule is not "never nr", it is "never a
+preference the bitmap does not match".
+
 ### The fix this used to be, and why it was wrong
 
 For one day this said **`radioInterface = 1.6`**, and the loop did stop. Both
