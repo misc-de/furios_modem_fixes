@@ -102,25 +102,14 @@ sudo systemctl daemon-reload
 sudo systemctl enable furios-modem-fixes.service >/dev/null
 sudo systemctl enable furios-modem-sim-check.service >/dev/null
 sudo systemctl enable furios-modem-nr.service >/dev/null
-# This one is enable --now: it is a watcher, not a one-shot, and a watcher that
-# is running but was never enabled is a fix that disappears at the next boot
-# without telling anybody.
-#
-# Unless the phone is recorded as "shipped": the watchers are half of that
-# profile, and "modemctl set shipped" is how they were switched off. Re-running
-# this to update used to switch them back on for good.
-# After an installation everything is off: nothing recorded means "shipped",
-# and the watchers only run on a phone recorded as "fixed". adopt first, so a
-# phone an earlier version switched on by itself keeps what it relies on.
+# The watchers are enabled on every phone, whatever is recorded: whether they
+# run is the profile's business, through the mark "modemctl boot" writes below
+# (ConditionPathExists in both units). Enabling them only on a "fixed" phone
+# tied two states together that could drift apart, and did - an update left a
+# "fixed" phone without its data-call supervisor (4.10.2026).
 sudo "$BIN/modemctl" adopt
 RECORDED=$("$BIN/modemctl" profile 2>/dev/null | sed -n 's/^recorded: *//p')
-if [ "$RECORDED" = fixed ]; then
-    sudo systemctl enable --now furios-mobile-route.service >/dev/null
-    sudo systemctl enable --now furios-mobile-context.service >/dev/null
-fi
-# Re-running install.sh over a running watcher has to hand it the new code;
-# "enable --now" alone leaves the old process running.
-sudo systemctl try-restart furios-mobile-route.service furios-mobile-context.service
+sudo systemctl enable furios-mobile-route.service furios-mobile-context.service >/dev/null
 
 # boot, not apply - the same verb the package's postinst, the boot unit and the
 # apt hook run. With apply, re-running this on a phone recorded as "shipped"
@@ -138,6 +127,10 @@ if [ "$RECORDED" = fixed ]; then
     sudo "$BIN/modemctl" mtk-build || echo "  warn  MTK plugin not built - the shipped one stays (sudo modemctl mtk-build)"
 fi
 sudo "$BIN/modemctl" boot
+# After boot, which wrote the mark: restart hands a running watcher the new
+# code, starts a stopped one on a "fixed" phone, and on any other phone the
+# condition keeps it - or stops it - off.
+sudo systemctl restart furios-mobile-route.service furios-mobile-context.service
 [ "$RECORDED" = fixed ] || echo "The repairs are off - switch them on with: sudo modemctl set fixed"
 
 echo

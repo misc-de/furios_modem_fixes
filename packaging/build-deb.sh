@@ -202,28 +202,13 @@ if [ "$1" = configure ]; then
     systemctl enable furios-modem-sim-check.service >/dev/null 2>&1 || true
     # Does nothing until "modemctl nr on" - ConditionPathExists.
     systemctl enable furios-modem-nr.service >/dev/null 2>&1 || true
-    # --now for the watcher: it is a long-running service, and one that is
-    # installed but not started leaves the phone without a fallback route
-    # until the next reboot, which is exactly the failure it exists to prevent.
-    #
-    # But not on a phone recorded as "shipped". The watchers are half of that
-    # profile - "modemctl set shipped" disables them - and this used to enable
-    # and start them on every upgrade regardless: the next apt upgrade put the
-    # fallback route and the data-call supervisor back on a phone whose owner
-    # had switched them off, for good, since enable survives the reboot that
-    # "modemctl boot" would otherwise have used to set things straight.
-    # Only on a phone recorded as "fixed": after an installation everything
-    # is off. adopt keeps a phone an earlier version switched on by itself.
+    # Both watchers are enabled whatever is recorded; the mark modemctl boot
+    # writes below decides whether they run (ConditionPathExists). Enabling
+    # them only on a "fixed" phone let enablement and profile drift apart -
+    # an update left a "fixed" phone without its data-call supervisor
+    # (4.10.2026). adopt keeps a phone an earlier version switched on.
     /usr/bin/modemctl adopt --quiet >/dev/null 2>&1 || true
-    if [ "$(/usr/bin/modemctl profile 2>/dev/null | sed -n 's/^recorded: *//p')" = fixed ]; then
-        systemctl enable --now furios-mobile-route.service >/dev/null 2>&1 || true
-        systemctl enable --now furios-mobile-context.service >/dev/null 2>&1 || true
-    fi
-    # "enable --now" does NOT restart a unit that is already running, so an
-    # upgrade would install new code and leave the old process in charge - and
-    # the old process is exactly the one with the bug that was just fixed.
-    # try-restart touches only what is actually running.
-    systemctl try-restart furios-mobile-route.service furios-mobile-context.service \
+    systemctl enable furios-mobile-route.service furios-mobile-context.service \
         >/dev/null 2>&1 || true
     # Apply now rather than at the next boot. Quiet, and never fatal: a
     # package that fails to configure because a patch did not fit would leave
@@ -233,6 +218,10 @@ if [ "$1" = configure ]; then
     # place; they take effect at the next start of the modem stack.
     timeout 120 /usr/bin/modemctl boot --quiet --no-restart || \
         echo "furios-modem-fixes: could not apply everything - run 'modemctl status'" >&2
+    # After boot, which wrote the mark: new code for a running watcher, a
+    # start on a "fixed" phone, and off - by the condition - on any other.
+    systemctl restart furios-mobile-route.service furios-mobile-context.service \
+        >/dev/null 2>&1 || true
 fi
 exit 0
 POST

@@ -312,10 +312,12 @@ else
          "re-installing over a recorded 'shipped' is undone at the next boot"
 fi
 
-# The watchers are half of the profile, and "set shipped" is what disables
-# them. The postinst used to enable and start them on every upgrade whatever
-# was recorded, so the next apt upgrade put them back on a shipped phone for
-# good. Run for real, with modemctl and systemctl lying about the phone.
+# The watchers are half of the profile, and the profile alone decides whether
+# they run: both are enabled on every phone and start only with the mark
+# modemctl writes from the profile. Enabling them only on a "fixed" phone let
+# the two drift apart - an update left a "fixed" phone without its data-call
+# supervisor, and only a hand could bring it back (4.10.2026). Run for real,
+# with modemctl and systemctl lying about the phone.
 PI_WORK=$(mktemp -d)
 PI_REC="$PI_WORK/systemctl.args"
 printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\nexit 0\n' "$PI_REC" > "$PI_WORK/systemctl"
@@ -328,13 +330,18 @@ postinst_enables() {
     frag=$(sed -n '/^cat > "\$STAGE\/DEBIAN\/postinst"/,/^POST$/p' "$BUILD" | sed '1d;$d' \
            | sed "s|/usr/bin/modemctl|$PI_WORK/modemctl|g")
     PATH="$PI_WORK:$PATH" sh -c "$frag" postinst configure >/dev/null 2>&1
-    grep '^enable --now furios-mobile' "$PI_REC" 2>/dev/null | wc -l | tr -d ' '
+    grep '^enable ' "$PI_REC" 2>/dev/null | grep -oE 'furios-mobile-(route|context)' | sort -u | wc -l | tr -d ' '
 }
 check "postinst enables both watchers on a fixed phone" 2 "$(postinst_enables fixed)"
-check "and neither on a phone recorded as shipped" 0 "$(postinst_enables shipped)"
-# After an installation everything is off: an unknown or empty answer is not
-# a licence to start them.
-check "and neither when nothing is recorded" 0 "$(postinst_enables "")"
+check "and on a phone recorded as shipped - the mark keeps them off" 2 "$(postinst_enables shipped)"
+check "and when nothing is recorded" 2 "$(postinst_enables "")"
+# Whether they run is the mark's business, and boot writes it: a restart
+# before boot would find last boot's mark, or none.
+frag=$(sed -n '/^cat > "\$STAGE\/DEBIAN\/postinst"/,/^POST$/p' "$BUILD")
+boot_at=$(printf '%s\n' "$frag" | grep -n '^[^#]*modemctl boot' | head -1 | cut -d: -f1)
+restart_at=$(printf '%s\n' "$frag" | grep -n 'systemctl restart furios-mobile-route.service furios-mobile-context.service' | head -1 | cut -d: -f1)
+check "postinst restarts the watchers after boot has written the mark" yes \
+      "$([ -n "$boot_at" ] && [ -n "$restart_at" ] && [ "$restart_at" -gt "$boot_at" ] && echo yes || echo no)"
 
 # The recorded profile is written by modemctl, so dpkg has never heard of it.
 # Nothing removed it: a "shipped" recorded before an uninstall was what the
@@ -552,19 +559,30 @@ for w in furios-mobile-route furios-mobile-context; do
         fail "$w starts something this repository does not ship" "ExecStart names [$prog]"
     fi
 
-    # Both installers have to enable AND start it - a watcher that waits for
-    # the next reboot is a fix that is not in place yet - and both have to hand
-    # a running one the new code, which "enable --now" does not do.
+    # Both installers have to enable it on every phone and restart it after
+    # modemctl boot: the restart starts it where the mark allows it, hands a
+    # running one the new code, and stops it where the profile is "shipped".
     for installer in "$ROOT/install.sh" "$ROOT/packaging/build-deb.sh"; do
+        boot_at=$(grep -n '^[^#]*modemctl"\{0,1\} boot' "$installer" | head -1 | cut -d: -f1)
+        restart_at=$(grep -n "systemctl restart .*$w" "$installer" | head -1 | cut -d: -f1)
         TESTS_RUN=$((TESTS_RUN + 1))
-        if grep -q "enable --now $w" "$installer" && grep -q "try-restart.*$w" "$installer"; then
-            ok "$(basename "$installer") enables, starts and refreshes $w"
+        if grep -qE "systemctl enable .*$w" "$installer" \
+           && [ -n "$boot_at" ] && [ -n "$restart_at" ] && [ "$restart_at" -gt "$boot_at" ]; then
+            ok "$(basename "$installer") enables $w and restarts it after boot"
         else
             TESTS_FAILED=$((TESTS_FAILED + 1))
             fail "$(basename "$installer") does not fully install $w" \
-                 "needs both 'enable --now' and 'try-restart'"
+                 "needs 'systemctl enable', and 'systemctl restart' after modemctl boot"
         fi
     done
+
+    # The profile decides through the mark - the same file modemctl writes -
+    # and the mark is written by the boot unit, so the watcher comes after it.
+    mark=$(sed -n 's/^WATCH_MARK=${MODEMCTL_WATCH_MARK:-\(.*\)}$/\1/p' "$ROOT/modemctl")
+    check "$w runs only with modemctl's mark" "ConditionPathExists=$mark" \
+          "$(grep '^ConditionPathExists=' "$unit")"
+    check "$w starts after the unit that writes the mark" yes \
+          "$(grep -q '^After=.*furios-modem-fixes.service' "$unit" && echo yes || echo no)"
 done
 
 # --- what the package has to pull in ----------------------------------------

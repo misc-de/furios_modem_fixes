@@ -25,7 +25,8 @@ if [ "$(id -u)" -eq 0 ]; then
              MODEMCTL_NM_CONF_D MODEMCTL_RESOLV MODEMCTL_NM_RESOLV \
              MODEMCTL_DBUS_CONF_D MODEMCTL_CBS_DB MODEMCTL_PROFILE \
              MODEMCTL_SYSTEMD_CONF_D MODEMCTL_SHELL_SYSTEM_UNIT MODEMCTL_SIM MODEMCTL_SIM_NAMES MODEMCTL_SIM_LOCK MODEMCTL_SIM_DROPIN MODEMCTL_NR MODEMCTL_NRPROBE \
-             MODEMCTL_ORIGINAL MODEMCTL_MTK_PLUGIN MODEMCTL_MTK_BUILD MODEMCTL_DIVERT; do
+             MODEMCTL_ORIGINAL MODEMCTL_MTK_PLUGIN MODEMCTL_MTK_BUILD MODEMCTL_DIVERT \
+             MODEMCTL_WATCH_MARK; do
         if [ -n "${!v:-}" ]; then
             echo "refusing to honour $v as root - that would be an arbitrary-file patch" >&2
             exit 3
@@ -162,6 +163,15 @@ PATCHES=${MODEMCTL_PATCHES:-$SHARE/patches}
 PROFILE_FILE=${MODEMCTL_PROFILE:-/etc/furios-modem-fixes.profile}
 PROFILES="fixed shipped"
 WATCHERS="furios-mobile-route.service furios-mobile-context.service"
+# Whether the watchers may run: present while the phone is "fixed", for now.
+# Both units are always enabled and start only with this file there
+# (ConditionPathExists), so the profile is the one thing that decides - not
+# the profile plus each unit's enablement, which could disagree with it. They
+# did (4.10.2026): a phone recorded as "fixed" came out of an update with the
+# data-call supervisor disabled, and the only way back was by hand. In /run,
+# so every boot starts without it and "modemctl boot" puts it back from the
+# recorded profile; a "try" ends with the reboot as before.
+WATCH_MARK=${MODEMCTL_WATCH_MARK:-/run/furios-modem-fixes.watchers}
 
 # Which SIM slot oFono talks to: "2", or nothing. Nothing recorded is slot 1,
 # the one the phone shipped with, and then boot leaves the config alone.
@@ -1288,26 +1298,30 @@ actual_profile() {
 # The watchers are part of the profile, not decoration: the route watcher is
 # the whole of defect 7 and the supervisor is the whole of defect 9. A phone in
 # the shipped state must not have them running, or it is not in the shipped
-# state.
+# state - for "try" as much as for "set" ("try shipped" once left both running
+# on a phone that said "actual: shipped").
 #
-# That holds for "try" as much as for "set", and "try" used to leave them
-# alone: "modemctl try shipped" reverted every file and left the route watcher
-# putting its default route back and the supervisor reviving the data call -
-# a phone that said "actual: shipped" while still running two of the repairs,
-# which is the one thing a look at the shipped state must not be. The only
-# difference between the two is whether it lasts, so "try" starts and stops
-# them for now and leaves the enablement - the part the next boot reads - as
-# it was.
+# Neither verb touches their enablement any more: that is always on, and the
+# mark in /run says whether they may run (see WATCH_MARK). "set" differs from
+# "try" only in the profile file, which "modemctl boot" turns into the mark at
+# the next start.
+watch_mark() {
+    # watch_mark on|off - nothing else, so a mark is never half there
+    if [ "$1" = on ]; then
+        mkdir -p "$(dirname "$WATCH_MARK")" 2>/dev/null
+        : > "$WATCH_MARK" 2>/dev/null || warn "could not write $WATCH_MARK"
+    else
+        rm -f "$WATCH_MARK" 2>/dev/null || warn "could not remove $WATCH_MARK"
+    fi
+}
+
 set_watchers() {
-    local want=$1 remember=$2 u
+    local want=$1 u
+    watch_mark "$want"
     for u in $WATCHERS; do
         systemctl list-unit-files "$u" >/dev/null 2>&1 || continue
-        if [ "$want" = on ] && [ "$remember" = 1 ]; then
-            systemctl enable --now "$u" >/dev/null 2>&1 || warn "could not start $u"
-        elif [ "$want" = on ]; then
+        if [ "$want" = on ]; then
             systemctl start "$u" >/dev/null 2>&1 || warn "could not start $u"
-        elif [ "$remember" = 1 ]; then
-            systemctl disable --now "$u" >/dev/null 2>&1 || warn "could not stop $u"
         else
             systemctl stop "$u" >/dev/null 2>&1 || warn "could not stop $u"
         fi
@@ -1921,14 +1935,14 @@ cmd_switch() {
     case "$want" in
         fixed)
             cmd_apply || rc=1
-            set_watchers on "$remember" ;;
+            set_watchers on ;;
         shipped)
             # --no-restart still means what it says, here as everywhere else:
             # the boot unit and the tests both need a switch that writes files
             # and leaves the running stack alone.
             [ "$NO_RESTART" = 0 ] && DO_RESTART=1
             cmd_revert || rc=1
-            set_watchers off "$remember"
+            set_watchers off
             warn "this is the state the phone shipped in, not a working one -"
             warn "     with Wi-Fi off it resolves no names and has no route out" ;;
     esac
@@ -2333,15 +2347,20 @@ cmd_nr_boot() {
 }
 
 # What the boot unit and the apt hook run: make the phone match what was
-# recorded, and nothing else. Deliberately does NOT touch the units - their
-# enablement is already persistent, and enabling a service from a oneshot that
-# other services are ordered against is how the audio stack once built a boot
-# deadlock that survived the reboot.
+# recorded, and nothing else. Deliberately does NOT enable or start units -
+# enabling a service from a oneshot that other services are ordered against is
+# how the audio stack once built a boot deadlock that survived the reboot. The
+# watchers need neither: they are always enabled, ordered after this unit, and
+# the mark written here decides whether they run.
 cmd_boot() {
     local rec act
     boot_sim
     rec=$(recorded_profile)
     act=$(actual_profile)
+    case "$rec" in
+        fixed)   watch_mark on ;;
+        shipped) watch_mark off ;;
+    esac
     case "$rec" in
         unknown)
             warn "$PROFILE_FILE holds something this does not understand - doing nothing"
@@ -2686,9 +2705,20 @@ Error 44 every two seconds (sudo modemctl nr on)"; bad_count=$((bad_count+1)) ;;
     local ctx_state
     ctx_state=$(systemctl is-enabled furios-mobile-context.service 2>/dev/null)
     case "$ctx_state" in
-        enabled) ok "furios-mobile-context.service enabled" ;;
+        enabled)
+            # Enabled is the normal state in both profiles now; what differs
+            # is whether it runs, and that follows the profile.
+            if [ "$(recorded_profile)" != fixed ]; then
+                ok "furios-mobile-context.service enabled, idle (repairs off)"
+            elif [ -e "$WATCH_MARK" ] \
+                 && systemctl is-active --quiet furios-mobile-context.service; then
+                ok "furios-mobile-context.service running"
+            else
+                warn "furios-mobile-context.service is not running - a dropped data call stays dropped"
+                warn "     switch the repairs off and on again in the app, or: sudo modemctl set fixed"
+            fi ;;
         "")      skip "furios-mobile-context.service not installed" ;;
-        *)       warn "furios-mobile-context.service is '$ctx_state' - a dropped data call stays dropped" ;;
+        *)       warn "furios-mobile-context.service is '$ctx_state' - installed by an older version; an update of this package enables it" ;;
     esac
 
     # A second thing activating the same context is not twice as good. Two of

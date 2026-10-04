@@ -489,12 +489,13 @@ diff -u --label a/ofono2mm/mm_modem.py --label b/ofono2mm/mm_modem.py \
     > "$OLDP/ofono2mm-mm_modem.patch" || true
 
 PROFILEF="$WORK/profile"
+WATCHMARK="$WORK/watchers.mark"
 sandbox() {
     env MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
         MODEMCTL_NM_CONF_D="$NMD" MODEMCTL_RESOLV="$RC" \
         MODEMCTL_NM_RESOLV="$NMRESOLV" MODEMCTL_SHARE="$ROOT" \
         MODEMCTL_DBUS_CONF_D="$DBUSD" MODEMCTL_CBS_DB="$CBSDB" \
-        MODEMCTL_PROFILE="$PROFILEF" \
+        MODEMCTL_PROFILE="$PROFILEF" MODEMCTL_WATCH_MARK="$WATCHMARK" \
         "$@"
 }
 
@@ -821,8 +822,9 @@ check "and records that" fixed "$(cat "$PROFILEF" 2>/dev/null)"
 # The watchers are half of the profile. "try shipped" used to revert every
 # file and leave both running - the route watcher kept its default route in
 # and the supervisor kept reviving the data call, on a phone whose profile
-# said "shipped". What the two verbs differ in is only whether it lasts: "try"
-# starts and stops, "set" enables and disables.
+# said "shipped". Both verbs start and stop and write the mark the units are
+# conditioned on; neither enables or disables anything any more - the profile
+# alone decides, so enablement cannot drift away from it (4.10.2026).
 WATCH_REC="$WORK/watchers.args"
 cat > "$STUBDIR/systemctl" <<STUB
 #!/bin/sh
@@ -839,13 +841,29 @@ watch_calls() {
 rm -f "$WATCH_REC"
 sandbox bash "$ROOT/modemctl" try shipped --quiet --no-restart >/dev/null 2>&1
 check "try shipped stops both watchers, for now" "stop stop" "$(watch_calls)"
+check "and takes their mark away" no "$([ -e "$WATCHMARK" ] && echo yes || echo no)"
 rm -f "$WATCH_REC"
 sandbox bash "$ROOT/modemctl" try fixed --quiet --no-restart >/dev/null 2>&1
 check "try fixed starts them again, for now" "start start" "$(watch_calls)"
+check "and gives them their mark" yes "$([ -e "$WATCHMARK" ] && echo yes || echo no)"
 check "and try leaves the recorded profile alone" fixed "$(cat "$PROFILEF" 2>/dev/null)"
 rm -f "$WATCH_REC"
 sandbox bash "$ROOT/modemctl" set fixed --quiet --no-restart >/dev/null 2>&1
-check "set fixed enables them for good" "enable --now enable --now" "$(watch_calls)"
+check "set fixed starts them, and enables nothing" "start start" "$(watch_calls)"
+rm -f "$WATCH_REC"
+sandbox bash "$ROOT/modemctl" set shipped --quiet --no-restart >/dev/null 2>&1
+check "set shipped stops them, and disables nothing" "stop stop" "$(watch_calls)"
+rm -f "$WATCH_REC"
+# boot turns the recorded profile into the mark - the only thing that decides
+# whether they run after a reboot. It starts nothing itself.
+rm -f "$WATCHMARK"; printf 'fixed\n' > "$PROFILEF"
+sandbox bash "$ROOT/modemctl" boot --quiet --no-restart >/dev/null 2>&1
+check "boot on a fixed phone writes the mark" yes "$([ -e "$WATCHMARK" ] && echo yes || echo no)"
+check "and starts nothing itself" "" "$(watch_calls)"
+printf 'shipped\n' > "$PROFILEF"
+sandbox bash "$ROOT/modemctl" boot --quiet --no-restart >/dev/null 2>&1
+check "boot on a shipped phone takes it away" no "$([ -e "$WATCHMARK" ] && echo yes || echo no)"
+sandbox bash "$ROOT/modemctl" set fixed --quiet --no-restart >/dev/null 2>&1
 rm -f "$WATCH_REC"
 
 printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/systemctl"

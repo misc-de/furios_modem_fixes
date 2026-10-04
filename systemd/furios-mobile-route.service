@@ -7,7 +7,12 @@ Documentation=file:/usr/share/doc/furios-modem-fixes/README.md
 # The watcher copes with being started early anyway - it just sits on netlink
 # until the bearer appears - but starting it in the right order keeps the
 # journal honest about what happened when.
-After=ModemManager.service NetworkManager.service
+After=ModemManager.service NetworkManager.service furios-modem-fixes.service
+# Runs only while the phone is recorded as "fixed": modemctl writes this mark
+# from the profile at every boot (furios-modem-fixes.service, hence the After)
+# and on every switch in the app. The unit itself stays enabled in both
+# profiles, so its enablement can never disagree with the profile again.
+ConditionPathExists=/run/furios-modem-fixes.watchers
 # Not Requires: on a phone with the modem switched off there is nothing to
 # route and this should stay quiet rather than fail.
 Wants=ModemManager.service
