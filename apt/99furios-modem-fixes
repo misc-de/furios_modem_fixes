@@ -22,6 +22,13 @@
 // buy nothing but the new upstream code - and would cost the mobile data
 // connection, because NetworkManager does not survive a ModemManager restart
 // (see settle_networkmanager in modemctl).
+//
+// mtk-build --if-stale comes first: when an update of oFono's MTK plugin has
+// just landed under our diversion, it rebuilds the fix for the new version
+// (network is there - apt just used it). boot then puts the new build in, or,
+// if the build failed, the shipped plugin back. The other way round, boot
+// would see the outdated build and remove it before anything was rebuilt.
 DPkg::Post-Invoke {
+    "if [ -x /usr/bin/modemctl ]; then timeout 300 /usr/bin/modemctl mtk-build --quiet --if-stale || true; fi";
     "if [ -x /usr/bin/modemctl ] && [ -d /usr/lib/ofono2mm/ofono2mm ]; then timeout 120 /usr/bin/modemctl boot --quiet --no-restart || true; fi";
 };

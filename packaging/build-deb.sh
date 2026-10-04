@@ -44,6 +44,8 @@ install -Dm755 tools/furios-mobile-context "$STAGE/usr/share/furios-modem/tools/
 for p in patches/*.patch; do
     install -Dm644 "$p" "$STAGE/usr/share/furios-modem/$p"
 done
+# Builds oFono's MTK plugin with the defect 25 fix, on the phone, as nobody.
+install -Dm755 mtk/build.sh "$STAGE/usr/share/furios-modem/mtk/build.sh"
 # The rescue path for the day a patch stops fitting: modemctl points at these
 # instead of forcing a patch into a file that has moved underneath it.
 for f in patched-files/*; do

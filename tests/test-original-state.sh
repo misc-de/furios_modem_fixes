@@ -96,6 +96,7 @@ mc() {
         MODEMCTL_ORIGINAL="$ORIG" MODEMCTL_NR="$W/etc/nr" MODEMCTL_NRPROBE="$BIN/nrprobe" \
         MODEMCTL_SIM="$W/etc/sim" MODEMCTL_SIM_DROPIN="$W/etc/ofono/binder.d/zz-furios-sim.conf" \
         MODEMCTL_SIM_LOCK="$W/sim.lock" MODEMCTL_SIM_NAMES="$W/var/lib/sim-names" \
+        MODEMCTL_MTK_PLUGIN="$W/no-mtk/mtkbinderpluginext.so" MODEMCTL_MTK_BUILD="$W/mtk-build" \
         NR_OFF_SECONDS=0 NR_REG_WAIT=1 \
         bash "$ROOT/modemctl" "$@"
 }

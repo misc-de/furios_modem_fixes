@@ -48,11 +48,12 @@ for f in utils mm_bearer mm_modem mm_modem_simple mm_modem_signal main; do
 done
 
 sudo mkdir -p "$SHARE/patches" "$SHARE/patched-files" "$SHARE/networkmanager" \
-             "$SHARE/dbus" "$SHARE/systemd"
+             "$SHARE/dbus" "$SHARE/systemd" "$SHARE/mtk"
 sudo install -m644 networkmanager/*.conf "$SHARE/networkmanager/"
 sudo install -m644 dbus/*.conf            "$SHARE/dbus/"
 sudo install -m644 systemd/*.conf "$SHARE/systemd/"
 sudo install -m644 patches/*.patch    "$SHARE/patches/"
+sudo install -m755 mtk/build.sh       "$SHARE/mtk/build.sh"
 # The ready-made files are the rescue path for the day a patch stops fitting.
 # -type f: a stray __pycache__ from a test run must not take the install down.
 find patched-files -maxdepth 1 -type f -exec sudo install -m644 {} "$SHARE/patched-files/" \;
@@ -126,6 +127,13 @@ sudo systemctl try-restart furios-mobile-route.service furios-mobile-context.ser
 # put every repair back, said "Installed", and the boot unit took them all out
 # again at the next start: a phone that changed state across a reboot for no
 # reason anybody could see. With nothing recorded, boot leaves everything off.
+# The MTK plugin fix is C and has to be built on the phone first (defect 25).
+# Only for a phone that has the repairs on; boot below puts the build in. A
+# failed build - no network, a -dev package missing - leaves the shipped
+# plugin and says what to do.
+if [ "$RECORDED" = fixed ]; then
+    sudo "$BIN/modemctl" mtk-build || echo "  warn  MTK plugin not built - the shipped one stays (sudo modemctl mtk-build)"
+fi
 sudo "$BIN/modemctl" boot
 [ "$RECORDED" = fixed ] || echo "The repairs are off - switch them on with: sudo modemctl set fixed"
 

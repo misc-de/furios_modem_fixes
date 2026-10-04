@@ -73,6 +73,11 @@ export MODEMCTL_NM_CONF_D="$NMD" MODEMCTL_RESOLV="$RC" MODEMCTL_NM_RESOLV="$NMRE
 # every apply in here would try to write them into the real
 # /var/lib/furios-modem-fixes/original.
 export MODEMCTL_ORIGINAL="$WORK/original"
+# oFono's MTK plugin (defect 25): none here, so the real one under /usr/lib -
+# and whether that phone has the fix built - never decides a check in here.
+# tests/test-mtk.sh is where that part is exercised.
+export MODEMCTL_MTK_PLUGIN="$WORK/no-mtk/mtkbinderpluginext.so"
+export MODEMCTL_MTK_BUILD="$WORK/mtk-build"
 
 # The alert channel database. Baseline is a healthy phone, like the policy
 # above; what the distribution actually ships - de and nl subscribing to
@@ -998,6 +1003,7 @@ settle_run() {
     # an arbitrary-file patch. settle touches no file of ours anyway.
     PATH="$SETTLEBIN:$PATH" env -u MODEMCTL_DBUS_CONF_D -u MODEMCTL_CBS_DB -u MODEMCTL_NM_CONF_D \
         -u MODEMCTL_RESOLV -u MODEMCTL_NM_RESOLV -u MODEMCTL_ORIGINAL \
+        -u MODEMCTL_MTK_PLUGIN -u MODEMCTL_MTK_BUILD \
         bash "$ROOT/modemctl" settle 2>&1
 }
 shell_was_killed() {

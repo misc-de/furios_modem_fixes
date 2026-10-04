@@ -1,0 +1,141 @@
+diff --git a/src/mtk_ims_call.c b/src/mtk_ims_call.c
+index a9d16bb..e9c34f0 100644
+--- a/src/mtk_ims_call.c
++++ b/src/mtk_ims_call.c
+@@ -43,6 +43,10 @@ typedef struct mtk_ims_call {
+     RadioClient* ims_aosp_client;
+     GPtrArray* calls;
+     GHashTable* id_map;
++    /* An outgoing call the network dropped before the dial request was
++     * answered - see mtk_ims_call_dial_complete() */
++    gboolean dial_pending;
++    gboolean dial_failed;
+ } MtkImsCall;
+ 
+ static
+@@ -144,24 +148,6 @@ mtk_ims_call_result_request_destroy(
+     mtk_ims_call_result_request_unref(req);
+ }
+ 
+-static
+-void
+-mtk_ims_call_radio_request_complete(
+-    RadioRequest* req,
+-    RADIO_TX_STATUS status,
+-    RADIO_RESP resp,
+-    RADIO_ERROR error,
+-    const GBinderReader* args,
+-    gpointer user_data)
+-{
+-    MtkImsCallResultRequest* result_req = user_data;
+-
+-    if (result_req->complete) {
+-        result_req->complete(result_req->ext, error ? BINDER_EXT_CALL_RESULT_ERROR :
+-            BINDER_EXT_CALL_RESULT_OK, result_req->user_data);
+-    }
+-}
+-
+ /* internal use only */
+ #define BINDER_EXT_CALL_STATE_DISCONNECTED (BINDER_EXT_CALL_STATE_INVALID - 1)
+ 
+@@ -173,6 +159,17 @@ mtk_ims_call_msg_type_to_state(
+     switch (msg_type) {
+     case CALL_INFO_MSG_TYPE_SETUP:
+         return BINDER_EXT_CALL_STATE_INCOMING;
++    case CALL_INFO_MSG_TYPE_MO_CALL_ID_ASSIGN:
++        /*
++         * The modem has taken an outgoing call and given it an id. It used
++         * to be left out, which kept the call unknown until it was ringing
++         * on the other side. A call the network refused right away (+ECPI
++         * 133 within the same millisecond, e.g. cause 63 while IMS flaps)
++         * then disconnected an id nobody knew, and the core kept the call
++         * it had synthesized for the dial request in "dialing" for ever -
++         * hangup had nothing to send to the modem either.
++         */
++        return BINDER_EXT_CALL_STATE_DIALING;
+     case CALL_INFO_MSG_TYPE_ALERT:
+         return BINDER_EXT_CALL_STATE_ALERTING;
+     case CALL_INFO_MSG_TYPE_CONNECTED:
+@@ -192,6 +189,39 @@ mtk_ims_call_msg_type_to_state(
+     }
+ }
+ 
++/*
++ * The dial request answers OK as soon as the modem has accepted the
++ * command, which can be after the network has already refused the call.
++ * Reporting OK then makes the core synthesize a "dialing" call that no
++ * later event refers to - so a call that is already gone fails the dial.
++ */
++static
++void
++mtk_ims_call_dial_complete(
++    RadioRequest* req,
++    RADIO_TX_STATUS status,
++    RADIO_RESP resp,
++    RADIO_ERROR error,
++    const GBinderReader* args,
++    gpointer user_data)
++{
++    MtkImsCallResultRequest* result_req = user_data;
++    MtkImsCall* self = THIS(result_req->ext);
++    gboolean failed = self->dial_failed;
++
++    self->dial_pending = FALSE;
++    self->dial_failed = FALSE;
++    if (failed) {
++        DBG("dial answered after the call was dropped - reporting failure");
++    }
++    if (result_req->complete) {
++        result_req->complete(result_req->ext,
++            (status != RADIO_TX_STATUS_OK || error || failed) ?
++            BINDER_EXT_CALL_RESULT_ERROR : BINDER_EXT_CALL_RESULT_OK,
++            result_req->user_data);
++    }
++}
++
+ static
+ BinderExtCallInfo*
+ mtk_ims_call_info_new(
+@@ -247,8 +277,19 @@ mtk_ims_call_handle_call_info(
+     }
+     if (!call) {
+         call = mtk_ims_call_info_new(call_id, call_mode, number);
++        if (msg_type == CALL_INFO_MSG_TYPE_MO_CALL_ID_ASSIGN) {
++            /* ours, not the other side's */
++            call->flags &= ~BINDER_EXT_CALL_FLAG_INCOMING;
++        }
+         g_ptr_array_add(self->calls, call);
+     }
++
++    if (msg_type == CALL_INFO_MSG_TYPE_DISCONNECTED &&
++        self->dial_pending && call->state == BINDER_EXT_CALL_STATE_DIALING) {
++        /* Dropped before the dial request even returned: that dial failed */
++        DBG("outgoing call %u dropped while dialing", call_id);
++        self->dial_failed = TRUE;
++    }
+     call->state = mtk_ims_call_msg_type_to_state(msg_type);
+ 
+     if (msg_type == CALL_INFO_MSG_TYPE_DISCONNECTED) {
+@@ -303,7 +344,7 @@ mtk_ims_call_dial(
+ 
+     /* dial(int32 serial, Dial dialInfo) */
+     req = radio_request_new(self->ims_aosp_client, RADIO_REQ_DIAL, &writer,
+-        mtk_ims_call_radio_request_complete,
++        mtk_ims_call_dial_complete,
+         mtk_ims_call_result_request_destroy, result_req);
+ 
+     /* Prepare the Dial structure */
+@@ -325,10 +366,13 @@ mtk_ims_call_dial(
+     // result_req = mtk_ims_call_result_request_new(ext, complete, destroy, user_data);
+ 
+     /* Submit the request */
++    self->dial_pending = TRUE;
++    self->dial_failed = FALSE;
+     if (radio_request_submit(req)) {
+         radio_request_unref(req);
+         return 1; /* not the actual serial, but return something non-null */
+     } else {
++        self->dial_pending = FALSE;
+         mtk_ims_call_result_request_unref(result_req);
+         radio_request_unref(req);
+         return 0;

@@ -1,6 +1,6 @@
 # furios_modem_fixes
 
-Fixes twenty-four defects in the FuriOS modem stack on the FuriPhone FLX1, and
+Fixes twenty-five defects in the FuriOS modem stack on the FuriPhone FLX1, and
 keeps them fixed across package updates.
 
 As it comes, the phone shows symptoms that look like bad reception but are not:
@@ -61,6 +61,7 @@ behaviour stays, and says that it is guessing.
 | oFono's TechnologyPreference | oFono (`modemctl nr on`) | from the record `ofono-technology-preference` on `nr off`, only while it is still `nr` |
 | 5G bitmap | radio HAL | none needed: the RIL writes its own at every oFono start |
 | SIM slot | `/etc/ofono/binder.d/zz-furios-sim.conf` | ours by name (and header), removed |
+| MTK plugin (defect 25) | `/usr/lib/<arch>/ofono/plugins/mtkbinderpluginext.so`, shipped one diverted to `.distrib`; build in `/var/lib/furios-modem-fixes/mtk` | ours removed, `dpkg-divert --rename --remove` puts the shipped file back; takes effect at the next oFono start. Built on the phone by `modemctl mtk-build` (network, `git make gcc pkg-config libofonobinderpluginext-dev libgbinder-radio-dev ofono-dev libandroid-properties-dev`) |
 | units, apt hook, polkit action, tools | `/etc/systemd/system`, `/etc/apt/apt.conf.d`, `/usr/share/polkit-1/actions`, `/usr/local` | ours by name, removed |
 
 Not reversible: the modem's `nr_ps` (see [tools/5g/README.md](tools/5g/README.md)).

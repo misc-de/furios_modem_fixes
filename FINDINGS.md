@@ -2674,6 +2674,65 @@ working by hand at 08:44:37.
 
 ---
 
+## 25. A refused VoLTE call stayed "dialing" for ever
+
+4.10.2026, a call-back from VoiceBox: GNOME Calls showed the call, then
+"hanging up" once the user hung up, and stayed there. oFono had the call in
+`dialing`, ModemManager in `ringing-out`, for over five minutes - and no other
+call could have been made meanwhile. `Hangup` from Calls and a `HangupAll` by
+hand both returned without error, and the radio log shows that neither sent
+anything to the modem.
+
+The modem had ended the call in the same second it was dialled:
+
+    RmcCCReqHandler: AT> ATD+49*****84930
+    AT< +ECPI: 1, 130, ...                      call id assigned
+    AT< +ECPI: 1, 133, ..., 63                  disconnected, cause 63
+    RtcCC: Remove ImsCall in slot: 0, callId: 1
+
+Cause 63 is "service or option not available": LTE data registration was
+flapping between registered and searching every few seconds at 12 % signal,
+and VoLTE went with it.
+
+Not ofono2mm and not oFono's core, but oFono's MTK plugin
+(`ofono-binder-plugin-ext-mtk`, `mtk_ims_call.c`). It maps +ECPI 130
+(`MO_CALL_ID_ASSIGN`) to nothing, so an outgoing call is unknown to it until
+the other side rings (ALERT, 2). The 133 that followed disconnected id 1,
+which the binder plugin had never been told about ("ignoring ext call 1
+hangup"). Then the dial request came back OK, the core found no call in its
+list and synthesized one in `dialing` (`dial_handle_result`) - which no later
+event names, so nothing ever removes it, and hangup finds no modem call to
+end. Only restarting oFono cleared it; that took ModemManager with it and both
+came back on their own this time, modem online, data connected.
+
+The fix, two changes in that one file: 130 becomes `DIALING` (and the call
+is ours, not INCOMING - every MTK IMS call used to be reported as incoming),
+so the disconnect meets a known call; and a disconnect of the dialing call
+while the dial request is still pending makes that dial fail, so the core has
+nothing to synthesize. Checked against a real outgoing call afterwards: 130,
+2 after two seconds, 132/6 on answer, 133 on hang-up, and no call left in
+oFono.
+
+Because it is C in a FuriLabs package, it cannot be a patch on a file like
+the ofono2mm ones. `mtk/build.sh` builds it on the phone from exactly the
+commit the installed package came from (the short hash in its version), as
+`nobody`, and `modemctl apply` puts it in with `dpkg-divert`: the shipped
+plugin stays as `.distrib`, and an update of the package lands there instead
+of over ours. A build carries the sha256 of the shipped plugin it was made for
+and is installed in front of no other - after an update `apply` notices the
+mismatch and puts the shipped plugin back, and the apt hook runs `mtk-build
+--if-stale` first, so normally the new version is rebuilt before that. The
+unpatched build was checked against the shipped binary first: same size
+stripped, same code, only the build id differs. Not restarted from here:
+oFono reads it at its next start, which at boot comes after the unit.
+
+Building 837f943 needs `-std=gnu17` (gcc 15 is C23, where
+`mtk_radio_ext_new_req_id()` takes no arguments) and a space the Makefile
+misses before `-I$(BINDER_PLUGIN_INCLUDE_PATH)`. Report:
+`upstream/ofono-binder-plugin-ext-mtk-1-phantom-dialing.md`.
+
+---
+
 ## What it costs, measured
 
 Numbers from the phone, not estimates. Three things here run all the time -
@@ -3080,7 +3139,7 @@ That is what `modemctl apply` is for.
 
 The README was cut down to what somebody needs to use this. What follows was in it until then: the reasoning, the measurements and the trade-offs behind the decisions.
 
-## The twenty-four defects
+## The twenty-five defects
 
 | # | What | Where | Symptom |
 |---|---|---|---|
@@ -3108,6 +3167,7 @@ The README was cut down to what somebody needs to use this. What follows was in 
 | 22 | The manager object announced as one of its own managed objects, and the modem announced before `State` and `Sim` were filled in | `main.py` (ours) | NetworkManager discards the one and keeps the other as `state: failed` for the rest of the boot - **no mobile data** |
 | 23 | Our own defect 20 fix ordered ModemManager behind oFono's 8.7 s in `binder-wait`, and `main()` then waited again for a modem - so the bus name appeared after the shell had already asked | `ModemManager.service` drop-in and `main.py` (ours) | the phone boots with **no signal icon and no signal strength** on a perfectly healthy modem, all measurements green |
 | 24 | A data call rebuilt on a new interface is never announced to NetworkManager, which stays `activated` on the old one | NetworkManager, and our own supervisor asking `connected?` instead of `connected to what?` | every display says mobile data is up while DNS resolves through a dead interface - **no internet until somebody switches the connection off and on** |
+| 25 | The MTK plugin ignores +ECPI 130, so a call the network refuses at once is disconnected before oFono knows it, and the core keeps a synthesized "dialing" call | `ofono-binder-plugin-ext-mtk` (built on the phone, `dpkg-divert`) | refused VoLTE call hangs in "dialing"/"hanging up" until oFono restarts; no other call possible |
 
 Numbers behind each of these, and why they are what they are, in
 [FINDINGS.md](FINDINGS.md).

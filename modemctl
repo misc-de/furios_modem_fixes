@@ -18,7 +18,7 @@ if [ "$(id -u)" -eq 0 ]; then
              MODEMCTL_NM_CONF_D MODEMCTL_RESOLV MODEMCTL_NM_RESOLV \
              MODEMCTL_DBUS_CONF_D MODEMCTL_CBS_DB MODEMCTL_PROFILE \
              MODEMCTL_SYSTEMD_CONF_D MODEMCTL_SHELL_SYSTEM_UNIT MODEMCTL_SIM MODEMCTL_SIM_NAMES MODEMCTL_SIM_LOCK MODEMCTL_SIM_DROPIN MODEMCTL_NR MODEMCTL_NRPROBE \
-             MODEMCTL_ORIGINAL; do
+             MODEMCTL_ORIGINAL MODEMCTL_MTK_PLUGIN MODEMCTL_MTK_BUILD MODEMCTL_DIVERT; do
         if [ -n "${!v:-}" ]; then
             echo "refusing to honour $v as root - that would be an arbitrary-file patch" >&2
             exit 3
@@ -81,6 +81,26 @@ SHELL_SYSTEM_UNIT=${MODEMCTL_SHELL_SYSTEM_UNIT:-phosh.service}
 # whatever is in the directory. Every apply takes these out by name.
 LEGACY_ORDER_DROPINS="50-furios-after-ofono.conf"
 ORDER_UNIT=ModemManager.service
+
+# Defect 25. An outgoing VoLTE call the network refuses at once (+ECPI 133,
+# cause 63, while LTE registration flaps) stays "dialing" in oFono for ever:
+# the MTK plugin ignores +ECPI 130, so the disconnect hits an id nobody knew,
+# and the core synthesizes a call for the dial request that no event ever
+# ends. Hangup has nothing to send; only restarting oFono clears it, and
+# until then no other call can be made. The fix is C, in a FuriLabs package
+# (ofono-binder-plugin-ext-mtk), so it is built on the phone from the exact
+# commit that package was made from (mtk/build.sh, "modemctl mtk-build") and
+# put in with dpkg-divert: the shipped plugin stays as .distrib, and an
+# update of that package lands there instead of over ours. A build is only
+# ever installed for the shipped file it was made from - built-for holds its
+# sha256 - so after such an update the old build goes and the shipped plugin
+# comes back until the apt hook has rebuilt. Not restarted from here: oFono
+# picks it up at its next start, which at boot is after this runs.
+# See upstream/ofono-binder-plugin-ext-mtk-1-phantom-dialing.md.
+MTK_PLUGIN=${MODEMCTL_MTK_PLUGIN:-/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo aarch64-linux-gnu)/ofono/plugins/mtkbinderpluginext.so}
+MTK_BUILD=${MODEMCTL_MTK_BUILD:-/var/lib/furios-modem-fixes/mtk}
+MTK_PATCH_NAME=ofono-binder-plugin-ext-mtk-phantom-dialing.patch
+DIVERT=${MODEMCTL_DIVERT:-dpkg-divert}
 
 # Defect 14. The database cellbroadcastd takes its channel list from subscribes
 # de and nl to EU-Alert level 2 with three of its four channels: 4371, 4384 and
@@ -196,6 +216,7 @@ NO_RESTART=0
 PATCHES_ONLY=0
 DO_RESTART=0
 FORCE=0
+IF_STALE=0
 
 # Colour only when someone is watching. A boot unit's journal should not be
 # full of escape codes.
@@ -250,6 +271,88 @@ patch_state() {
     else
         echo stale
     fi
+}
+
+# --- MTK plugin (defect 25) --------------------------------------------------
+#
+#   absent    no MTK plugin on this phone - nothing to fix
+#   upstream  the shipped plugin already has the fix (mtk-build found it)
+#   unbuilt   no build for the shipped plugin that is on disk now
+#   missing   a build fits, but the shipped plugin is in place
+#   applied   ours is in place, built for the shipped one under it
+#   stale     ours is in place, but the package has changed underneath it
+mtk_diverted() {
+    [ "$($DIVERT --truename "$MTK_PLUGIN" 2>/dev/null)" = "$MTK_PLUGIN.distrib" ]
+}
+
+mtk_shipped() {
+    if mtk_diverted; then echo "$MTK_PLUGIN.distrib"; else echo "$MTK_PLUGIN"; fi
+}
+
+mtk_state() {
+    local stock hash built=0
+    stock=$(mtk_shipped)
+    [ -f "$stock" ] || { echo absent; return; }
+    hash=$(sha256sum "$stock" | cut -d' ' -f1)
+    if [ -f "$MTK_BUILD/upstream-fixed" ] && [ "$(cat "$MTK_BUILD/upstream-fixed")" = "$hash" ] \
+       && ! mtk_diverted; then
+        echo upstream; return
+    fi
+    [ -f "$MTK_BUILD/mtkbinderpluginext.so" ] && [ -f "$MTK_BUILD/built-for" ] \
+        && [ "$(cat "$MTK_BUILD/built-for")" = "$hash" ] && built=1
+    if mtk_diverted; then
+        if [ "$built" -eq 0 ]; then echo stale
+        elif cmp -s "$MTK_BUILD/mtkbinderpluginext.so" "$MTK_PLUGIN"; then echo applied
+        else echo missing
+        fi
+    elif [ "$built" -eq 1 ]; then echo missing
+    else echo unbuilt
+    fi
+}
+
+# Puts the shipped plugin back and drops the diversion. Our file goes first:
+# dpkg-divert --rename refuses to move the .distrib over an existing file.
+mtk_undivert() {
+    mtk_diverted || return 0
+    rm -f "$MTK_PLUGIN" && $DIVERT --local --rename --divert "$MTK_PLUGIN.distrib" \
+        --remove "$MTK_PLUGIN" >/dev/null
+}
+
+mtk_install() {
+    local tmp
+    if ! mtk_diverted; then
+        $DIVERT --local --rename --divert "$MTK_PLUGIN.distrib" --add "$MTK_PLUGIN" \
+            >/dev/null || return 1
+    fi
+    # Never a half-written plugin under oFono's nose: a copy next to it, then
+    # one rename.
+    tmp="$MTK_PLUGIN.furios-new"
+    install -m644 "$MTK_BUILD/mtkbinderpluginext.so" "$tmp" && mv -f "$tmp" "$MTK_PLUGIN" \
+        || { rm -f "$tmp"; mtk_undivert; return 1; }
+}
+
+cmd_mtk_build() {
+    need_write mtk-build
+    local builder="$SHARE/mtk/build.sh" rc state
+    state=$(mtk_state)
+    # The apt hook: rebuild what a package update has just outdated, and
+    # nothing else - a phone that never had the fix does not get it from an
+    # unrelated "apt upgrade".
+    [ "$IF_STALE" = 1 ] && [ "$state" != stale ] && return 0
+    head_ "MTK plugin"
+    case "$state" in
+        absent)   skip "no MTK plugin on this phone - nothing to build"; return 0 ;;
+        applied)  [ "$FORCE" = 1 ] || { skip "already built and in place"; return 0; } ;;
+        missing)  [ "$FORCE" = 1 ] || { skip "already built - \"modemctl apply\" puts it in"; return 0; } ;;
+    esac
+    [ -x "$builder" ] || { bad "$builder not found"; return 1; }
+    "$builder" "$PATCHES/$MTK_PATCH_NAME" "$MTK_BUILD"
+    rc=$?
+    case "$rc" in
+        0) ok "built - takes effect with \"modemctl apply\" and the next oFono start" ;;
+        2) ok "the shipped plugin already has the fix" ;;
+        *) bad "build failed - the shipped plugin stays"; return 1 ;;
+    esac
 }
 
 # applied / missing / foreign / absent. "missing" is only the 1.6 an earlier
@@ -1159,6 +1262,12 @@ actual_profile() {
         applied) applied=$((applied + 1)); total=$((total + 1)) ;;
         missing) total=$((total + 1)) ;;
     esac
+    # Only once there is a build to put in. Without one - not built yet, or
+    # fixed upstream - its absence says nothing about the profile.
+    case "$(mtk_state)" in
+        applied) applied=$((applied + 1)); total=$((total + 1)) ;;
+        missing|stale) total=$((total + 1)) ;;
+    esac
 
     if   [ "$applied" -eq "$total" ]; then echo fixed
     elif [ "$applied" -eq 0 ];        then echo shipped
@@ -1458,6 +1567,34 @@ inc && lvl && /<channels start="4371" end="4371"\/>/ {
             fi ;;
     esac
 
+    head_ "MTK plugin"
+    case "$(mtk_state)" in
+        absent)   skip "no MTK plugin on this phone" ;;
+        upstream) skip "the shipped plugin already has the fix" ;;
+        applied)  skip "MTK plugin already ours" ;;
+        unbuilt)  skip "MTK plugin not built yet - run: modemctl mtk-build" ;;
+        stale)
+            # The package changed under our build. An old build in front of a
+            # newer oFono is the one thing here that could cost every call,
+            # so the shipped plugin comes back until the apt hook rebuilds.
+            if mtk_undivert; then
+                warn "MTK plugin was updated - shipped one back until rebuilt (modemctl mtk-build)"
+                touched=1
+            else
+                bad "could not put the shipped MTK plugin back"
+                failed=1
+            fi ;;
+        missing)
+            if mtk_install; then
+                ok "MTK plugin with the dialing fix in place (shipped one: $(basename "$MTK_PLUGIN").distrib)"
+                say "     takes effect at the next oFono start - a reboot, or: systemctl restart ofono"
+                touched=1
+            else
+                bad "could not put the MTK plugin in place - shipped one left"
+                failed=1
+            fi ;;
+    esac
+
     # Stale bytecode is not cosmetic: Python will happily run a .pyc from
     # before the patch if its timestamp still looks newer.
     [ "$changed" -eq 1 ] && rm -rf "$TARGET/__pycache__"
@@ -1667,6 +1804,17 @@ $0 ~ mark {
     # The list cellbroadcastd set while the policy let it. Only once the
     # policy is gone, so nothing can set it again behind our back.
     cbs_restore || failed=1
+
+    head_ "MTK plugin"
+    if mtk_diverted; then
+        if mtk_undivert; then
+            ok "shipped MTK plugin back - takes effect at the next oFono start"
+        else
+            bad "could not put the shipped MTK plugin back"; failed=1
+        fi
+    else
+        skip "MTK plugin is the shipped one"
+    fi
 
     # Opt-in, because plain "modemctl revert" has always left the running
     # daemon alone and saying so - and a command that quietly started
@@ -2259,6 +2407,16 @@ cmd_status() {
             absent)  bad "$f.py missing"; bad_count=$((bad_count+1)) ;;
         esac
     done
+    case "$(mtk_state)" in
+        applied)  ok "MTK plugin with the dialing fix" ;;
+        upstream) skip "MTK plugin: fixed upstream" ;;
+        absent)   ;;
+        unbuilt)  skip "MTK plugin not built yet - modemctl mtk-build" ;;
+        missing)  bad "MTK plugin built but not in place - modemctl apply"
+                  bad_count=$((bad_count+1)) ;;
+        stale)    bad "MTK plugin in place has no build for the shipped one under it - modemctl mtk-build"
+                  bad_count=$((bad_count+1)) ;;
+    esac
     case "$(radio_state)" in
         applied) ok "radioInterface = $RADIO_INTERFACE_WANTED" ;;
         foreign) skip "radioInterface as FuriLabs set it - not ours to change" ;;
@@ -2614,6 +2772,9 @@ modemctl $VERSION - keeps the FuriOS modem fixes applied
                            registers afresh once, which drops data briefly
   modemctl nr-boot         after boot: allow 5G again if it is switched on
                            (furios-modem-nr.service)
+  modemctl mtk-build       build oFono's MTK plugin with the fix for a refused
+                           VoLTE call that stays "dialing" (needs network and
+                           the -dev packages it names; --force rebuilds)
   modemctl boot            make the phone match the recorded profile
                            (used by the boot unit and the apt hook)
   modemctl adopt           record "fixed" if an earlier version put the
@@ -2632,7 +2793,10 @@ Options
       --no-restart         change files, leave the services alone
       --restart            revert: restart the modem stack afterwards
       --patches-only       revert: ofono2mm's files only, not the config
-      --force              sim: switch to a slot even without a card in it
+      --force              sim: switch to a slot even without a card in it;
+                           mtk-build: build again although one fits
+      --if-stale           mtk-build: only when a package update outdated
+                           the build in place (the apt hook)
 
 The fixes live in files owned by the ofono2mm package, so an update of that
 package removes them. A boot unit and an apt hook run "boot" for you; both do
@@ -2650,6 +2814,7 @@ for a in "$@"; do
         --patches-only) PATCHES_ONLY=1 ;;
         --restart)      DO_RESTART=1 ;;
         --force)        FORCE=1 ;;
+        --if-stale)     IF_STALE=1 ;;
     esac
 done
 
@@ -2669,6 +2834,7 @@ case "$CMD" in
     sim-check)    cmd_sim_check ;;
     nr)           cmd_nr "${1:-}" ;;
     nr-boot)      cmd_nr_boot ;;
+    mtk-build)    cmd_mtk_build ;;
     version|-V|--version)
         # VERSION is this script's own interface version and moves rarely. The
         # question people actually ask here is "which build is on this phone",
