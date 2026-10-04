@@ -74,6 +74,13 @@
 # nothing at all in between.
 set -u
 
+# Every tool whose output is read here answers in one language: nmcli says
+# "verbunden" instead of "connected", even with -t, on a system that has its
+# German catalogue - FuriOS happens to ship without it today, pactl's is
+# there and broke audioctl's status that way (4.10.2026). Nothing this runs
+# shows text to anybody, so the whole script is set rather than each call.
+export LC_ALL=C.UTF-8
+
 VERSION=0.3.0
 
 # Backoff between attempts, in seconds, one per attempt. When the list runs
