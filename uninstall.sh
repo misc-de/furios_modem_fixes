@@ -82,7 +82,8 @@ if sudo test -d "$ORIG" && [ -n "$(sudo ls -A "$ORIG" 2>/dev/null)" ]; then
         esac
     done
 fi
-sudo rm -rf /usr/local/share/furios-modem /usr/local/lib/furios-modem /var/lib/furios-modem-fixes
+sudo rm -rf /usr/local/share/furios-modem /usr/local/lib/furios-modem /var/lib/furios-modem-fixes \
+    /var/lib/furios-modem-mtk
 # The SIM switch's lock lives in /run and would go at the next boot anyway.
 sudo rm -f /run/furios-modem-fixes.sim.lock
 # revert takes the start-order drop-in out and the directory with it - but

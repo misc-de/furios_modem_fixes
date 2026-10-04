@@ -98,7 +98,10 @@ ORDER_UNIT=ModemManager.service
 # picks it up at its next start, which at boot is after this runs.
 # See upstream/ofono-binder-plugin-ext-mtk-1-phantom-dialing.md.
 MTK_PLUGIN=${MODEMCTL_MTK_PLUGIN:-/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo aarch64-linux-gnu)/ofono/plugins/mtkbinderpluginext.so}
-MTK_BUILD=${MODEMCTL_MTK_BUILD:-/var/lib/furios-modem-fixes/mtk}
+# Not under /var/lib/furios-modem-fixes: that one is 0700 (it holds the
+# IMSI), and "modemctl status" run as the user - the app does exactly that -
+# could not read built-for and called a perfectly good build outdated.
+MTK_BUILD=${MODEMCTL_MTK_BUILD:-/var/lib/furios-modem-mtk}
 MTK_PATCH_NAME=ofono-binder-plugin-ext-mtk-phantom-dialing.patch
 DIVERT=${MODEMCTL_DIVERT:-dpkg-divert}
 

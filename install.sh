@@ -131,6 +131,9 @@ sudo systemctl try-restart furios-mobile-route.service furios-mobile-context.ser
 # Only for a phone that has the repairs on; boot below puts the build in. A
 # failed build - no network, a -dev package missing - leaves the shipped
 # plugin and says what to do.
+# The first build of 4.10. went to /var/lib/furios-modem-fixes/mtk, which
+# only root can read; it lives in /var/lib/furios-modem-mtk now.
+sudo rm -rf /var/lib/furios-modem-fixes/mtk
 if [ "$RECORDED" = fixed ]; then
     sudo "$BIN/modemctl" mtk-build || echo "  warn  MTK plugin not built - the shipped one stays (sudo modemctl mtk-build)"
 fi

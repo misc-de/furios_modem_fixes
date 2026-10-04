@@ -303,7 +303,7 @@ cat > "$STAGE/DEBIAN/postrm" <<'POSTRM'
 set -e
 if [ "$1" = purge ]; then
     rm -f /etc/furios-modem-fixes.profile /etc/furios-modem-fixes.sim /etc/furios-modem-fixes.nr
-    rm -rf /var/lib/furios-modem-fixes
+    rm -rf /var/lib/furios-modem-fixes /var/lib/furios-modem-mtk
 fi
 exit 0
 POSTRM
