@@ -12,6 +12,9 @@ ROOT=$(dirname "$HERE")
 
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 STUB="$WORK/bin"; mkdir -p "$STUB"
+# Every override pointed into the sandbox, and $MODEMCTL the only way in
+# (tests/lib.sh); what a check needs differently is set on top of it.
+modemctl_sandbox "$WORK/sandbox"
 NRF="$WORK/nr"
 LOG="$WORK/log"          # what reached the "modem"
 BITS="$WORK/bits"        # the RIL's allowed-types bitmap
@@ -64,7 +67,7 @@ mc() {
         MODEMCTL_RADIO_CONF="$CONF" MODEMCTL_SIM_DROPIN="$DROPIN" \
         MODEMCTL_NRPROBE="$STUB/nrprobe" NR_OFF_SECONDS=0 NR_SETTLE=0 \
         NR_RECHECK=0 NR_REG_WAIT=1 NR_BOOT_WAIT=3 \
-        bash "$ROOT/modemctl" "$@"
+        "$MODEMCTL" "$@"
 }
 key() { mc nr 2>/dev/null | sed -n "s/^$1: *//p"; }
 fresh() { echo $((0x9ce0e)) > "$BITS"; echo lte > "$PREF"; : > "$LOG"; }

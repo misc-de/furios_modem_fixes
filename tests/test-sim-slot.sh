@@ -13,6 +13,9 @@ ROOT=$(dirname "$HERE")
 
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 STUB="$WORK/bin"; mkdir -p "$STUB" "$WORK/target"
+# Every override pointed into the sandbox, and $MODEMCTL the only way in
+# (tests/lib.sh); what a check needs differently is set on top of it.
+modemctl_sandbox "$WORK/sandbox"
 # As FuriOS ships it on the FLX1 (radioInterface 1.4 - see modemctl).
 SHIPPED="$WORK/shipped.conf"
 cat > "$SHIPPED" <<'CONF'
@@ -49,10 +52,13 @@ printf '#!/bin/sh\nexit 1\n' > "$STUB/dbus-send"
 printf '#!/bin/sh\nexit 0\n' > "$STUB/logger"
 chmod +x "$STUB"/*
 
+# The drop-in beside oFono's file, where modemctl puts it by default.
+DROPIN="$WORK/zz-furios-sim.conf"
 mc() {
     env PATH="$STUB:$PATH" MODEMCTL_TARGET="$WORK/target" MODEMCTL_RADIO_CONF="$CONF" \
         MODEMCTL_SIM="$SIMF" MODEMCTL_SIM_LOCK="$WORK/lock" MODEMCTL_SHARE="$ROOT" \
-        bash "$ROOT/modemctl" "$@"
+        MODEMCTL_SIM_DROPIN="$DROPIN" \
+        "$MODEMCTL" "$@"
 }
 key() { mc sim 2>/dev/null | sed -n "s/^$1: *//p"; }
 
@@ -123,7 +129,7 @@ NOPROPS
 check_status "slot 1 needs no card detected" 0 env SIM_RESTART_WAIT=1 bash -c \
     "PATH='$STUB:$PATH' MODEMCTL_TARGET='$WORK/target' MODEMCTL_RADIO_CONF='$CONF' \
      MODEMCTL_SIM='$SIMF' MODEMCTL_SIM_LOCK='$WORK/lock' MODEMCTL_SHARE='$ROOT' \
-     bash '$ROOT/modemctl' sim 1"
+     MODEMCTL_SIM_DROPIN='$DROPIN' '$MODEMCTL' sim 1"
 check "and is back on it" 1 "$(key active)"
 cat > "$STUB/getprop" <<'STUB'
 #!/bin/sh
@@ -176,7 +182,7 @@ export FAKE_ICCID_1=894900
 mc sim 2 --no-restart >/dev/null 2>&1
 unset FAKE_ICCID_1
 check "set up on slot 2" 2 "$(key active)"
-env SIM_CHECK_WAIT=3 bash -c "$(declare -f mc); $(declare -p WORK CONF SIMF STUB ROOT); mc sim-check --no-restart" >/dev/null 2>&1
+env SIM_CHECK_WAIT=3 bash -c "$(declare -f mc); $(declare -p WORK CONF SIMF STUB ROOT DROPIN); mc sim-check --no-restart" >/dev/null 2>&1
 check "no card after the wait: back to slot 1" 1 "$(key active)"
 check "and the choice is forgotten" no "$([ -e "$SIMF" ] && echo yes || echo no)"
 
@@ -192,7 +198,7 @@ case "$*" in
 esac
 PRESENT
 chmod +x "$STUB/dbus-send"
-env SIM_CHECK_WAIT=3 bash -c "$(declare -f mc); $(declare -p WORK CONF SIMF STUB ROOT); mc sim-check --no-restart" >/dev/null 2>&1
+env SIM_CHECK_WAIT=3 bash -c "$(declare -f mc); $(declare -p WORK CONF SIMF STUB ROOT DROPIN); mc sim-check --no-restart" >/dev/null 2>&1
 check "with a card it stays on slot 2" 2 "$(key active)"
 printf '#!/bin/sh\nexit 1\n' > "$STUB/dbus-send"
 rm -f "$SIMF"
@@ -234,8 +240,8 @@ STUB
 mcn() {
     env PATH="$STUB:$PATH" MODEMCTL_TARGET="$WORK/target" MODEMCTL_RADIO_CONF="$CONF" \
         MODEMCTL_SIM="$SIMF" MODEMCTL_SIM_NAMES="$NAMES" MODEMCTL_CBS_DB="$DB" \
-        MODEMCTL_SIM_LOCK="$WORK/lock" \
-        MODEMCTL_SHARE="$ROOT" bash "$ROOT/modemctl" sim 2>/dev/null | sed -n "s/^$1: *//p"
+        MODEMCTL_SIM_LOCK="$WORK/lock" MODEMCTL_SIM_DROPIN="$DROPIN" \
+        MODEMCTL_SHARE="$ROOT" "$MODEMCTL" sim 2>/dev/null | sed -n "s/^$1: *//p"
 }
 check "a code with one provider gives its name, entities decoded" "1&1 Mobile" "$(mcn name2)"
 check "a code shared with a reseller gives no name at all" "" "$(mcn name1)"

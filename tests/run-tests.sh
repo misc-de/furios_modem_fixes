@@ -20,6 +20,8 @@ run() {
     "$@" || FAILED=$((FAILED + 1))
 }
 
+# First: whether the tests below can reach the machine they run on at all.
+run "the tests stay in their sandbox"    bash "$HERE/test-harness.sh"
 run "the patches reproduce what we ship" bash "$HERE/test-patches.sh"
 run "modemctl's judgement"               bash "$HERE/test-modemctl.sh"
 run "the SIM slot switch"                bash "$HERE/test-sim-slot.sh"

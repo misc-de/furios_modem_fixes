@@ -110,7 +110,10 @@ signal levels do not.
     ./tests/run-tests.sh        # never with sudo
 
 Everything that can be decided without a SIM in the phone: the conversions, the
-patches, and modemctl's judgement about when to leave a file alone. Whether the
+patches, and modemctl's judgement about when to leave a file alone. Every
+modemctl run in them is sandboxed: `tests/lib.sh` points every `MODEMCTL_*`
+override into a temporary tree, and a run with one missing stops the test
+before modemctl starts. Whether the
 bar on the screen moves needs a radio and a look at the device — that is
 `modemctl check`.
 

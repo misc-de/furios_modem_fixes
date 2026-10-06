@@ -13,6 +13,9 @@ ROOT=$(dirname "$HERE")
 
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 STUBDIR="$WORK/bin"; mkdir -p "$STUBDIR"
+# Every override pointed into the sandbox, and $MODEMCTL the only way in
+# (tests/lib.sh); what a check needs differently is set on top of it.
+modemctl_sandbox "$WORK/sandbox"
 FILES="utils mm_bearer mm_modem mm_modem_simple mm_modem_signal main"
 
 # A healthy stack, so the runtime part of "status" does not drown out the part
@@ -177,7 +180,7 @@ NRENV="MODEMCTL_NRPROBE=$STUBDIR/nrprobe MODEMCTL_NR=$STUBDIR/nr-not-recorded"
 
 run_status() {
     env $NRENV MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
-        bash "$ROOT/modemctl" status 2>&1
+        "$MODEMCTL" status 2>&1
 }
 
 # --- nothing applied --------------------------------------------------------
@@ -186,7 +189,7 @@ run_status() {
 reset_tree original 1.6
 out=$(run_status)
 check_status "shipped tree: status fails" 1 \
-    env MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" bash "$ROOT/modemctl" status
+    env MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" "$MODEMCTL" status
 TESTS_RUN=$((TESTS_RUN + 1))
 if echo "$out" | grep -q "mm_modem_signal.py NOT patched"; then
     ok "shipped tree: names the unpatched file"
@@ -203,7 +206,7 @@ fi
 # --- everything applied -----------------------------------------------------
 reset_tree patched 1.4
 check_status "patched tree: status passes" 0 \
-    env MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" bash "$ROOT/modemctl" status
+    env MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" "$MODEMCTL" status
 out=$(run_status)
 TESTS_RUN=$((TESTS_RUN + 1))
 if echo "$out" | grep -q "everything in place"; then
@@ -238,7 +241,7 @@ else
     TESTS_FAILED=$((TESTS_FAILED + 1)); fail "a preference of nr without NR passed unmentioned" "$out"
 fi
 check_status "and it is treated as a failure" 1 \
-    env $NRENV MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" bash "$ROOT/modemctl" status
+    env $NRENV MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" "$MODEMCTL" status
 out=$(FAKE_BITS=$((0x19ce0e)) run_status)
 check "nr with NR in the bitmap is fine" 0 \
     "$(echo "$out" | grep -c "Error 44")"
@@ -305,7 +308,7 @@ fi
 # exercised without handing a test suite root.
 reset_tree original 1.6
 out=$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
-      bash "$ROOT/modemctl" apply --no-restart 2>&1)
+      "$MODEMCTL" apply --no-restart 2>&1)
 rc=$?
 check "apply on a shipped tree succeeds" 0 "$rc"
 for f in $FILES; do
@@ -323,10 +326,10 @@ check "apply sets radioInterface" "radioInterface = 1.4" "$(cat "$RADIO")"
 # modem - so apply leaves it, and status does not count it against the phone.
 printf 'radioInterface = 1.5\n' > "$RADIO"
 MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
-    bash "$ROOT/modemctl" apply --no-restart >/dev/null 2>&1
+    "$MODEMCTL" apply --no-restart >/dev/null 2>&1
 check "apply leaves a radioInterface FuriLabs set" "radioInterface = 1.5" "$(cat "$RADIO")"
 check "and status does not fail on it" yes \
-    "$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" bash "$ROOT/modemctl" status 2>&1 \
+    "$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" "$MODEMCTL" status 2>&1 \
        | grep -q 'radioInterface as FuriLabs set it' && echo yes || echo no)"
 printf 'radioInterface = 1.4\n' > "$RADIO"
 # dpkg's file stays dpkg's: the shipped one waits under .distrib, diverted,
@@ -344,7 +347,7 @@ check "apply leaves no backups beside them" 0 \
 # exactly that on every boot and every package operation.
 before=$(md5sum "$TREE"/*.py | md5sum)
 out=$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
-      bash "$ROOT/modemctl" apply --no-restart 2>&1)
+      "$MODEMCTL" apply --no-restart 2>&1)
 check "a second apply changes nothing" "$before" "$(md5sum "$TREE"/*.py | md5sum)"
 TESTS_RUN=$((TESTS_RUN + 1))
 if echo "$out" | grep -q "Nothing to do"; then
@@ -359,10 +362,10 @@ fi
 # not stay next to the package's new files: the shipped one goes back.
 printf '# an update of ofono2mm\n' >> "$(tree_path mm_bearer).distrib"
 check "an update under the diversion is noticed" yes \
-      "$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" bash "$ROOT/modemctl" status 2>&1 \
+      "$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" "$MODEMCTL" status 2>&1 \
          | grep -q 'mm_bearer.py NOT patched' && echo yes || echo no)"
 MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
-    bash "$ROOT/modemctl" apply --no-restart >/dev/null 2>&1
+    "$MODEMCTL" apply --no-restart >/dev/null 2>&1
 check "and apply makes our copy again from the new shipped file" yes \
       "$(cat "$ROOT/patched-files/mm_bearer.py" - <<<'# an update of ofono2mm' \
          | cmp -s - "$(tree_path mm_bearer)" && echo yes || echo no)"
@@ -378,14 +381,14 @@ open(p, 'w').write(s)
 PY2
 cp "$(tree_path mm_modem_signal).distrib" "$WORK/new-upstream-signal.py"
 out=$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
-      bash "$ROOT/modemctl" apply --no-restart 2>&1); rc=$?
+      "$MODEMCTL" apply --no-restart 2>&1); rc=$?
 check "an update the patch no longer fits fails apply with its own code" 5 "$rc"
 check "the new shipped file is put back in place of our old copy" yes \
       "$(cmp -s "$WORK/new-upstream-signal.py" "$(tree_path mm_modem_signal)" && echo yes || echo no)"
 check "and its diversion is gone" no \
       "$(grep -q "mm_modem_signal.py " "$DIVLIST" && echo yes || echo no)"
 check "status calls it a failure" yes \
-      "$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" bash "$ROOT/modemctl" status 2>&1 \
+      "$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" "$MODEMCTL" status 2>&1 \
          | grep -q 'mm_modem_signal.py patch no longer fits' && echo yes || echo no)"
 # The boot unit counts 1 as success - a phone without a SIM must not fail its
 # boot - and that is where this used to disappear. 5 must not be in the list.
@@ -412,10 +415,10 @@ printf 'an older version\n' > "$(tree_path mm_modem).bak.20260901-090000"
 printf 'not ours\n' > "$(tree_path mm_modem).bak"
 check "patched in place counts as fixed" fixed \
       "$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" MODEMCTL_SHARE="$ROOT" \
-         bash "$ROOT/modemctl" profile 2>/dev/null | sed -n 's/^actual: *//p')"
+         "$MODEMCTL" profile 2>/dev/null | sed -n 's/^actual: *//p')"
 before=$(md5sum "$TREE"/*.py "$(tree_path main)" | md5sum)
 out=$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
-      bash "$ROOT/modemctl" apply --no-restart 2>&1); rc=$?
+      "$MODEMCTL" apply --no-restart 2>&1); rc=$?
 check "the move succeeds" 0 "$rc"
 check "the code ofono2mm runs is the same, byte for byte" "$before" \
       "$(md5sum "$TREE"/*.py "$(tree_path main)" | md5sum)"
@@ -440,7 +443,7 @@ rm -f "$(tree_path mm_modem)".bak*
 reset_tree patched 1.4
 sed -i '1i # a local edit' "$(tree_path utils)"
 out=$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
-      bash "$ROOT/modemctl" apply --no-restart 2>&1)
+      "$MODEMCTL" apply --no-restart 2>&1)
 check "a file that does not come back to dpkg's is not diverted" no \
       "$(grep -q "utils.py " "$DIVLIST" && echo yes || echo no)"
 check "and says why" yes \
@@ -454,9 +457,9 @@ reset_tree patched 1.4
 
 # And the way back from there: no diversion, dpkg's files, nothing beside them.
 MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
-    bash "$ROOT/modemctl" apply --no-restart >/dev/null 2>&1
+    "$MODEMCTL" apply --no-restart >/dev/null 2>&1
 MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
-    bash "$ROOT/modemctl" revert >/dev/null 2>&1
+    "$MODEMCTL" revert >/dev/null 2>&1
 for f in $FILES; do
     check "revert after the move: $f.py is the shipped file" yes \
           "$(cmp -s "$(tree_path "$f")" "$ROOT/original-files/$f.py" && echo yes || echo no)"
@@ -482,7 +485,7 @@ done
 # path leaves ofono2mm in a state neither side knows about.
 reset_tree patched 1.4
 MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
-    bash "$ROOT/modemctl" revert >/dev/null 2>&1
+    "$MODEMCTL" revert >/dev/null 2>&1
 for f in $FILES; do
     TESTS_RUN=$((TESTS_RUN + 1))
     if diff -q "$(tree_path "$f")" "$ROOT/original-files/$f.py" >/dev/null; then
@@ -495,13 +498,15 @@ check "revert leaves the shipped radioInterface" "radioInterface = 1.4" \
     "$(cat "$RADIO")"
 
 # --- refusals ---------------------------------------------------------------
-check_status "an unknown command is an error" 2 bash "$ROOT/modemctl" wat
+check_status "an unknown command is an error" 2 "$MODEMCTL" wat
 if [ "$(id -u)" -ne 0 ]; then
-    # Against the real system tree, which this test user cannot write.
+    # Against a tree this test user cannot write. It used to be the real
+    # /usr/lib/ofono2mm, with nothing else overridden either.
     check_status "apply on an unwritable tree refuses" 1 \
-        bash "$ROOT/modemctl" apply
+        env MODEMCTL_TARGET=/proc/modemctl-test-nowhere/ofono2mm "$MODEMCTL" apply
     TESTS_RUN=$((TESTS_RUN + 1))
-    if bash "$ROOT/modemctl" apply 2>&1 | grep -q "try: sudo"; then
+    if env MODEMCTL_TARGET=/proc/modemctl-test-nowhere/ofono2mm "$MODEMCTL" apply 2>&1 \
+            | grep -q "try: sudo"; then
         ok "and says how to do it properly"
     else
         TESTS_FAILED=$((TESTS_FAILED + 1)); fail "no hint about sudo"
@@ -540,7 +545,7 @@ done
 # healthy boot prints a wall of text every time.
 reset_tree patched 1.4
 out=$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
-      bash "$ROOT/modemctl" status --quiet 2>/dev/null)
+      "$MODEMCTL" status --quiet 2>/dev/null)
 check "quiet status on a healthy tree says nothing" "" "$out"
 
 # --- the DNS half of defect 7 -----------------------------------------------
@@ -566,7 +571,7 @@ dns_state() {
     out=$(env MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
               MODEMCTL_NM_CONF_D="$NMD" MODEMCTL_RESOLV="$RC" \
               MODEMCTL_NM_RESOLV="$NMRESOLV" \
-              bash "$ROOT/modemctl" status 2>&1)
+              "$MODEMCTL" status 2>&1)
     case "$out" in
         *"resolv.conf -> NetworkManager"*)        echo applied ;;
         *"does not point at NetworkManager"*)     echo missing ;;
@@ -655,7 +660,7 @@ else
 fi
 
 # With today's patches that tree is unrecognisable, and saying so is correct.
-out=$(sandbox bash "$ROOT/modemctl" apply --quiet --no-restart 2>&1)
+out=$(sandbox "$MODEMCTL" apply --quiet --no-restart 2>&1)
 TESTS_RUN=$((TESTS_RUN + 1))
 if echo "$out" | grep -q "mm_modem.py: patch does not fit"; then
     ok "a changed patch is refused rather than forced"
@@ -664,7 +669,7 @@ else
 fi
 
 # prerm's half: revert with the old patches, which still fit.
-sandbox MODEMCTL_PATCHES="$OLDP" bash "$ROOT/modemctl" revert --patches-only --quiet >/dev/null 2>&1
+sandbox MODEMCTL_PATCHES="$OLDP" "$MODEMCTL" revert --patches-only --quiet >/dev/null 2>&1
 TESTS_RUN=$((TESTS_RUN + 1))
 if diff -q "$TREE/mm_modem.py" "$ROOT/original-files/mm_modem.py" >/dev/null; then
     ok "the old package reverts its own work"
@@ -676,7 +681,7 @@ fi
 check "and leaves radioInterface alone" "radioInterface = 1.4" "$(cat "$RADIO")"
 
 # postinst's half: today's patches now apply.
-sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" apply --quiet --no-restart >/dev/null 2>&1
 TESTS_RUN=$((TESTS_RUN + 1))
 if diff -q "$TREE/mm_modem.py" "$ROOT/patched-files/mm_modem.py" >/dev/null; then
     ok "and the new one applies on top of the shipped file"
@@ -687,10 +692,10 @@ fi
 # Diverted, a changed patch needs none of this: the shipped file is right
 # there as the .distrib, and apply simply makes our copy again from it.
 reset_tree original 1.4
-sandbox MODEMCTL_PATCHES="$OLDP" bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+sandbox MODEMCTL_PATCHES="$OLDP" "$MODEMCTL" apply --quiet --no-restart >/dev/null 2>&1
 check "the previous release, diverted, is in place" yes \
       "$(cmp -s "$TREE/mm_modem.py" "$WORK/old/ofono2mm/mm_modem.py" && echo yes || echo no)"
-sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" apply --quiet --no-restart >/dev/null 2>&1
 check "and today's patch replaces it without a revert in between" yes \
       "$(cmp -s "$TREE/mm_modem.py" "$ROOT/patched-files/mm_modem.py" \
          && cmp -s "$TREE/mm_modem.py.distrib" "$ROOT/original-files/mm_modem.py" \
@@ -698,7 +703,7 @@ check "and today's patch replaces it without a revert in between" yes \
 
 # The whole point of --patches-only is that it stops there.
 install_old
-sandbox MODEMCTL_PATCHES="$OLDP" bash "$ROOT/modemctl" revert --quiet >/dev/null 2>&1
+sandbox MODEMCTL_PATCHES="$OLDP" "$MODEMCTL" revert --quiet >/dev/null 2>&1
 # A full revert has nothing to undo here any more: what we want is what the
 # package ships.
 check "a full revert leaves radioInterface at the shipped value" \
@@ -716,7 +721,7 @@ check "a full revert leaves radioInterface at the shipped value" \
 
 cb_state() {
     local out
-    out=$(sandbox bash "$ROOT/modemctl" status 2>&1)
+    out=$(sandbox "$MODEMCTL" status 2>&1)
     case "$out" in
         *"emergency channels set"*)              echo applied ;;
         *"oFono reports no channels"*)           echo applied-noreply ;;
@@ -730,7 +735,7 @@ reset_tree patched 1.4
 rm -f "$DBUSD/furios-modem-cellbroadcast.conf"
 check "a phone without the policy is not called healthy" missing "$(cb_state)"
 
-sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" apply --quiet --no-restart >/dev/null 2>&1
 TESTS_RUN=$((TESTS_RUN + 1))
 if [ -f "$DBUSD/furios-modem-cellbroadcast.conf" ]; then
     ok "apply installs the bus policy"
@@ -745,7 +750,7 @@ check "policy without channels is not reported as done" applied-noreply "$(cb_st
 
 # Idempotent, because a boot unit and an apt hook run this on every boot and
 # every package operation.
-out=$(sandbox bash "$ROOT/modemctl" apply --no-restart 2>&1)
+out=$(sandbox "$MODEMCTL" apply --no-restart 2>&1)
 TESTS_RUN=$((TESTS_RUN + 1))
 if echo "$out" | grep -q "already reachable"; then
     ok "a second apply leaves the policy alone"
@@ -762,7 +767,7 @@ cat > "$DBUSD/zz-upstream-test.conf" <<'POLICY'
          send_interface="org.freedesktop.ModemManager1.Modem.CellBroadcast"/>
 </policy></busconfig>
 POLICY
-out=$(sandbox bash "$ROOT/modemctl" apply --no-restart 2>&1)
+out=$(sandbox "$MODEMCTL" apply --no-restart 2>&1)
 TESTS_RUN=$((TESTS_RUN + 1))
 if echo "$out" | grep -q "own policy allows"; then
     ok "an upstream allow makes apply stand back"
@@ -782,7 +787,7 @@ rm -f "$DBUSD/zz-upstream-test.conf"
 # policy, which is the kind of line that sends the next person hunting for why
 # their fix had no effect.
 rm -f "$DBUSD/furios-modem-cellbroadcast.conf"
-out=$(sandbox bash "$ROOT/modemctl" apply --no-restart 2>&1)
+out=$(sandbox "$MODEMCTL" apply --no-restart 2>&1)
 TESTS_RUN=$((TESTS_RUN + 1))
 if echo "$out" | grep -q "Nothing to do"; then
     TESTS_FAILED=$((TESTS_FAILED + 1)); fail "apply called its own work nothing" "$out"
@@ -793,9 +798,9 @@ fi
 # A policy of ours that changed must actually reach a phone that already has
 # the old one - "the file is there" and "the file is right" are not the same
 # question, and the DNS drop-in above answers only the first.
-sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" apply --quiet --no-restart >/dev/null 2>&1
 printf '<!-- stale -->\n' >> "$DBUSD/furios-modem-cellbroadcast.conf"
-out=$(sandbox bash "$ROOT/modemctl" apply --no-restart 2>&1)
+out=$(sandbox "$MODEMCTL" apply --no-restart 2>&1)
 TESTS_RUN=$((TESTS_RUN + 1))
 if cmp -s "$ROOT/dbus/furios-modem-cellbroadcast.conf" "$DBUSD/furios-modem-cellbroadcast.conf"; then
     ok "apply replaces an outdated policy"
@@ -804,8 +809,8 @@ else
 fi
 
 # revert takes back only what is ours.
-sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
-sandbox bash "$ROOT/modemctl" revert --quiet >/dev/null 2>&1
+sandbox "$MODEMCTL" apply --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" revert --quiet >/dev/null 2>&1
 TESTS_RUN=$((TESTS_RUN + 1))
 if [ ! -f "$DBUSD/furios-modem-cellbroadcast.conf" ]; then
     ok "revert removes the bus policy"
@@ -822,7 +827,7 @@ fi
 # unfamiliar block, and an upstream that has fixed it already.
 cbs_verdict() {
     local out
-    out=$(sandbox bash "$ROOT/modemctl" status 2>&1)
+    out=$(sandbox "$MODEMCTL" status 2>&1)
     case "$out" in
         *"level 2 complete"*)            echo applied ;;
         *"missing channel 4372"*)        echo missing ;;
@@ -835,7 +840,7 @@ cbs_verdict() {
 write_cbs_db "$SHIPPED" "$SHIPPED"
 check "the shipped database is called incomplete" missing "$(cbs_verdict)"
 
-sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" apply --quiet --no-restart >/dev/null 2>&1
 check "apply completes EU-Alert level 2" applied "$(cbs_verdict)"
 
 TESTS_RUN=$((TESTS_RUN + 1))
@@ -858,7 +863,7 @@ else
     TESTS_FAILED=$((TESTS_FAILED + 1)); fail "the edit broke the XML"
 fi
 
-out=$(sandbox bash "$ROOT/modemctl" apply --no-restart 2>&1)
+out=$(sandbox "$MODEMCTL" apply --no-restart 2>&1)
 TESTS_RUN=$((TESTS_RUN + 1))
 if echo "$out" | grep -q "already lists 4372"; then
     ok "a second apply leaves the database alone"
@@ -869,22 +874,22 @@ fi
 # An upstream that fixed this itself must not be undone, and must not be
 # re-marked as ours.
 write_cbs_db "$FIXED" "$FIXED"
-sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" apply --quiet --no-restart >/dev/null 2>&1
 check "an upstream fix is left untouched" 0 "$(grep -c 'furios-modem-fixes' "$CBSDB")"
-sandbox bash "$ROOT/modemctl" revert --quiet >/dev/null 2>&1
+sandbox "$MODEMCTL" revert --quiet >/dev/null 2>&1
 check "and revert does not take upstream's fix away" applied "$(cbs_verdict)"
 
 # A block that no longer looks the way this expects is a block to leave alone.
 write_cbs_db '<channels start="4371" end="4378"/>' "$SHIPPED"
 check "an unfamiliar block is not guessed at" unknown "$(cbs_verdict)"
 before=$(md5sum "$CBSDB")
-sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" apply --quiet --no-restart >/dev/null 2>&1
 check "and apply does not touch it" "$before" "$(md5sum "$CBSDB")"
 
 # revert undoes only our own line.
 write_cbs_db "$SHIPPED" "$SHIPPED"
-sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
-sandbox bash "$ROOT/modemctl" revert --quiet >/dev/null 2>&1
+sandbox "$MODEMCTL" apply --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" revert --quiet >/dev/null 2>&1
 check "revert puts the shipped line back" missing "$(cbs_verdict)"
 check "and leaves no marker behind" 0 "$(grep -c 'furios-modem-fixes' "$CBSDB")"
 
@@ -919,57 +924,57 @@ rm -f "$PROFILEF" "$DBUSD"/furios-modem-cellbroadcast.conf
 write_cbs_db "$SHIPPED" "$SHIPPED"
 reset_tree original 1.4
 check "with no file recorded, nothing is chosen - the repairs are off" "recorded: shipped" \
-      "$(sandbox bash "$ROOT/modemctl" profile | head -1)"
+      "$(sandbox "$MODEMCTL" profile | head -1)"
 
 # boot is what the unit and the hook run. After an installation everything is
 # off until somebody switches it on, so with nothing recorded it adds nothing.
-sandbox bash "$ROOT/modemctl" boot --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" boot --quiet --no-restart >/dev/null 2>&1
 check "and boot leaves them out" shipped \
-      "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+      "$(sandbox "$MODEMCTL" profile | sed -n 's/^actual: *//p')"
 check "adopt on an untouched phone records nothing" no \
-      "$(sandbox bash "$ROOT/modemctl" adopt >/dev/null 2>&1; [ -f "$PROFILEF" ] && echo yes || echo no)"
+      "$(sandbox "$MODEMCTL" adopt >/dev/null 2>&1; [ -f "$PROFILEF" ] && echo yes || echo no)"
 
 # try: switch now, record nothing.
-sandbox bash "$ROOT/modemctl" try fixed --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" try fixed --quiet --no-restart >/dev/null 2>&1
 check "try fixed puts them in" fixed \
-      "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+      "$(sandbox "$MODEMCTL" profile | sed -n 's/^actual: *//p')"
 check "and records nothing" no \
       "$([ -f "$PROFILEF" ] && echo yes || echo no)"
-sandbox bash "$ROOT/modemctl" boot --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" boot --quiet --no-restart >/dev/null 2>&1
 check "so the next boot takes them out again" shipped \
-      "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+      "$(sandbox "$MODEMCTL" profile | sed -n 's/^actual: *//p')"
 
 # A phone an earlier version switched on by itself: repairs in, no file. The
 # installers adopt that as "fixed" - otherwise the first boot after the update
 # would take away what the phone has been relying on.
-sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
-sandbox bash "$ROOT/modemctl" adopt >/dev/null 2>&1
+sandbox "$MODEMCTL" apply --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" adopt >/dev/null 2>&1
 check "adopt records a phone that already runs the repairs" fixed "$(cat "$PROFILEF" 2>/dev/null)"
-sandbox bash "$ROOT/modemctl" boot --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" boot --quiet --no-restart >/dev/null 2>&1
 check "and boot keeps them" fixed \
-      "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+      "$(sandbox "$MODEMCTL" profile | sed -n 's/^actual: *//p')"
 printf 'shipped\n' > "$PROFILEF"
-sandbox bash "$ROOT/modemctl" adopt >/dev/null 2>&1
+sandbox "$MODEMCTL" adopt >/dev/null 2>&1
 check "adopt never overrides a recorded choice" shipped "$(cat "$PROFILEF" 2>/dev/null)"
 rm -f "$PROFILEF"
 
 # set: switch now, and mean it.
-sandbox bash "$ROOT/modemctl" set shipped --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" set shipped --quiet --no-restart >/dev/null 2>&1
 check "set shipped takes them out too" shipped \
-      "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+      "$(sandbox "$MODEMCTL" profile | sed -n 's/^actual: *//p')"
 check "and records the choice" shipped "$(cat "$PROFILEF" 2>/dev/null)"
-sandbox bash "$ROOT/modemctl" boot --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" boot --quiet --no-restart >/dev/null 2>&1
 check "and the next boot leaves them out" shipped \
-      "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+      "$(sandbox "$MODEMCTL" profile | sed -n 's/^actual: *//p')"
 # The apt hook runs the same verb after every package operation. A recorded
 # "shipped" that an ofono2mm update quietly undid would be the worst of both.
-sandbox bash "$ROOT/modemctl" boot --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" boot --quiet --no-restart >/dev/null 2>&1
 check "and so does the apt hook, however often it runs" shipped \
-      "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+      "$(sandbox "$MODEMCTL" profile | sed -n 's/^actual: *//p')"
 
-sandbox bash "$ROOT/modemctl" set fixed --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" set fixed --quiet --no-restart >/dev/null 2>&1
 check "set fixed puts them back" fixed \
-      "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+      "$(sandbox "$MODEMCTL" profile | sed -n 's/^actual: *//p')"
 check "and records that" fixed "$(cat "$PROFILEF" 2>/dev/null)"
 
 # The watchers are half of the profile. "try shipped" used to revert every
@@ -992,31 +997,31 @@ watch_calls() {
 }
 
 rm -f "$WATCH_REC"
-sandbox bash "$ROOT/modemctl" try shipped --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" try shipped --quiet --no-restart >/dev/null 2>&1
 check "try shipped stops both watchers, for now" "stop stop" "$(watch_calls)"
 check "and takes their mark away" no "$([ -e "$WATCHMARK" ] && echo yes || echo no)"
 rm -f "$WATCH_REC"
-sandbox bash "$ROOT/modemctl" try fixed --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" try fixed --quiet --no-restart >/dev/null 2>&1
 check "try fixed starts them again, for now" "start start" "$(watch_calls)"
 check "and gives them their mark" yes "$([ -e "$WATCHMARK" ] && echo yes || echo no)"
 check "and try leaves the recorded profile alone" fixed "$(cat "$PROFILEF" 2>/dev/null)"
 rm -f "$WATCH_REC"
-sandbox bash "$ROOT/modemctl" set fixed --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" set fixed --quiet --no-restart >/dev/null 2>&1
 check "set fixed starts them, and enables nothing" "start start" "$(watch_calls)"
 rm -f "$WATCH_REC"
-sandbox bash "$ROOT/modemctl" set shipped --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" set shipped --quiet --no-restart >/dev/null 2>&1
 check "set shipped stops them, and disables nothing" "stop stop" "$(watch_calls)"
 rm -f "$WATCH_REC"
 # boot turns the recorded profile into the mark - the only thing that decides
 # whether they run after a reboot. It starts nothing itself.
 rm -f "$WATCHMARK"; printf 'fixed\n' > "$PROFILEF"
-sandbox bash "$ROOT/modemctl" boot --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" boot --quiet --no-restart >/dev/null 2>&1
 check "boot on a fixed phone writes the mark" yes "$([ -e "$WATCHMARK" ] && echo yes || echo no)"
 check "and starts nothing itself" "" "$(watch_calls)"
 printf 'shipped\n' > "$PROFILEF"
-sandbox bash "$ROOT/modemctl" boot --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" boot --quiet --no-restart >/dev/null 2>&1
 check "boot on a shipped phone takes it away" no "$([ -e "$WATCHMARK" ] && echo yes || echo no)"
-sandbox bash "$ROOT/modemctl" set fixed --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" set fixed --quiet --no-restart >/dev/null 2>&1
 rm -f "$WATCH_REC"
 
 printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/systemctl"
@@ -1025,18 +1030,18 @@ printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/systemctl"
 # than doing nothing, in both directions.
 printf 'sideways\n' > "$PROFILEF"
 check "an unreadable profile is not guessed at" "recorded: unknown" \
-      "$(sandbox bash "$ROOT/modemctl" profile 2>/dev/null | head -1)"
-before_state=$(sandbox bash "$ROOT/modemctl" profile 2>/dev/null | sed -n 's/^actual: *//p')
-sandbox bash "$ROOT/modemctl" boot --quiet --no-restart >/dev/null 2>&1
+      "$(sandbox "$MODEMCTL" profile 2>/dev/null | head -1)"
+before_state=$(sandbox "$MODEMCTL" profile 2>/dev/null | sed -n 's/^actual: *//p')
+sandbox "$MODEMCTL" boot --quiet --no-restart >/dev/null 2>&1
 check "and boot leaves the phone exactly as it found it" "$before_state" \
-      "$(sandbox bash "$ROOT/modemctl" profile 2>/dev/null | sed -n 's/^actual: *//p')"
+      "$(sandbox "$MODEMCTL" profile 2>/dev/null | sed -n 's/^actual: *//p')"
 
 # Half is a real state - a patch that no longer fits, an update caught in the
 # middle - and calling it either name would be wrong in both directions.
 printf 'fixed\n' > "$PROFILEF"
 cp "$ROOT/original-files/mm_modem.py" "$(tree_path mm_modem)"
 check "half applied is called half applied" mixed \
-      "$(sandbox bash "$ROOT/modemctl" profile | sed -n 's/^actual: *//p')"
+      "$(sandbox "$MODEMCTL" profile | sed -n 's/^actual: *//p')"
 
 rm -f "$PROFILEF"
 
@@ -1045,7 +1050,7 @@ rm -f "$PROFILEF"
 # repositories - and a contract only one side checks is a hope. The other half
 # asserts that the app parses exactly these two; this half asserts that they
 # are what gets printed.
-out=$(sandbox bash "$ROOT/modemctl" profile 2>/dev/null)
+out=$(sandbox "$MODEMCTL" profile 2>/dev/null)
 check "profile names the recorded state in a word the app knows" 1 \
       "$(printf '%s\n' "$out" | grep -c '^recorded:')"
 check "and the running one" 1 \
@@ -1076,7 +1081,7 @@ printf '\n\033[1m== a no-op is a no-op\033[0m\n'
 # takes the bus policy away, and a run that puts it back is right to say it
 # did. What has to hold is that the SECOND run of two changes nothing.
 reset_tree patched 1.4
-sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" apply --quiet --no-restart >/dev/null 2>&1
 for n in 1 2 3 4 5; do
     cp "$TREE/mm_modem.py" "$TREE/mm_modem.py.bak.2026090$n-120000"
 done
@@ -1087,7 +1092,7 @@ snapshot() {
 before=$(snapshot)
 backups_before=$(find "$WORK/usr" -name '*.bak.*' 2>/dev/null | wc -l)
 
-out=$(sandbox bash "$ROOT/modemctl" apply --no-restart 2>&1)
+out=$(sandbox "$MODEMCTL" apply --no-restart 2>&1)
 check "a second apply reports no patch work" 6 \
       "$(printf '%s\n' "$out" | grep -c 'already patched')"
 check "and changes no file at all" "$before" "$(snapshot)"
@@ -1099,7 +1104,7 @@ check "and deletes none of the 5 backups" "$backups_before" \
 # itself - here when our copy has to be made again.
 cp "$ROOT/original-files/mm_modem.py" "$TREE/mm_modem.py"
 cp "$ROOT/original-files/mm_modem.py" "$TREE/mm_modem.py.bak.20260906-120000"
-sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+sandbox "$MODEMCTL" apply --quiet --no-restart >/dev/null 2>&1
 check "a run that patches takes no backup, and drops the shipped copy" "$backups_before" \
       "$(find "$WORK/usr" -name '*.bak.*' 2>/dev/null | wc -l)"
 check "and our copy is back" yes \
@@ -1174,11 +1179,10 @@ settle_stubs() {
 settle_run() {
     # With no MODEMCTL_* in the environment, because these runs claim to be
     # root and root refuses to honour them - on purpose, as root they would be
-    # an arbitrary-file patch. settle touches no file of ours anyway.
-    PATH="$SETTLEBIN:$PATH" env -u MODEMCTL_DBUS_CONF_D -u MODEMCTL_CBS_DB -u MODEMCTL_NM_CONF_D \
-        -u MODEMCTL_RESOLV -u MODEMCTL_NM_RESOLV -u MODEMCTL_ORIGINAL \
-        -u MODEMCTL_MTK_PLUGIN -u MODEMCTL_MTK_BUILD -u MODEMCTL_DIVERT -u MODEMCTL_DPKG_INFO \
-        bash "$ROOT/modemctl" settle 2>&1
+    # an arbitrary-file patch. settle touches no file of ours anyway, and
+    # systemctl, journalctl and nmcli are all stand-ins here.
+    PATH="$SETTLEBIN:$PATH" unsandboxed "settle plays root, and root refuses every override" \
+        "$MODEMCTL" settle 2>&1
 }
 shell_was_killed() {
     grep -q -- 'kill --signal=KILL mobi.phosh.Shell.service' "$SETTLE_REC" 2>/dev/null \
@@ -1425,7 +1429,7 @@ order_state() {
     out=$(env PATH="$STUB:$PATH" \
               MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
               MODEMCTL_SYSTEMD_CONF_D="$1" \
-              bash "$ROOT/modemctl" status 2>&1)
+              "$MODEMCTL" status 2>&1)
     case "$out" in
         *"started when its bus name is up"*)  echo applied ;;
         *"is Type=simple"*)                   echo missing ;;
@@ -1479,7 +1483,7 @@ check "a systemctl that answers nothing is not a failure" unknown \
 status_out=$(env PATH="$STUB:$PATH" \
                  MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
                  MODEMCTL_SYSTEMD_CONF_D="$SYSD" \
-                 bash "$ROOT/modemctl" status 2>&1)
+                 "$MODEMCTL" status 2>&1)
 check "an unreadable shell start time is not read as midnight" yes \
       "$(printf '%s\n' "$status_out" | grep -q 'AFTER .* started' && echo no || echo yes)"
 check "and status says it cannot tell" yes \
@@ -1506,7 +1510,7 @@ check "and it does not restart anything to do it" yes \
 rm -rf "$SYSD/ModemManager.service.d"
 env PATH="$STUB:$PATH" MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
     MODEMCTL_SYSTEMD_CONF_D="$SYSD" MODEMCTL_SHARE="$ROOT" \
-    bash "$ROOT/modemctl" apply -q >/dev/null 2>&1
+    "$MODEMCTL" apply -q >/dev/null 2>&1
 check "apply installs the drop-in" yes \
       "$([ -f "$SYSD/ModemManager.service.d/$DROPIN" ] && echo yes || echo no)"
 
@@ -1516,14 +1520,14 @@ check "apply installs the drop-in" yes \
 : > "$SYSD/ModemManager.service.d/50-furios-after-ofono.conf"
 env PATH="$STUB:$PATH" MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
     MODEMCTL_SYSTEMD_CONF_D="$SYSD" MODEMCTL_SHARE="$ROOT" \
-    bash "$ROOT/modemctl" apply -q >/dev/null 2>&1
+    "$MODEMCTL" apply -q >/dev/null 2>&1
 check "apply takes the defect 20 drop-in back out" yes \
       "$([ -f "$SYSD/ModemManager.service.d/50-furios-after-ofono.conf" ] \
          && echo no || echo yes)"
 
 env PATH="$STUB:$PATH" MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
     MODEMCTL_SYSTEMD_CONF_D="$SYSD" MODEMCTL_SHARE="$ROOT" \
-    bash "$ROOT/modemctl" revert -q >/dev/null 2>&1
+    "$MODEMCTL" revert -q >/dev/null 2>&1
 check "revert takes it away again" yes \
       "$([ -f "$SYSD/ModemManager.service.d/$DROPIN" ] && echo no || echo yes)"
 
@@ -1532,12 +1536,12 @@ check "revert takes it away again" yes \
 # that is a restart loop - so the drop-in has to go with the patch.
 env PATH="$STUB:$PATH" MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
     MODEMCTL_SYSTEMD_CONF_D="$SYSD" MODEMCTL_SHARE="$ROOT" \
-    bash "$ROOT/modemctl" apply -q >/dev/null 2>&1
+    "$MODEMCTL" apply -q >/dev/null 2>&1
 # Diverted, an update lands on the .distrib.
 printf '# an ofono2mm our patch does not fit\n' > "$(tree_path main).distrib"
 env PATH="$STUB:$PATH" MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
     MODEMCTL_SYSTEMD_CONF_D="$SYSD" MODEMCTL_SHARE="$ROOT" \
-    bash "$ROOT/modemctl" apply -q >/dev/null 2>&1
+    "$MODEMCTL" apply -q >/dev/null 2>&1
 check "a main.py the patch no longer fits takes the drop-in out" yes \
       "$([ -f "$SYSD/ModemManager.service.d/$DROPIN" ] && echo no || echo yes)"
 
@@ -1555,15 +1559,15 @@ rm -f "$NMD"/*.conf "$RC" "$RC".bak.*
 ln -sfn "$STUBRESOLV" "$RC.bak.20260913-130601"; touch -h -d '2026-09-13 13:06' "$RC.bak.20260913-130601"
 ln -sfn "$NMRESOLV"   "$RC.bak.20260914-200006"; touch -h -d '2026-09-14 20:00' "$RC.bak.20260914-200006"
 ln -sfn "$NMRESOLV" "$RC"
-sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-dns" bash "$ROOT/modemctl" revert --quiet >/dev/null 2>&1
+sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-dns" "$MODEMCTL" revert --quiet >/dev/null 2>&1
 check "revert skips a backup of our own link" "$STUBRESOLV" "$(readlink -f "$RC")"
 
 # And apply no longer takes such a backup: link already ours, drop-in missing.
 rm -f "$RC".bak.*
 ln -sfn "$NMRESOLV" "$RC"
-sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-dns" bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-dns" "$MODEMCTL" apply --quiet --no-restart >/dev/null 2>&1
 check "apply does not back up our own link" 0 "$(ls -1d "$RC".bak.* 2>/dev/null | wc -l)"
-sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-dns" bash "$ROOT/modemctl" revert --quiet >/dev/null 2>&1
+sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-dns" "$MODEMCTL" revert --quiet >/dev/null 2>&1
 
 # --- behind pkexec, only the app's switches ----------------------------------
 #
@@ -1576,7 +1580,7 @@ sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-dns" bash "$ROOT/modemctl" revert --
 pk_refused() {
     # pk_refused <args...>: "yes" when modemctl turned the call away at the door
     local out rc
-    out=$(PKEXEC_UID=1000 bash "$ROOT/modemctl" "$@" 2>&1); rc=$?
+    out=$(PKEXEC_UID=1000 "$MODEMCTL" "$@" 2>&1); rc=$?
     if [ "$rc" = 4 ] && printf '%s' "$out" | grep -q 'through pkexec'; then
         echo yes
     else
@@ -1593,7 +1597,7 @@ for argv in "revert" "apply" "status" "boot" "adopt" "settle" "mtk-build" \
 done
 # An empty PKEXEC_UID is no pkexec at all; the guard must not fire on it.
 check "an empty PKEXEC_UID is not pkexec" no \
-      "$(PKEXEC_UID= bash "$ROOT/modemctl" help >/dev/null 2>&1; [ $? = 4 ] && echo yes || echo no)"
+      "$(PKEXEC_UID= "$MODEMCTL" help >/dev/null 2>&1; [ $? = 4 ] && echo yes || echo no)"
 
 # The app's own calls go through. Pointed at directories nobody can write, they
 # fail further in - which shows they got past the door without changing anything.
@@ -1610,12 +1614,12 @@ done
 # pkexec records the choice and changes nothing else, so nothing restarts.
 reset_tree original 1.4
 mkdir -p "$WORK/sysd-pk"
-sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-pk" bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-pk" "$MODEMCTL" apply --quiet --no-restart >/dev/null 2>&1
 rm -f "$PROFILEF"
 check "pkexec set fixed runs to the end" 0 \
       "$(sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-pk" PKEXEC_UID=1000 \
-         bash "$ROOT/modemctl" set fixed >/dev/null 2>&1; echo $?)"
+         "$MODEMCTL" set fixed >/dev/null 2>&1; echo $?)"
 check "and records the profile" fixed "$(cat "$PROFILEF" 2>/dev/null)"
-sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-pk" bash "$ROOT/modemctl" revert --quiet --no-restart >/dev/null 2>&1
+sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-pk" "$MODEMCTL" revert --quiet --no-restart >/dev/null 2>&1
 
 summary

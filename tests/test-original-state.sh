@@ -77,6 +77,8 @@ chmod +x "$BIN"/*
 
 # The ofono2mm files are diverted; never in this machine's dpkg database.
 make_divert_stub "$BIN/dpkg-divert" "$W/diversions"
+# Every other override into the sandbox too (tests/lib.sh); mc sets its own.
+modemctl_sandbox "$W/sandbox"
 
 TREE="$W/usr/lib/ofono2mm/ofono2mm"
 RADIO="$W/etc/ofono/binder.d/radio-interface-binder.conf"
@@ -102,7 +104,7 @@ mc() {
         MODEMCTL_MTK_PLUGIN="$W/no-mtk/mtkbinderpluginext.so" MODEMCTL_MTK_BUILD="$W/mtk-build" \
         MODEMCTL_DIVERT="$BIN/dpkg-divert" MODEMCTL_DPKG_INFO="$W/dpkg-info" \
         NR_OFF_SECONDS=0 NR_REG_WAIT=1 \
-        bash "$ROOT/modemctl" "$@"
+        "$MODEMCTL" "$@"
 }
 
 # What the distribution ships for the alert database: de subscribes to EU-Alert
