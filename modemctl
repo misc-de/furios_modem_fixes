@@ -12,6 +12,22 @@
 # idempotent and safe to run from a boot unit and from an apt hook, and it
 # refuses to touch a file whose patch no longer fits rather than mangling it.
 set -u
+# pipefail: a pipe is as good as its worst member, not its last. Without it,
+# "dbus-send | grep" says nothing about whether oFono answered, and a pipe
+# whose status decides something hides every failure but the last one's.
+# Every pipe whose status is used was looked at for the opposite mistake: a
+# reader that stops early ("grep -q", "head") kills the writer with SIGPIPE,
+# and under pipefail that turns a match into a failure. Those read whole
+# replies from a variable, or end in a reader that reads everything.
+#
+# Not set -e, on purpose. Half of this script asks questions whose "no" is an
+# answer, not an error: "cbs_record; case $? in", "ofono2mm_migrate; case $?",
+# "nr_reregister; [ $? -eq 1 ]", and assignments like "cur=$(nr_pref_now)"
+# or "rec=$(orig_value ...)" whose substitution may fail by design. Under
+# set -e each of those ends the script on the spot - a boot unit that stops
+# halfway through apply, between a diversion and the file that belongs in
+# it. Errors are handled where they happen, and the tests hold each path.
+set -o pipefail
 
 # Every tool whose output is read here answers in one language: nmcli says
 # "verbunden" instead of "connected", even with -t, on a system that has its
@@ -622,8 +638,13 @@ cellbroadcast_state() {
     if [ -f "$DBUS_CONF_D/$CB_DROPIN" ] && grep -q "$CB_IFACE" "$DBUS_CONF_D/$CB_DROPIN"; then
         echo applied; return
     fi
-    if grep -rl "$CB_IFACE" /usr/share/dbus-1/system.d "$DBUS_CONF_D" 2>/dev/null \
-        | grep -qv "/$CB_DROPIN\$"; then
+    # The list first, then the question. As one pipe, grep -rl fails (2)
+    # whenever one of the two directories is missing - found or not - and
+    # dies of SIGPIPE when grep -q stops reading at the first hit; under
+    # pipefail either made an upstream allow read as "missing".
+    local hits
+    hits=$(grep -rl "$CB_IFACE" /usr/share/dbus-1/system.d "$DBUS_CONF_D" 2>/dev/null)
+    if [ -n "$hits" ] && grep -qv "/$CB_DROPIN\$" <<<"$hits"; then
         echo covered; return
     fi
     echo missing
@@ -713,7 +734,10 @@ call_in_progress() {
     modem=$(modem_path) || return 1
     calls=$(timeout 5 dbus-send --system --print-reply --dest=org.ofono "$modem" \
         org.ofono.VoiceCallManager.GetCalls 2>/dev/null) || return 1
-    printf '%s' "$calls" | grep -q 'object path'
+    # A here-string, not a pipe: grep -q stops at the first call, and the
+    # printf feeding it would die of SIGPIPE - under pipefail "no call", and
+    # the modem stack restarted under somebody's call.
+    grep -q 'object path' <<<"$calls"
 }
 
 # --- SIM slot ---------------------------------------------------------------
@@ -898,9 +922,12 @@ cbs_topics() {
     local reply
     reply=$(timeout 5 dbus-send --system --print-reply --dest=org.ofono "$1" \
         org.ofono.CellBroadcast.GetProperties 2>/dev/null) || return 1
-    printf '%s\n' "$reply" | grep -q '"Topics"' || return 1
-    printf '%s\n' "$reply" | grep -A1 '"Topics"' \
+    grep -q '"Topics"' <<<"$reply" || return 1
+    # The list, which may be empty - success either way: head stopping
+    # early must not read as "could not ask" (pipefail).
+    grep -A1 '"Topics"' <<<"$reply" \
         | sed -n 's/.*variant *string "\(.*\)".*/\1/p' | head -1
+    return 0
 }
 
 cbs_is_ours() {
@@ -1089,6 +1116,17 @@ sim_conf_render() {
     ' "$RADIO_CONF"
 }
 
+# Whether oFono says the SIM in <modem> is there. The reply is read whole
+# first, and the last grep reads everything: "| grep -q" stops at the first
+# match, the writer it leaves behind dies of SIGPIPE, and under pipefail a
+# card that is there would read as one that is not.
+ofono_sim_present() {
+    local reply
+    reply=$(timeout 5 dbus-send --system --print-reply --dest=org.ofono "$1" \
+        org.ofono.SimManager.GetProperties 2>/dev/null)
+    grep -A1 '"Present"' <<<"$reply" | grep 'boolean true' >/dev/null
+}
+
 # Restart oFono on the new slot and bring everything above it along. oFono
 # comes back offline after a restart and nothing puts it online by itself;
 # ModemManager (which is ofono2mm) and NetworkManager keep what they knew of
@@ -1107,9 +1145,7 @@ sim_restart_stack() {
         sleep 2
         MODEM_PATH=
         modem=$(modem_path) || continue
-        timeout 5 dbus-send --system --print-reply --dest=org.ofono "$modem" \
-            org.ofono.SimManager.GetProperties 2>/dev/null \
-            | grep -A1 '"Present"' | grep -q 'boolean true' && { present=true; break; }
+        ofono_sim_present "$modem" && { present=true; break; }
     done
     if [ "$present" = true ]; then
         if timeout 10 dbus-send --system --print-reply --dest=org.ofono "$modem" \
@@ -1164,7 +1200,7 @@ sim_conf_set() {
             # Before us there was no such file, so slot 1 is no file - but
             # only one that still says it is ours. A hand-edited one is its
             # editor's, and deleting it would be deciding for them.
-            if ! head -1 "$SIM_DROPIN" 2>/dev/null | grep -q '^# Written by modemctl sim'; then
+            if ! sed -n 1p "$SIM_DROPIN" 2>/dev/null | grep '^# Written by modemctl sim' >/dev/null; then
                 bad "$SIM_DROPIN was not written by modemctl - leaving it alone"
                 return 1
             fi
@@ -1308,6 +1344,10 @@ clients_that_lost_modemmanager() {
         | sed -E 's/\[[0-9]+\]:?$//; s/:$//' \
         | grep -E '^[A-Za-z][A-Za-z0-9._-]*$' \
         | sort -u
+    # Nobody in the journal is the healthy answer, and grep says it with 1.
+    # Under pipefail that was "cannot read the journal" on every good phone;
+    # a journal that really cannot be read has returned 2 above.
+    return 0
 }
 
 # When the shell that is running now started, in seconds since the epoch. A
@@ -2279,9 +2319,7 @@ cmd_sim_check() {
     [ "$slot" = 1 ] && return 0
     for i in $(seq 1 $(( SIM_CHECK_WAIT / 3 ))); do
         MODEM_PATH=
-        if modem=$(modem_path) && timeout 5 dbus-send --system --print-reply \
-               --dest=org.ofono "$modem" org.ofono.SimManager.GetProperties 2>/dev/null \
-               | grep -A1 '"Present"' | grep -q 'boolean true'; then
+        if modem=$(modem_path) && ofono_sim_present "$modem"; then
             say "SIM slot $slot has a card - nothing to do"
             return 0
         fi
@@ -2429,11 +2467,12 @@ nr_pref() {
 }
 
 nr_registered() {
-    local modem
+    local modem reply
     modem=$(modem_path) || return 1
-    timeout 5 dbus-send --system --print-reply --dest=org.ofono "$modem" \
-        org.ofono.NetworkRegistration.GetProperties 2>/dev/null \
-        | grep -A1 '"Status"' | grep -qE '"(registered|roaming)"'
+    # Read whole, then asked: see ofono_sim_present.
+    reply=$(timeout 5 dbus-send --system --print-reply --dest=org.ofono "$modem" \
+        org.ofono.NetworkRegistration.GetProperties 2>/dev/null)
+    grep -A1 '"Status"' <<<"$reply" | grep -E '"(registered|roaming)"' >/dev/null
 }
 
 # Radio off and on again, the way flight mode does it, so the network hears
