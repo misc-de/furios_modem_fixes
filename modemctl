@@ -6,7 +6,8 @@
 # whether they are working.
 #
 # Most of them live in files that belong to the ofono2mm package, so every
-# update of that package wipes them. Two do not: the oFono binder config, and
+# update of that package outdates them (they are diverted: the update lands
+# beside ours as .distrib, and ours has to be made again). Two do not: the oFono binder config, and
 # the DNS wiring that decides whether a name resolves once Wi-Fi is off. That is the whole reason this exists: apply is
 # idempotent and safe to run from a boot unit and from an apt hook, and it
 # refuses to touch a file whose patch no longer fits rather than mangling it.
@@ -26,7 +27,7 @@ if [ "$(id -u)" -eq 0 ]; then
              MODEMCTL_DBUS_CONF_D MODEMCTL_CBS_DB MODEMCTL_PROFILE \
              MODEMCTL_SYSTEMD_CONF_D MODEMCTL_SHELL_SYSTEM_UNIT MODEMCTL_SIM MODEMCTL_SIM_NAMES MODEMCTL_SIM_LOCK MODEMCTL_SIM_DROPIN MODEMCTL_NR MODEMCTL_NRPROBE \
              MODEMCTL_ORIGINAL MODEMCTL_MTK_PLUGIN MODEMCTL_MTK_BUILD MODEMCTL_DIVERT \
-             MODEMCTL_WATCH_MARK; do
+             MODEMCTL_WATCH_MARK MODEMCTL_DPKG_INFO; do
         if [ -n "${!v:-}" ]; then
             echo "refusing to honour $v as root - that would be an arbitrary-file patch" >&2
             exit 3
@@ -46,6 +47,21 @@ RADIO_CONF=${MODEMCTL_RADIO_CONF:-/etc/ofono/binder.d/radio-interface-binder.con
 # interfaces), 1.4 comes up in ten seconds with twenty-six.
 RADIO_INTERFACE_WANTED=1.4
 FILES="utils mm_bearer mm_modem mm_modem_simple mm_modem_signal main"
+# The six files are ofono2mm's, and they used to be patched where they lie.
+# dpkg then saw its own files changed for as long as the repairs were on -
+# "dpkg -V ofono2mm" never came back clean - and every apply left a .bak.<time>
+# beside each of them. Now each one is diverted, the way the MTK plugin below
+# is: dpkg keeps the shipped file as <file>.distrib (an update of ofono2mm
+# writes its new version there, not over ours), and at the original path is a
+# copy of ours, made from that .distrib by the patch. dpkg --verify follows
+# the diversion and checks the .distrib, so it stays clean; revert takes the
+# copy away and the diversion with it, which puts the shipped file back
+# exactly. After an update the apt hook makes the copy again from the new
+# .distrib - or, when the patch no longer fits it, puts the shipped file back.
+# dpkg's checksums of the package's files, to make sure a file patched in
+# place by an older version comes back to exactly the shipped bytes before it
+# is handed to dpkg as the shipped one.
+DPKG_INFO=${MODEMCTL_DPKG_INFO:-/var/lib/dpkg/info}
 
 # The DNS half of defect 7. Both halves are needed: the drop-in stops
 # NetworkManager calling the resolvconf that cannot work, and the symlink is
@@ -221,8 +237,8 @@ RAF_NR=$((0x100000))
 # reported, and its record goes too: it no longer describes anything of ours.
 #
 # Root only (0700): one of the keys is the SIM's IMSI. The ofono2mm files are
-# not here - their way back is the reverse patch, byte for byte, and the
-# .bak.* next to them - and neither are the files that are ours by name.
+# not here - their way back is the dpkg diversion, which keeps the shipped
+# file as .distrib - and neither are the files that are ours by name.
 ORIG_DIR=${MODEMCTL_ORIGINAL:-/var/lib/furios-modem-fixes/original}
 
 # The warning channel lists cellbroadcastd ends up handing oFono once our bus
@@ -230,6 +246,10 @@ ORIG_DIR=${MODEMCTL_ORIGINAL:-/var/lib/furios-modem-fixes/original}
 # serviceproviders.xml fix. The same two uninstall-cbs.sh knows. A list that
 # is one of these is ours; any other one was chosen by somebody else.
 CBS_OURS='919,4370-4371,4373-4392,4396-4397 919,4370-4392,4396-4397'
+
+# What apply (and so boot) returns when a patch no longer fits the shipped
+# file. Not 1: the boot unit takes 1 as success, and this must show.
+EXIT_STALE=5
 
 QUIET=0
 NO_RESTART=0
@@ -275,22 +295,185 @@ file_path() {
     esac
 }
 
+# Where the package says the file is, for dpkg's checksum list.
+pkg_path() {
+    case "$1" in
+        main) echo usr/lib/ofono2mm/main.py ;;
+        *)    echo "usr/lib/ofono2mm/ofono2mm/$1.py" ;;
+    esac
+}
+
+# The md5 dpkg has for the shipped file, or nothing when it has none.
+dpkg_md5() {
+    local list="$DPKG_INFO/ofono2mm.md5sums"
+    [ -r "$list" ] || return 0
+    awk -v p="$(pkg_path "$1")" '$2 == p { print $1; exit }' "$list"
+}
+
+# A scratch directory for working out states, made once and private (mktemp
+# -d is 0700 with a name nobody can guess). Only ever read from and written
+# to by this process; nothing in it is moved to a system path - files that
+# replace a system file are made beside it.
+SCRATCH=
+scratch() {
+    [ -n "$SCRATCH" ] && return 0
+    SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/modemctl.XXXXXX") || { SCRATCH=; return 1; }
+    trap 'rm -rf "$SCRATCH"' EXIT
+}
+
+# patch_to <in> <f> <out> [-R]: the file <in> with (or, -R, without) our
+# patch for <f>, written to <out>. One file each, so patch is told the file
+# rather than reading it from the patch header - and never touches <in>.
+patch_to() {
+    local in=$1 f=$2 out=$3; shift 3
+    [ -f "$PATCHES/ofono2mm-$f.patch" ] && [ -f "$in" ] || return 1
+    patch "$@" -s -f -r - -o "$out" "$in" < "$PATCHES/ofono2mm-$f.patch" >/dev/null 2>&1 \
+        && return 0
+    rm -f "$out"
+    return 1
+}
+
+ofono2mm_diverted() {
+    [ "$($DIVERT --truename "$1" 2>/dev/null)" = "$1.distrib" ]
+}
+
 # --- patch state ------------------------------------------------------------
 #
-# Three answers, not two. "Does not apply" is not the same as "already there",
-# and treating them alike is how a half-patched file gets made worse.
-#   applied / missing / stale
+# Not two answers. "Does not apply" is not the same as "already there", and
+# treating them alike is how a half-patched file gets made worse.
+#   applied   diverted, and ours is exactly the patch applied to the .distrib
+#   inplace   patched where it lies, the way versions before 6.10.2026 did it
+#             (counts as applied; apply moves it behind a diversion)
+#   missing   the shipped file, unpatched - or diverted with a copy of ours
+#             that no longer matches the .distrib under it (an update of
+#             ofono2mm, or a patch of ours that changed)
+#   stale     the patch does not fit the shipped file (upstream moved)
+#   absent    no such file at all
 patch_state() {
-    local f=$1 p="$PATCHES/ofono2mm-$1.patch"
-    [ -f "$p" ] || { echo stale; return; }
-    [ -f "$(file_path "$f")" ] || { echo absent; return; }
-    if patch -R -s -f --dry-run -p1 -d "$TARGET/.." < "$p" >/dev/null 2>&1; then
-        echo applied
-    elif patch -s -f --dry-run -p1 -d "$TARGET/.." < "$p" >/dev/null 2>&1; then
+    local f=$1 path
+    path=$(file_path "$f")
+    [ -f "$PATCHES/ofono2mm-$f.patch" ] || { echo stale; return; }
+    scratch || { echo stale; return; }
+    if ofono2mm_diverted "$path"; then
+        [ -f "$path.distrib" ] || { echo absent; return; }
+        patch_to "$path.distrib" "$f" "$SCRATCH/$f.ours" || { echo stale; return; }
+        if cmp -s "$SCRATCH/$f.ours" "$path"; then echo applied; else echo missing; fi
+        return
+    fi
+    [ -f "$path" ] || { echo absent; return; }
+    # In place only when taking the patch out and putting it back gives the
+    # very same file - a reverse patch that merely applies is not proof.
+    if patch_to "$path" "$f" "$SCRATCH/$f.shipped" -R \
+       && patch_to "$SCRATCH/$f.shipped" "$f" "$SCRATCH/$f.ours" \
+       && cmp -s "$SCRATCH/$f.ours" "$path"; then
+        echo inplace
+    elif patch_to "$path" "$f" "$SCRATCH/$f.ours"; then
         echo missing
     else
         echo stale
     fi
+}
+
+# Ours, in the sense of "the repair is in": applied, or in place.
+patch_in() {
+    case "$(patch_state "$1")" in applied|inplace) return 0 ;; esac
+    return 1
+}
+
+# Our copy at the path, the shipped file as .distrib. Made beside the file and
+# renamed into place, so ofono2mm never imports half of one. Starts from the
+# .distrib when there is one, so after an update of ofono2mm this is also how
+# the copy is made again.
+ofono2mm_install() {
+    local f=$1 path src tmp
+    path=$(file_path "$f")
+    if ofono2mm_diverted "$path"; then src="$path.distrib"; else src="$path"; fi
+    tmp=$(mktemp "$path.furios.XXXXXX") || return 1
+    if ! patch_to "$src" "$f" "$tmp"; then rm -f "$tmp"; return 1; fi
+    { chmod --reference="$src" "$tmp" 2>/dev/null || chmod 644 "$tmp"; }
+    chown --reference="$src" "$tmp" 2>/dev/null || true
+    if ! ofono2mm_diverted "$path"; then
+        $DIVERT --local --rename --divert "$path.distrib" --add "$path" >/dev/null 2>&1 \
+            || { rm -f "$tmp"; return 1; }
+    fi
+    mv -f "$tmp" "$path" && return 0
+    rm -f "$tmp"
+    ofono2mm_undivert "$path"
+    return 1
+}
+
+# The shipped file back at its path, and no diversion. Ours goes aside first
+# - dpkg-divert --rename will not move the .distrib over an existing file -
+# and comes back if dpkg-divert refuses, so a failure never leaves ofono2mm
+# without the file.
+ofono2mm_undivert() {
+    local path=$1 aside="$1.furios-revert"
+    ofono2mm_diverted "$path" || return 0
+    if [ -e "$path" ]; then mv -f "$path" "$aside" || return 1; fi
+    if $DIVERT --local --rename --divert "$path.distrib" --remove "$path" >/dev/null 2>&1; then
+        rm -f "$aside"
+        return 0
+    fi
+    [ -e "$aside" ] && mv -f "$aside" "$path"
+    return 1
+}
+
+# From patched in place to diverted. The shipped bytes come from taking the
+# patch out again, checked against dpkg's own checksum where dpkg has one -
+# what goes to .distrib is what dpkg will verify and what revert will put
+# back, so "nearly" is not good enough: a file that does not come back to
+# dpkg's (somebody else edited it too) stays patched in place, and says so.
+# Otherwise it is the shipped file for a moment, then diverted, and ours is
+# made from the .distrib like any other time.
+OFONO2MM_LEFT=0
+ofono2mm_migrate() {
+    local f=$1 path want tmp
+    path=$(file_path "$f")
+    tmp=$(mktemp "$path.furios.XXXXXX") || return 1
+    patch_to "$path" "$f" "$tmp" -R || { rm -f "$tmp"; return 1; }
+    want=$(dpkg_md5 "$f")
+    if [ -n "$want" ] && [ "$(md5sum < "$tmp" | cut -d' ' -f1)" != "$want" ]; then
+        rm -f "$tmp"
+        return 2
+    fi
+    { chmod --reference="$path" "$tmp" 2>/dev/null || chmod 644 "$tmp"; }
+    chown --reference="$path" "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
+    ofono2mm_install "$f" || return 1
+    ofono2mm_drop_backups "$f"
+    return 0
+}
+
+# The .bak.<time> copies versions before the diversions took at every apply.
+# Each was the shipped file of its day; one that is byte for byte the .distrib
+# is a copy of what dpkg now keeps itself, and goes. Any other is not known to
+# be this version's shipped file and stays - OFONO2MM_LEFT counts them. Only
+# our own names: the directory has other people's .bak files too.
+ofono2mm_drop_backups() {
+    local path b
+    path=$(file_path "$1")
+    OFONO2MM_LEFT=0
+    ofono2mm_diverted "$path" && [ -f "$path.distrib" ] || return 0
+    for b in "$path".bak.[0-9]*-[0-9]*; do
+        [ -f "$b" ] || continue
+        if cmp -s "$b" "$path.distrib"; then
+            rm -f "$b"
+        else
+            OFONO2MM_LEFT=$((OFONO2MM_LEFT + 1))
+        fi
+    done
+    return 0
+}
+
+# Patched in place, put back in place: the version before the diversions.
+ofono2mm_revert_inplace() {
+    local f=$1 path tmp
+    path=$(file_path "$f")
+    tmp=$(mktemp "$path.furios.XXXXXX") || return 1
+    patch_to "$path" "$f" "$tmp" -R || { rm -f "$tmp"; return 1; }
+    { chmod --reference="$path" "$tmp" 2>/dev/null || chmod 644 "$tmp"; }
+    chown --reference="$path" "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
 }
 
 # --- MTK plugin (defect 25) --------------------------------------------------
@@ -478,18 +661,6 @@ cbs_db_edit() {
     return $rc
 }
 
-# Every apply that actually patches something leaves another set of backups
-# behind. They are all copies of the same shipped file, they never get read
-# again once the next one exists, and after a day of testing there were 28 of
-# them. Keep the newest few - enough to walk back from a bad update - and drop
-# the rest.
-#
-# Called from the branch that is about to take a backup, and from nowhere else.
-# It used to run before the state was even known, which made an apply with
-# nothing to do delete files anyway: measured at sixteen backups going to
-# eleven on a run whose own output said "Nothing to do". Everything else here
-# looks before it touches, and a no-op has to be a no-op down to the mtime, or
-# the boot unit and the apt hook are not the harmless things they claim to be.
 # A call in progress is the one moment not to restart the modem stack. The
 # apt hook runs after every package operation, including an unattended upgrade
 # that happens to land while the phone is being used as a phone. The patched
@@ -1222,17 +1393,6 @@ settle_shell() {
     return 0
 }
 
-BACKUPS_KEPT=3
-prune_backups() {
-    local f=$1 old
-    # Runs before the backup is taken, so leave one slot free for it.
-    # Parsing ls is only safe because nothing but root can create a file in
-    # this directory - do not copy this pattern somewhere writable.
-    old=$(ls -1t "$(file_path "$f").bak."* 2>/dev/null | tail -n +"$BACKUPS_KEPT")
-    [ -n "$old" ] && printf '%s\n' "$old" | while IFS= read -r b; do rm -f "$b"; done
-    return 0
-}
-
 # --- profiles ---------------------------------------------------------------
 
 # What the phone is supposed to be. Absent means fixed: that is what every
@@ -1261,7 +1421,7 @@ actual_profile() {
     local f applied=0 total=0
     for f in $FILES; do
         total=$((total + 1))
-        [ "$(patch_state "$f")" = applied ] && applied=$((applied + 1))
+        patch_in "$f" && applied=$((applied + 1))
     done
     # The configuration counts too, but only where it exists to be counted:
     # a phone with no NetworkManager or no alert database is not "half fixed"
@@ -1348,7 +1508,7 @@ cbs_record_before_change() {
 
 cmd_apply() {
     need_write apply
-    local ts restarted_at changed=0 touched=0 failed=0
+    local ts restarted_at changed=0 touched=0 failed=0 stale=0
     ts=$(date +%Y%m%d-%H%M%S)
 
     head_ "ofono2mm"
@@ -1357,15 +1517,46 @@ cmd_apply() {
             applied) skip "$f.py already patched" ;;
             absent)  bad "$f.py not found - is ofono2mm installed?"; failed=1 ;;
             stale)
+                # Diverted, the copy at the path is ours, made from an older
+                # shipped file: an update of ofono2mm has landed under it and
+                # the patch does not fit the new one. Our old code next to
+                # the package's new files is the one thing worse than no
+                # repair, so the shipped file goes back - what the update
+                # would have done on its own before the diversions.
+                if ofono2mm_diverted "$(file_path "$f")"; then
+                    if ofono2mm_undivert "$(file_path "$f")"; then
+                        changed=1
+                        warn "$f.py: shipped file back in place"
+                    else
+                        bad "$f.py: could not put the shipped file back"
+                    fi
+                fi
                 bad "$f.py: patch does not fit (upstream moved)"
                 warn "     ready-made file in $SHARE/patched-files/$f.py - check by hand"
+                stale=1
                 failed=1 ;;
+            inplace)
+                # Patched where it lies, by a version before the diversions:
+                # the same code, so nothing to restart - only dpkg gets its
+                # file back, under .distrib.
+                ofono2mm_migrate "$f"
+                case $? in
+                    0)  touched=1
+                        ok "$f.py moved behind a dpkg diversion (shipped file: $f.py.distrib)"
+                        [ "$OFONO2MM_LEFT" -eq 0 ] || warn "     $OFONO2MM_LEFT older backup(s) beside it are not this version's shipped file - kept" ;;
+                    2)  bad "$f.py: taking the patch out does not give dpkg's file - left patched in place"
+                        failed=1 ;;
+                    *)  bad "$f.py: could not move it behind a diversion - left as it was"
+                        failed=1 ;;
+                esac ;;
             missing)
-                prune_backups "$f"
-                cp -a "$(file_path "$f")" "$(file_path "$f").bak.$ts"
-                if patch -s -f -p1 -d "$TARGET/.." < "$PATCHES/ofono2mm-$f.patch"; then
-                    ok "$f.py patched (backup: $f.py.bak.$ts)"
+                if ofono2mm_install "$f"; then
+                    ok "$f.py patched (shipped file: $f.py.distrib)"
                     changed=1
+                    # A phone whose old package took its patches out on the
+                    # way to this one still has that package's backups.
+                    ofono2mm_drop_backups "$f"
+                    [ "$OFONO2MM_LEFT" -eq 0 ] || warn "     $OFONO2MM_LEFT older backup(s) beside it are not this version's shipped file - kept"
                 else
                     bad "$f.py: patch failed"
                     failed=1
@@ -1409,7 +1600,7 @@ $RADIO_CONF.bak.$ts)"
     # the unit when the name goes - with Restart=always that is a restart
     # loop every second. After an update whose main.py our patch no longer
     # fits, the drop-in goes too and the unit is as shipped.
-    if [ "$(patch_state main)" != applied ] \
+    if ! patch_in main \
        && [ -f "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$ORDER_DROPIN" ]; then
         if rm -f "$SYSTEMD_CONF_D/$ORDER_UNIT.d/$ORDER_DROPIN"; then
             systemctl daemon-reload >/dev/null 2>&1 || true
@@ -1417,7 +1608,7 @@ $RADIO_CONF.bak.$ts)"
             warn "main.py is not patched - start order drop-in removed, $ORDER_UNIT as shipped"
         fi
     fi
-    if [ "$(patch_state main)" != applied ]; then
+    if ! patch_in main; then
         skip "start order left as shipped - main.py is not patched"
     else
     case "$(ordering_state)" in
@@ -1655,6 +1846,12 @@ inc && lvl && /<channels start="4371" end="4371"\/>/ {
         say "Nothing to do - everything is already in place."
     fi
 
+    # A patch that no longer fits is the one failure that needs a person: no
+    # boot and no apt hook will ever make it fit. Its own exit code, so the
+    # boot unit - which counts 1 as success, so that a phone without
+    # NetworkManager or a SIM does not fail its boot - shows it in
+    # "systemctl --failed" (see furios-modem-fixes.service).
+    [ "$stale" -eq 1 ] && return "$EXIT_STALE"
     return $failed
 }
 
@@ -1673,10 +1870,22 @@ cmd_revert() {
     need_write revert
     local restarted_at failed=0
     head_ "ofono2mm"
+    local path
     for f in $FILES; do
+        path=$(file_path "$f")
+        # Diverted is ours whatever the copy holds: the shipped file is the
+        # .distrib, and taking the diversion away puts exactly that back.
+        if ofono2mm_diverted "$path"; then
+            if ofono2mm_undivert "$path"; then
+                ok "$f.py back to the shipped version"
+            else
+                bad "$f.py: could not put the shipped file back"; failed=1
+            fi
+            continue
+        fi
         case "$(patch_state "$f")" in
-            applied)
-                if patch -R -s -f -p1 -d "$TARGET/.." < "$PATCHES/ofono2mm-$f.patch"; then
+            inplace)
+                if ofono2mm_revert_inplace "$f"; then
                     ok "$f.py back to the shipped version"
                 else
                     bad "$f.py: could not revert"; failed=1
@@ -2431,6 +2640,9 @@ cmd_status() {
     for f in $FILES; do
         case "$(patch_state "$f")" in
             applied) ok "$f.py" ;;
+            # Working, and dpkg still sees its own file changed. The next
+            # apply - every boot runs one - moves it behind a diversion.
+            inplace) ok "$f.py (patched in place - the next apply diverts it)" ;;
             missing) bad "$f.py NOT patched"; bad_count=$((bad_count+1)) ;;
             stale)   bad "$f.py patch no longer fits"; bad_count=$((bad_count+1)) ;;
             absent)  bad "$f.py missing"; bad_count=$((bad_count+1)) ;;
@@ -2838,10 +3050,12 @@ Options
       --if-stale           mtk-build: only when a package update outdated
                            the build in place (the apt hook)
 
-The fixes live in files owned by the ofono2mm package, so an update of that
-package removes them. A boot unit and an apt hook run "boot" for you; both do
-nothing when there is nothing to do. "try" is how you look at the phone without
-them for a while: the next boot puts back whatever "set" recorded.
+The fixes live in files owned by the ofono2mm package. They are put in with
+dpkg-divert, so an update of that package lands beside them as .distrib, and
+our copy has to be made again from it. A boot unit and an apt hook run "boot"
+for you; both do nothing when there is nothing to do. "try" is how you look at
+the phone without them for a while: the next boot puts back whatever "set"
+recorded.
 USAGE
 }
 

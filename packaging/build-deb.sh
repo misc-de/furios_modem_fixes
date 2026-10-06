@@ -253,6 +253,21 @@ remove)
     # Also puts back resolv.conf and the warning channel list from what apply
     # recorded before its first change (/var/lib/furios-modem-fixes/original).
     /usr/bin/modemctl revert --quiet || true
+    # The ofono2mm files are diverted. A diversion revert could not take away
+    # would outlive this package: our copy in ofono2mm's place, and nothing
+    # left that knows it is ours. Once more by name, as modemctl does it.
+    for f in /usr/lib/ofono2mm/main.py /usr/lib/ofono2mm/ofono2mm/utils.py \
+             /usr/lib/ofono2mm/ofono2mm/mm_bearer.py /usr/lib/ofono2mm/ofono2mm/mm_modem.py \
+             /usr/lib/ofono2mm/ofono2mm/mm_modem_simple.py \
+             /usr/lib/ofono2mm/ofono2mm/mm_modem_signal.py; do
+        [ "$(dpkg-divert --truename "$f" 2>/dev/null)" = "$f.distrib" ] || continue
+        [ ! -e "$f" ] || mv -f "$f" "$f.furios-revert" || continue
+        if dpkg-divert --local --rename --divert "$f.distrib" --remove "$f" >/dev/null 2>&1; then
+            rm -f "$f.furios-revert"
+        elif [ -e "$f.furios-revert" ]; then
+            mv -f "$f.furios-revert" "$f" || true
+        fi
+    done
     # oFono's config back to slot 1 - the only file of another package the
     # SIM switch writes. The record stays, like the profile, so a reinstall
     # honours it; "sim 1" would delete it, hence the copy.

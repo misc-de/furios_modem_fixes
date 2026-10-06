@@ -12,7 +12,8 @@ all, and emergency alert channels the modem never listens on. Most of the causes
 in one database belonging to a third package.
 
 Ten of the fixes are patches to files owned by the `ofono2mm` package, so
-**every update of that package removes them**. That is why this is more than a
+**every update of that package outdates them** (they sit behind dpkg
+diversions, and the update lands beside them). That is why this is more than a
 patch file: a boot unit and an apt hook put them back, and `modemctl` tells you
 whether they are in place and whether they are working.
 
@@ -51,7 +52,7 @@ behaviour stays, and says that it is guessing.
 
 | change | where | how it goes back |
 |---|---|---|
-| ofono2mm patches | `/usr/lib/ofono2mm/…` (+ `.bak.<time>` beside) | reverse patch, byte for byte; backups go once `dpkg --verify` says shipped |
+| ofono2mm patches | `/usr/lib/ofono2mm/…`, shipped files diverted to `.distrib` (`dpkg -V ofono2mm` stays clean) | ours removed, `dpkg-divert --rename --remove` puts the shipped file back; an update lands on the `.distrib` and the apt hook makes ours again from it, or - when the patch no longer fits - puts the shipped one back and the boot unit fails (exit 5) instead of hiding it. Phones patched in place by older versions are moved over at the next apply; their `.bak.<time>` copies of the shipped file go then |
 | DNS drop-in | `/etc/NetworkManager/conf.d/99-furios-modem-resolvconf.conf` | ours by name, removed |
 | resolv.conf link | `/etc/resolv.conf` | from the record `resolv.conf.path` / `.absent`; only while it still points at NetworkManager |
 | start order drop-in | `/etc/systemd/system/ModemManager.service.d/` | ours by name; the directory only when the record `mm-service-d` says apply made it |

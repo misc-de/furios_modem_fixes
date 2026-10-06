@@ -129,6 +129,23 @@ write_cbs_db "$FIXED" "$FIXED"
 RADIO="$WORK/radio-interface-binder.conf"
 TREE="$WORK/usr/lib/ofono2mm/ofono2mm"
 
+# The ofono2mm files are diverted with dpkg-divert, and that must never reach
+# the dpkg database of the machine running this: a stand-in keeps the list.
+DIVLIST="$WORK/diversions"
+make_divert_stub "$STUBDIR/dpkg-divert" "$DIVLIST"
+export MODEMCTL_DIVERT="$STUBDIR/dpkg-divert"
+# dpkg's checksums of ofono2mm, laid out as dpkg keeps them: what a file
+# patched in place has to come back to before it may become the .distrib.
+DPKGINFO="$WORK/dpkg-info"; mkdir -p "$DPKGINFO"
+for f in $FILES; do
+    case "$f" in
+        main) rel=usr/lib/ofono2mm/main.py ;;
+        *)    rel="usr/lib/ofono2mm/ofono2mm/$f.py" ;;
+    esac
+    printf '%s  %s\n' "$(md5sum < "$ROOT/original-files/$f.py" | cut -d' ' -f1)" "$rel"
+done > "$DPKGINFO/ofono2mm.md5sums"
+export MODEMCTL_DPKG_INFO="$DPKGINFO"
+
 # main.py lives one level above the module directory, the way the package
 # lays it out; modemctl knows that and so must the tree we hand it.
 tree_path() {
@@ -139,8 +156,9 @@ tree_path() {
 }
 
 reset_tree() {
-    # $1: shipped | patched
-    rm -rf "$WORK/usr"; mkdir -p "$TREE"
+    # $1: original | patched - patched is in place, the way every phone that
+    # had the repairs before 6.10.2026 has them
+    rm -rf "$WORK/usr"; mkdir -p "$TREE"; : > "$DIVLIST"
     for f in $FILES; do cp "$ROOT/$1-files/$f.py" "$(tree_path "$f")"; done
     printf 'radioInterface = %s\n' "$2" > "$RADIO"
 }
@@ -311,12 +329,16 @@ check "and status does not fail on it" yes \
     "$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" bash "$ROOT/modemctl" status 2>&1 \
        | grep -q 'radioInterface as FuriLabs set it' && echo yes || echo no)"
 printf 'radioInterface = 1.4\n' > "$RADIO"
-TESTS_RUN=$((TESTS_RUN + 1))
-if ls "$TREE"/mm_modem.py.bak.* >/dev/null 2>&1; then
-    ok "apply keeps a backup"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1)); fail "apply kept no backup"
-fi
+# dpkg's file stays dpkg's: the shipped one waits under .distrib, diverted,
+# and nothing else is left beside it - no .bak.<time> per apply any more.
+for f in $FILES; do
+    check "apply diverts $f.py, the shipped file kept as .distrib" yes \
+          "$(cmp -s "$(tree_path "$f").distrib" "$ROOT/original-files/$f.py" \
+             && grep -q "^$(tree_path "$f") $(tree_path "$f").distrib\$" "$DIVLIST" \
+             && echo yes || echo no)"
+done
+check "apply leaves no backups beside them" 0 \
+      "$(find "$WORK/usr" -name '*.bak.*' | wc -l)"
 
 # Running it again must be a no-op, because a boot unit and an apt hook do
 # exactly that on every boot and every package operation.
@@ -331,16 +353,130 @@ else
     TESTS_FAILED=$((TESTS_FAILED + 1)); fail "second apply was not a no-op" "$out"
 fi
 
-# Backups must not grow without bound - they did, to 28 files in one day.
-for i in 1 2 3 4 5; do
-    touch "$TREE/mm_modem.py.bak.2026010${i}-000000"
-done
-MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
-    bash "$ROOT/modemctl" revert >/dev/null 2>&1
+# A package update with the diversion in place writes the new shipped file
+# to the .distrib, and our copy is now made from an older one. apply makes it
+# again - and when the patch no longer fits the new file, our old code must
+# not stay next to the package's new files: the shipped one goes back.
+printf '# an update of ofono2mm\n' >> "$(tree_path mm_bearer).distrib"
+check "an update under the diversion is noticed" yes \
+      "$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" bash "$ROOT/modemctl" status 2>&1 \
+         | grep -q 'mm_bearer.py NOT patched' && echo yes || echo no)"
 MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
     bash "$ROOT/modemctl" apply --no-restart >/dev/null 2>&1
-kept=$(ls -1 "$TREE"/mm_modem.py.bak.* 2>/dev/null | wc -l)
-check "old backups are pruned" 3 "$kept"
+check "and apply makes our copy again from the new shipped file" yes \
+      "$(cat "$ROOT/patched-files/mm_bearer.py" - <<<'# an update of ofono2mm' \
+         | cmp -s - "$(tree_path mm_bearer)" && echo yes || echo no)"
+python3 - "$(tree_path mm_modem_signal).distrib" <<'PY2'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+s = s.replace("if 'org.ofono.NetworkMonitor' in self.ofono_interfaces:",
+              "if 'org.ofono.NetworkMonitor' in self.ofono_interfaces and self.enabled:")
+s = s.replace("tech = cellinfo.get('Technology', Variant('s', '')).value",
+              "tech = str(cellinfo.get('Technology', Variant('s', '')).value or '')")
+open(p, 'w').write(s)
+PY2
+cp "$(tree_path mm_modem_signal).distrib" "$WORK/new-upstream-signal.py"
+out=$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+      bash "$ROOT/modemctl" apply --no-restart 2>&1); rc=$?
+check "an update the patch no longer fits fails apply with its own code" 5 "$rc"
+check "the new shipped file is put back in place of our old copy" yes \
+      "$(cmp -s "$WORK/new-upstream-signal.py" "$(tree_path mm_modem_signal)" && echo yes || echo no)"
+check "and its diversion is gone" no \
+      "$(grep -q "mm_modem_signal.py " "$DIVLIST" && echo yes || echo no)"
+check "status calls it a failure" yes \
+      "$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" bash "$ROOT/modemctl" status 2>&1 \
+         | grep -q 'mm_modem_signal.py patch no longer fits' && echo yes || echo no)"
+# The boot unit counts 1 as success - a phone without a SIM must not fail its
+# boot - and that is where this used to disappear. 5 must not be in the list.
+check "the boot unit does not count a stale patch as success" yes \
+      "$(grep '^SuccessExitStatus=' "$ROOT/systemd/furios-modem-fixes.service" \
+         | grep -qw 5 && echo no || echo yes)"
+check "and modemctl's stale code is the 5 it is not told about" 5 \
+      "$(sed -n 's/^EXIT_STALE=//p' "$ROOT/modemctl")"
+cp "$ROOT/original-files/mm_modem_signal.py" "$(tree_path mm_modem_signal)"
+
+# --- from in place to diverted ----------------------------------------------
+#
+# Every phone that had the repairs before 6.10.2026 has them patched in place,
+# with a .bak.<time> beside each file from every apply. The next apply - the
+# boot unit runs one - has to move them behind a diversion without the code
+# changing, give dpkg back exactly its file, and drop the backups that are now
+# a copy of what dpkg keeps itself. Anything else beside them is not known to
+# be the shipped file and stays.
+reset_tree patched 1.4
+for f in $FILES; do
+    cp "$ROOT/original-files/$f.py" "$(tree_path "$f").bak.20260930-112011"
+done
+printf 'an older version\n' > "$(tree_path mm_modem).bak.20260901-090000"
+printf 'not ours\n' > "$(tree_path mm_modem).bak"
+check "patched in place counts as fixed" fixed \
+      "$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" MODEMCTL_SHARE="$ROOT" \
+         bash "$ROOT/modemctl" profile 2>/dev/null | sed -n 's/^actual: *//p')"
+before=$(md5sum "$TREE"/*.py "$(tree_path main)" | md5sum)
+out=$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+      bash "$ROOT/modemctl" apply --no-restart 2>&1); rc=$?
+check "the move succeeds" 0 "$rc"
+check "the code ofono2mm runs is the same, byte for byte" "$before" \
+      "$(md5sum "$TREE"/*.py "$(tree_path main)" | md5sum)"
+check "and is not a reason to restart anything" no \
+      "$(printf '%s\n' "$out" | grep -q 'not restarted' && echo yes || echo no)"
+for f in $FILES; do
+    check "$f.py: the .distrib is exactly the shipped file" yes \
+          "$(cmp -s "$(tree_path "$f").distrib" "$ROOT/original-files/$f.py" && echo yes || echo no)"
+done
+check "the backups that are the shipped file are gone" 0 \
+      "$(find "$WORK/usr" -name '*.bak.20260930-112011' | wc -l)"
+check "an older backup is kept, and said" yes \
+      "$([ -f "$(tree_path mm_modem).bak.20260901-090000" ] \
+         && printf '%s\n' "$out" | grep -q '1 older backup' && echo yes || echo no)"
+check "somebody else's .bak is left alone" yes \
+      "$([ -f "$(tree_path mm_modem).bak" ] && echo yes || echo no)"
+rm -f "$(tree_path mm_modem)".bak*
+
+# Taking the patch out of a file somebody else also edited does not give
+# dpkg's file. That one stays in place, patched - better than a .distrib that
+# dpkg calls modified for ever and revert would put back as "shipped".
+reset_tree patched 1.4
+sed -i '1i # a local edit' "$(tree_path utils)"
+out=$(MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+      bash "$ROOT/modemctl" apply --no-restart 2>&1)
+check "a file that does not come back to dpkg's is not diverted" no \
+      "$(grep -q "utils.py " "$DIVLIST" && echo yes || echo no)"
+check "and says why" yes \
+      "$(printf '%s\n' "$out" | grep -q "utils.py: taking the patch out does not give dpkg's file" && echo yes || echo no)"
+check "it stays patched, in place" yes \
+      "$(grep -q '# a local edit' "$(tree_path utils)" && grep -q 'netmask_to_prefix' "$(tree_path utils)" \
+         && echo yes || echo no)"
+check "while the others moved" yes \
+      "$(grep -q "mm_modem.py " "$DIVLIST" && echo yes || echo no)"
+reset_tree patched 1.4
+
+# And the way back from there: no diversion, dpkg's files, nothing beside them.
+MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+    bash "$ROOT/modemctl" apply --no-restart >/dev/null 2>&1
+MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
+    bash "$ROOT/modemctl" revert >/dev/null 2>&1
+for f in $FILES; do
+    check "revert after the move: $f.py is the shipped file" yes \
+          "$(cmp -s "$(tree_path "$f")" "$ROOT/original-files/$f.py" && echo yes || echo no)"
+done
+check "and no diversion is left" "" "$(cat "$DIVLIST")"
+check "and nothing else beside them" "" \
+      "$(find "$WORK/usr" -name '*.distrib' -o -name '*.furios*' -o -name '*.bak*')"
+
+# uninstall.sh and the package's prerm take a diversion revert left behind
+# away by name - every one of the six, or "dpkg -V ofono2mm" is clean while
+# our copy sits in ofono2mm's place with nothing left that knows it is ours.
+for f in $FILES; do
+    case "$f" in main) p=/usr/lib/ofono2mm/main.py ;; *) p="/usr/lib/ofono2mm/ofono2mm/$f.py" ;; esac
+    for script in uninstall.sh packaging/build-deb.sh; do
+        check "$script undoes a leftover diversion of $f.py" yes \
+              "$(sed -n '/for f in \/usr\/lib\/ofono2mm\/main.py/,/done/p' "$ROOT/$script" \
+                 | grep -q -- "$p" && grep -q -- '--rename --divert "$f.distrib" --remove "$f"' "$ROOT/$script" \
+                 && echo yes || echo no)"
+    done
+done
 
 # revert has to put back exactly what the package shipped, or the uninstall
 # path leaves ofono2mm in a state neither side knows about.
@@ -499,9 +635,14 @@ sandbox() {
         "$@"
 }
 
+# The previous release as a phone has it today: patched in place, the way
+# every version before the diversions did it.
 install_old() {
     reset_tree original 1.4
-    sandbox MODEMCTL_PATCHES="$OLDP" bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+    cp "$WORK/old/ofono2mm/mm_modem.py" "$TREE/mm_modem.py"
+    for f in $FILES; do
+        [ "$f" = mm_modem ] || cp "$ROOT/patched-files/$f.py" "$(tree_path "$f")"
+    done
     return 0
 }
 
@@ -542,6 +683,18 @@ if diff -q "$TREE/mm_modem.py" "$ROOT/patched-files/mm_modem.py" >/dev/null; the
 else
     TESTS_FAILED=$((TESTS_FAILED + 1)); fail "the new patch did not land"
 fi
+
+# Diverted, a changed patch needs none of this: the shipped file is right
+# there as the .distrib, and apply simply makes our copy again from it.
+reset_tree original 1.4
+sandbox MODEMCTL_PATCHES="$OLDP" bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+check "the previous release, diverted, is in place" yes \
+      "$(cmp -s "$TREE/mm_modem.py" "$WORK/old/ofono2mm/mm_modem.py" && echo yes || echo no)"
+sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+check "and today's patch replaces it without a revert in between" yes \
+      "$(cmp -s "$TREE/mm_modem.py" "$ROOT/patched-files/mm_modem.py" \
+         && cmp -s "$TREE/mm_modem.py.distrib" "$ROOT/original-files/mm_modem.py" \
+         && echo yes || echo no)"
 
 # The whole point of --patches-only is that it stops there.
 install_old
@@ -929,7 +1082,7 @@ for n in 1 2 3 4 5; do
 done
 
 snapshot() {
-    find "$WORK/usr" "$DBUSD" -type f -printf '%p %T@ %s\n' 2>/dev/null | sort
+    find "$WORK/usr" "$DBUSD" "$DIVLIST" -type f -printf '%p %T@ %s\n' 2>/dev/null | sort
 }
 before=$(snapshot)
 backups_before=$(find "$WORK/usr" -name '*.bak.*' 2>/dev/null | wc -l)
@@ -941,14 +1094,17 @@ check "and changes no file at all" "$before" "$(snapshot)"
 check "and deletes none of the 5 backups" "$backups_before" \
       "$(find "$WORK/usr" -name '*.bak.*' 2>/dev/null | wc -l)"
 
-# And the pruning still happens where it belongs. Same backlog, but this time
-# one file is back to the shipped version, so apply has real work to do - and
-# the backups of THAT file get trimmed while it takes its own.
+# Backups are no longer taken at all, so nothing is pruned by age either.
+# What goes is only a copy of the shipped file, now that dpkg keeps that one
+# itself - here when our copy has to be made again.
 cp "$ROOT/original-files/mm_modem.py" "$TREE/mm_modem.py"
+cp "$ROOT/original-files/mm_modem.py" "$TREE/mm_modem.py.bak.20260906-120000"
 sandbox bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
-kept=$(find "$TREE" -name 'mm_modem.py.bak.*' 2>/dev/null | wc -l)
-check "a run that patches prunes the backlog it is adding to" yes \
-      "$([ "$kept" -le 3 ] && echo yes || echo "no - $kept backups")"
+check "a run that patches takes no backup, and drops the shipped copy" "$backups_before" \
+      "$(find "$WORK/usr" -name '*.bak.*' 2>/dev/null | wc -l)"
+check "and our copy is back" yes \
+      "$(cmp -s "$TREE/mm_modem.py" "$ROOT/patched-files/mm_modem.py" && echo yes || echo no)"
+rm -f "$TREE"/*.bak.*
 
 printf '\n\033[1m== settling what a ModemManager restart knocked over\033[0m\n'
 
@@ -1021,7 +1177,7 @@ settle_run() {
     # an arbitrary-file patch. settle touches no file of ours anyway.
     PATH="$SETTLEBIN:$PATH" env -u MODEMCTL_DBUS_CONF_D -u MODEMCTL_CBS_DB -u MODEMCTL_NM_CONF_D \
         -u MODEMCTL_RESOLV -u MODEMCTL_NM_RESOLV -u MODEMCTL_ORIGINAL \
-        -u MODEMCTL_MTK_PLUGIN -u MODEMCTL_MTK_BUILD \
+        -u MODEMCTL_MTK_PLUGIN -u MODEMCTL_MTK_BUILD -u MODEMCTL_DIVERT -u MODEMCTL_DPKG_INFO \
         bash "$ROOT/modemctl" settle 2>&1
 }
 shell_was_killed() {
@@ -1377,7 +1533,8 @@ check "revert takes it away again" yes \
 env PATH="$STUB:$PATH" MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
     MODEMCTL_SYSTEMD_CONF_D="$SYSD" MODEMCTL_SHARE="$ROOT" \
     bash "$ROOT/modemctl" apply -q >/dev/null 2>&1
-printf '# an ofono2mm our patch does not fit\n' > "$(tree_path main)"
+# Diverted, an update lands on the .distrib.
+printf '# an ofono2mm our patch does not fit\n' > "$(tree_path main).distrib"
 env PATH="$STUB:$PATH" MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" \
     MODEMCTL_SYSTEMD_CONF_D="$SYSD" MODEMCTL_SHARE="$ROOT" \
     bash "$ROOT/modemctl" apply -q >/dev/null 2>&1

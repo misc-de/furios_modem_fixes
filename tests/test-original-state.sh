@@ -75,6 +75,9 @@ STUB
 printf '#!/bin/sh\nexit 0\n' > "$BIN/logger"
 chmod +x "$BIN"/*
 
+# The ofono2mm files are diverted; never in this machine's dpkg database.
+make_divert_stub "$BIN/dpkg-divert" "$W/diversions"
+
 TREE="$W/usr/lib/ofono2mm/ofono2mm"
 RADIO="$W/etc/ofono/binder.d/radio-interface-binder.conf"
 NMD="$W/etc/NetworkManager/conf.d"
@@ -97,6 +100,7 @@ mc() {
         MODEMCTL_SIM="$W/etc/sim" MODEMCTL_SIM_DROPIN="$W/etc/ofono/binder.d/zz-furios-sim.conf" \
         MODEMCTL_SIM_LOCK="$W/sim.lock" MODEMCTL_SIM_NAMES="$W/var/lib/sim-names" \
         MODEMCTL_MTK_PLUGIN="$W/no-mtk/mtkbinderpluginext.so" MODEMCTL_MTK_BUILD="$W/mtk-build" \
+        MODEMCTL_DIVERT="$BIN/dpkg-divert" MODEMCTL_DPKG_INFO="$W/dpkg-info" \
         NR_OFF_SECONDS=0 NR_REG_WAIT=1 \
         bash "$ROOT/modemctl" "$@"
 }
@@ -121,7 +125,7 @@ XML
 
 # A phone as it shipped. resolv.conf is whatever $1 says.
 fresh() {
-    rm -rf "$W/usr" "$W/etc" "$W/run" "$W/var"
+    rm -rf "$W/usr" "$W/etc" "$W/run" "$W/var"; : > "$W/diversions"
     mkdir -p "$TREE" "$(dirname "$RADIO")" "$NMD" "$DBUSD" "$SYSD" \
              "$(dirname "$NMRESOLV")" "$(dirname "$STUBRESOLV")"
     for f in $FILES; do

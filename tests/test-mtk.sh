@@ -17,37 +17,9 @@ ROOT=$(dirname "$HERE")
 
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 BIN="$WORK/bin"; mkdir -p "$BIN" "$WORK/plugins"
-LIST="$WORK/diversions"; : > "$LIST"
+LIST="$WORK/diversions"
 
-# --truename, and --add/--remove with --rename, the way modemctl calls them.
-cat > "$BIN/dpkg-divert" <<STUB
-#!/bin/bash
-list="$LIST"; op=; to=; path=
-while [ \$# -gt 0 ]; do
-    case "\$1" in
-        --truename) op=truename ;;
-        --add) op=add ;;
-        --remove) op=remove ;;
-        --divert) to=\$2; shift ;;
-        --local|--rename) ;;
-        *) path=\$1 ;;
-    esac
-    shift
-done
-case "\$op" in
-    truename) t=\$(awk -v p="\$path" '\$1 == p { print \$2 }' "\$list")
-              echo "\${t:-\$path}" ;;
-    add)      grep -q "^\$path " "\$list" && exit 0
-              [ -e "\$path" ] && mv "\$path" "\$to"
-              echo "\$path \$to" >> "\$list" ;;
-    remove)   t=\$(awk -v p="\$path" '\$1 == p { print \$2 }' "\$list")
-              [ -n "\$t" ] || exit 0
-              [ -e "\$path" ] && { echo "would overwrite \$path" >&2; exit 1; }
-              [ -e "\$t" ] && mv "\$t" "\$path"
-              grep -v "^\$path " "\$list" > "\$list.new"; mv "\$list.new" "\$list" ;;
-esac
-STUB
-chmod +x "$BIN/dpkg-divert"
+make_divert_stub "$BIN/dpkg-divert" "$LIST"
 
 PLUGIN="$WORK/plugins/mtkbinderpluginext.so"
 BUILD="$WORK/build"

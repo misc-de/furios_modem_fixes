@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
 // SPDX-License-Identifier: MIT
 //
-// An ofono2mm update overwrites the patched files. Without this the phone
-// keeps running the old code out of memory while the disk already holds the
-// unpatched version, and only the next boot makes the difference visible -
-// which is very hard to explain to yourself later.
+// An ofono2mm update writes its new files to the .distrib our diversions
+// keep (before 6.10.2026: over the patched files themselves). Without this
+// our copies stay made from the old version next to the package's new files,
+// and only the next boot puts that right - which is very hard to explain to
+// yourself later.
 //
 // It must be DPkg::Post-Invoke. DPkg::Post-Invoke-Success parses without
 // complaint, shows up in "apt-config dump", and is never run: only

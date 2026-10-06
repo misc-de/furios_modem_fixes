@@ -8,6 +8,26 @@ cd "$(dirname "$0")"
 # Revert first - afterwards modemctl and the patches are gone and the ofono2mm
 # files would stay patched with nothing left to undo them.
 sudo /usr/local/bin/modemctl revert || true
+# The ofono2mm files are diverted (the shipped ones wait as .distrib). revert
+# takes the diversions away; one it could not - a modemctl that failed, or is
+# already gone - would leave our copy in ofono2mm's place with nothing left
+# that knows it is ours, and dpkg looking at the .distrib for ever. So once
+# more, by name, the way modemctl does it: ours aside, diversion off with the
+# shipped file back, ours back only if dpkg-divert refused.
+for f in /usr/lib/ofono2mm/main.py /usr/lib/ofono2mm/ofono2mm/utils.py \
+         /usr/lib/ofono2mm/ofono2mm/mm_bearer.py /usr/lib/ofono2mm/ofono2mm/mm_modem.py \
+         /usr/lib/ofono2mm/ofono2mm/mm_modem_simple.py \
+         /usr/lib/ofono2mm/ofono2mm/mm_modem_signal.py; do
+    [ "$(dpkg-divert --truename "$f" 2>/dev/null)" = "$f.distrib" ] || continue
+    [ -e "$f" ] && sudo mv -f "$f" "$f.furios-revert"
+    if sudo dpkg-divert --local --rename --divert "$f.distrib" --remove "$f" >/dev/null; then
+        sudo rm -f "$f.furios-revert"
+        echo "  ok    $f: shipped file back"
+    else
+        [ -e "$f.furios-revert" ] && sudo mv -f "$f.furios-revert" "$f"
+        echo "  warn  $f: still diverted - shipped file is $f.distrib" >&2
+    fi
+done
 # oFono back on slot 1, from the next boot on: restarting oFono by hand
 # leaves the modem offline.
 sudo /usr/local/bin/modemctl sim 1 --no-restart || true

@@ -35,6 +35,10 @@ for f in utils mm_bearer mm_modem mm_modem_simple mm_modem_signal main; do
     [ "$f" = main ] && on_disk="$TARGET/../main.py" || on_disk="$TARGET/$f.py"
     old_copy="$SHARE/patched-files/$f.py"
     [ -f "$old_copy" ] && [ -f "$on_disk" ] || continue
+    # Diverted (6.10.2026 on): the shipped file is the .distrib, and apply
+    # makes our copy again from it whenever the patch changed. Nothing to
+    # take out by hand - and a reverse patch here would only edit our copy.
+    [ "$(dpkg-divert --truename "$on_disk" 2>/dev/null)" = "$on_disk.distrib" ] && continue
     # Only a file that is byte for byte what we installed last time, and is
     # not already what we are about to install.
     cmp -s "$old_copy" "$on_disk" || continue

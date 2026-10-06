@@ -23,7 +23,16 @@ TimeoutStartSec=60
 # anyway. Restarting them from inside a unit they are ordered against is how
 # you build a deadlock, and we have built that one before.
 ExecStart=/usr/bin/modemctl boot --quiet --no-restart
-# A modem that cannot be fixed must not keep the boot from finishing.
+# A modem that cannot be fixed must not keep the boot from finishing - and
+# it does not, whatever this exits with: nothing Requires this unit, oFono and
+# ModemManager are only ordered after it, and multi-user.target only Wants it.
+# So the exit status decides one thing, whether "systemctl --failed" lists it.
+# 1 is the everyday "something could not be done" (no SIM to ask, a bus that
+# did not reload) and stays quiet. 5 is a patch that no longer fits the
+# shipped ofono2mm: the repairs are out until somebody updates this package,
+# no boot will change that, and it used to hide behind 1 - the phone ran
+# without its repairs and every unit looked healthy. Not listed here, so the
+# unit fails and says so; modemctl has already put the shipped file back.
 SuccessExitStatus=0 1
 
 [Install]
