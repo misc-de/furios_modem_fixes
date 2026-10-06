@@ -306,7 +306,9 @@ need_write() {
 # sits one level up, next to it, so ask rather than assume.
 file_path() {
     case "$1" in
-        main) echo "$TARGET/../main.py" ;;
+        # Spelled without "..": dpkg-divert compares paths as strings, and a
+        # diversion of ofono2mm/../main.py never applied to main.py.
+        main) echo "${TARGET%/*}/main.py" ;;
         *)    echo "$TARGET/$1.py" ;;
     esac
 }
@@ -351,6 +353,18 @@ patch_to() {
 
 ofono2mm_diverted() {
     [ "$($DIVERT --truename "$1" 2>/dev/null)" = "$1.distrib" ]
+}
+
+# 6.10.: main.py was diverted as "<module>/../main.py". dpkg matches
+# diversions by the literal name, so the package's main.py was not diverted
+# at all and an update would have written over ours. Same files on disk, so
+# only the record changes: the odd name off, the plain one on, no --rename.
+ofono2mm_fix_divert_names() {
+    local odd="$TARGET/../main.py" path
+    path=$(file_path main)
+    [ "$($DIVERT --truename "$odd" 2>/dev/null)" = "$odd.distrib" ] || return 0
+    $DIVERT --local --remove "$odd" >/dev/null 2>&1 || return 1
+    $DIVERT --local --divert "$path.distrib" --add "$path" >/dev/null 2>&1
 }
 
 # --- patch state ------------------------------------------------------------
@@ -1550,6 +1564,7 @@ cmd_apply() {
     need_write apply
     local ts restarted_at changed=0 touched=0 failed=0 stale=0
     ts=$(date +%Y%m%d-%H%M%S)
+    ofono2mm_fix_divert_names || warn "main.py diversion could not be renamed"
 
     head_ "ofono2mm"
     for f in $FILES; do
@@ -1909,6 +1924,7 @@ resolv_backup() {
 cmd_revert() {
     need_write revert
     local restarted_at failed=0
+    ofono2mm_fix_divert_names || warn "main.py diversion could not be renamed"
     head_ "ofono2mm"
     local path
     for f in $FILES; do

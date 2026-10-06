@@ -153,7 +153,7 @@ export MODEMCTL_DPKG_INFO="$DPKGINFO"
 # lays it out; modemctl knows that and so must the tree we hand it.
 tree_path() {
     case "$1" in
-        main) echo "$TREE/../main.py" ;;
+        main) echo "${TREE%/*}/main.py" ;;
         *)    echo "$TREE/$1.py" ;;
     esac
 }
@@ -342,6 +342,20 @@ for f in $FILES; do
 done
 check "apply leaves no backups beside them" 0 \
       "$(find "$WORK/usr" -name '*.bak.*' | wc -l)"
+# dpkg-divert matches by the literal name: a diversion spelled with ".."
+# never applies to the file dpkg owns. Every name in the list must be one a
+# package could ship - no "/../" anywhere.
+check "no diversion is spelled with .." 0 "$(grep -c '/\.\./' "$DIVLIST")"
+# The phone got main.py diverted as <module>/../main.py on 6.10.; apply
+# re-records it under the plain name and leaves both files as they are.
+main_plain=$(tree_path main)
+main_ours=$(md5sum < "$main_plain")
+sed -i "s#^$main_plain $main_plain.distrib\$#$TREE/../main.py $TREE/../main.py.distrib#" "$DIVLIST"
+MODEMCTL_TARGET="$TREE" MODEMCTL_RADIO_CONF="$RADIO" "$MODEMCTL" apply --no-restart >/dev/null 2>&1
+check "apply renames a main.py diversion spelled with .." yes \
+      "$(grep -qx "$main_plain $main_plain.distrib" "$DIVLIST" \
+         && ! grep -q '/\.\./' "$DIVLIST" && echo yes || echo no)"
+check "and leaves our main.py in place" "$main_ours" "$(md5sum < "$main_plain")"
 
 # Running it again must be a no-op, because a boot unit and an apt hook do
 # exactly that on every boot and every package operation.

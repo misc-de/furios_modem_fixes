@@ -85,8 +85,9 @@ make_recording_stub() {
 }
 
 # A dpkg-divert that keeps its list in a file, for --truename and for
-# --add/--remove with --rename, the way modemctl calls it. Like the real one,
-# --remove --rename refuses to move the .distrib over a file that is there.
+# --add/--remove, the way modemctl calls it. Like the real one, files move
+# only with --rename, and --remove --rename refuses to move the .distrib over
+# a file that is there.
 # Nothing here may touch the dpkg database of the machine running the tests.
 make_divert_stub() {
     # make_divert_stub <path of the stub> <list file>
@@ -94,14 +95,15 @@ make_divert_stub() {
     : > "$list"
     cat > "$stub" <<STUB
 #!/bin/bash
-list="$list"; op=; to=; path=
+list="$list"; op=; to=; path=; rename=0
 while [ \$# -gt 0 ]; do
     case "\$1" in
         --truename) op=truename ;;
         --add) op=add ;;
         --remove) op=remove ;;
         --divert) to=\$2; shift ;;
-        --local|--rename) ;;
+        --rename) rename=1 ;;
+        --local) ;;
         *) path=\$1 ;;
     esac
     shift
@@ -110,12 +112,14 @@ case "\$op" in
     truename) t=\$(awk -v p="\$path" '\$1 == p { print \$2 }' "\$list")
               echo "\${t:-\$path}" ;;
     add)      grep -q "^\$path " "\$list" && exit 0
-              [ -e "\$path" ] && mv "\$path" "\$to"
+              [ "\$rename" = 1 ] && [ -e "\$path" ] && mv "\$path" "\$to"
               echo "\$path \$to" >> "\$list" ;;
     remove)   t=\$(awk -v p="\$path" '\$1 == p { print \$2 }' "\$list")
               [ -n "\$t" ] || exit 0
-              [ -e "\$path" ] && { echo "would overwrite \$path" >&2; exit 1; }
-              [ -e "\$t" ] && mv "\$t" "\$path"
+              if [ "\$rename" = 1 ]; then
+                  [ -e "\$path" ] && { echo "would overwrite \$path" >&2; exit 1; }
+                  [ -e "\$t" ] && mv "\$t" "\$path"
+              fi
               grep -v "^\$path " "\$list" > "\$list.new"; mv "\$list.new" "\$list" ;;
 esac
 STUB
