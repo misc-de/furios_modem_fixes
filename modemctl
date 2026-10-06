@@ -2847,6 +2847,29 @@ USAGE
 
 CMD=${1:-status}
 shift 2>/dev/null || true
+
+# Behind pkexec, only what the app's switches send. The polkit action lets the
+# person at the phone run this as root without a password, and the action can
+# name a binary but not its arguments - so without this, "pkexec modemctl
+# revert", "mtk-build --force" or any future verb would be a password-less
+# root tool. The list is exactly the app's calls: set/try with a profile, sim
+# with a slot, nr on/off, each with one argument and no options (--force on
+# sim would switch to an empty slot). Anything else is for sudo, which asks.
+if [ -n "${PKEXEC_UID:-}" ]; then
+    allowed=""
+    if [ $# -eq 1 ]; then
+        case "$CMD:$1" in
+            set:fixed|set:shipped|try:fixed|try:shipped) allowed=1 ;;
+            sim:[1-9])                                   allowed=1 ;;
+            nr:on|nr:off)                                allowed=1 ;;
+        esac
+    fi
+    if [ -z "$allowed" ]; then
+        echo "refusing \"modemctl $CMD${*:+ $*}\" through pkexec - only set|try fixed|shipped, sim <slot> and nr on|off go without a password; use sudo for the rest" >&2
+        exit 4
+    fi
+fi
+
 for a in "$@"; do
     case "$a" in
         -q|--quiet)     QUIET=1 ;;

@@ -28,9 +28,13 @@
      wide margin.
 
      What keeps it from being a general-purpose root tool is in modemctl
-     itself: as root it refuses every MODEMCTL_* override outright, so this
-     cannot be pointed at an arbitrary file. That guard was written for the
-     "sudo modemctl" case and covers this one unchanged.
+     itself, because polkit can name the binary but not its arguments. When
+     PKEXEC_UID is set, modemctl accepts only what the app's switches send -
+     "set|try fixed|shipped", "sim <slot>", "nr on|off", one argument, no
+     options - and refuses everything else (revert, mtk-build, a forced SIM
+     switch ...) with exit 4; those stay with sudo, which asks. And as root it refuses
+     every MODEMCTL_* override outright, so none of this can be pointed at an
+     arbitrary file.
 
      Not allow_any and not allow_inactive: a remote session or a switched-away
      seat has no business changing what the modem is doing. -->

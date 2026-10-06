@@ -1408,4 +1408,57 @@ sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-dns" bash "$ROOT/modemctl" apply --q
 check "apply does not back up our own link" 0 "$(ls -1d "$RC".bak.* 2>/dev/null | wc -l)"
 sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-dns" bash "$ROOT/modemctl" revert --quiet >/dev/null 2>&1
 
+# --- behind pkexec, only the app's switches ----------------------------------
+#
+# The polkit action runs modemctl as root with no password for the person at
+# the phone, and it can only name the binary, not the arguments. Until
+# 6.10.2026 that made every verb password-less: "pkexec modemctl revert",
+# "mtk-build --force", "sim 2 --force". pkexec sets PKEXEC_UID, so that is
+# what modemctl looks at. None of this needs root: the guard decides before
+# anything is touched.
+pk_refused() {
+    # pk_refused <args...>: "yes" when modemctl turned the call away at the door
+    local out rc
+    out=$(PKEXEC_UID=1000 bash "$ROOT/modemctl" "$@" 2>&1); rc=$?
+    if [ "$rc" = 4 ] && printf '%s' "$out" | grep -q 'through pkexec'; then
+        echo yes
+    else
+        echo no
+    fi
+}
+for argv in "revert" "apply" "status" "boot" "adopt" "settle" "mtk-build" \
+            "mtk-build --force" "sim" "sim 2 --force" "sim --force 2" "sim 0" \
+            "sim x" "nr" "nr maybe" "nr on --no-restart" "set" "set bogus" \
+            "set fixed --restart" "try shipped extra" "set fixed shipped" \
+            "profile" "help" "version" "nr-boot" "sim-check"; do
+    # shellcheck disable=SC2086
+    check "pkexec refuses: modemctl $argv" yes "$(pk_refused $argv)"
+done
+# An empty PKEXEC_UID is no pkexec at all; the guard must not fire on it.
+check "an empty PKEXEC_UID is not pkexec" no \
+      "$(PKEXEC_UID= bash "$ROOT/modemctl" help >/dev/null 2>&1; [ $? = 4 ] && echo yes || echo no)"
+
+# The app's own calls go through. Pointed at directories nobody can write, they
+# fail further in - which shows they got past the door without changing anything.
+NOWRITE=/proc/modemctl-test-nowhere
+for argv in "set fixed" "set shipped" "try fixed" "try shipped" \
+            "sim 1" "sim 2" "nr on" "nr off"; do
+    # shellcheck disable=SC2086
+    check "pkexec lets through: modemctl $argv" no \
+          "$(MODEMCTL_TARGET="$NOWRITE/ofono2mm" MODEMCTL_PROFILE="$NOWRITE/profile" \
+             MODEMCTL_SIM_DROPIN="$NOWRITE/sim.conf" MODEMCTL_NR="$NOWRITE/nr" \
+             MODEMCTL_SHARE="$ROOT" pk_refused $argv)"
+done
+# And one all the way: on a phone already in "fixed", "set fixed" through
+# pkexec records the choice and changes nothing else, so nothing restarts.
+reset_tree original 1.4
+mkdir -p "$WORK/sysd-pk"
+sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-pk" bash "$ROOT/modemctl" apply --quiet --no-restart >/dev/null 2>&1
+rm -f "$PROFILEF"
+check "pkexec set fixed runs to the end" 0 \
+      "$(sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-pk" PKEXEC_UID=1000 \
+         bash "$ROOT/modemctl" set fixed >/dev/null 2>&1; echo $?)"
+check "and records the profile" fixed "$(cat "$PROFILEF" 2>/dev/null)"
+sandbox MODEMCTL_SYSTEMD_CONF_D="$WORK/sysd-pk" bash "$ROOT/modemctl" revert --quiet --no-restart >/dev/null 2>&1
+
 summary
