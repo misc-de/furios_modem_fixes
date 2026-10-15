@@ -288,7 +288,15 @@ context_up() {
     CTX_IFACE=$(printf '%s\n' "$props" | setting Interface)
     CTX_ADDR=$(printf '%s\n' "$props" | setting Address)
     [ -n "$CTX_IFACE" ] || return 1
-    ip -4 -o addr show dev "$CTX_IFACE" scope global 2>/dev/null | grep -q .
+    # oFono's own address, not just any. NetworkManager leaves its copy of an
+    # earlier call's address on the interface when it is not told the call
+    # went, and "some address" would read that leftover as a call that is up.
+    local have
+    have=$(ip -4 -o addr show dev "$CTX_IFACE" scope global 2>/dev/null \
+           | sed -n 's,.* inet \([0-9.]*\)/.*,\1,p')
+    [ -n "$have" ] || return 1
+    [ -n "$CTX_ADDR" ] || return 0
+    printf '%s\n' "$have" | grep -qFx "$CTX_ADDR"
 }
 
 # --- the other half: NetworkManager -----------------------------------------
@@ -388,10 +396,14 @@ nm_activate() {
 # on a different channel, and the address changes on every rebuild even when
 # the interface does not.
 #
-# The address is matched against the whole list NetworkManager reports, not
-# just the first entry: this phone routinely ends up with the same address
-# twice, once /24 and once /8, and either of them is NetworkManager being on
-# the right data call.
+# The address list nmcli reports is not NetworkManager's configuration but
+# everything the kernel has on the interface - NetworkManager's /24 AND the
+# /8 oFono wrote itself. So the question is not whether oFono's address is in
+# the list (it always is, oFono put it there) but whether anything else is.
+# On 15 October oFono rebuilt the call twice on the same ccmni0 with a new
+# address; NetworkManager kept the old /24 next to it, the old "is it in the
+# list" check found oFono's /8 and agreed, and both times mobile data stayed
+# dead until it was switched off and on by hand.
 # What NetworkManager was last seen holding, for the log line. A repair that
 # tears the data call down has to say what it saw that made it do so; without
 # the two sides side by side in the journal there is no way to tell this
@@ -415,7 +427,7 @@ nm_carrying_context() {
             | sed -n 's/^IP4\.ADDRESS\[[0-9]*\]://p' | sed 's,/.*,,')
     [ -n "$addrs" ] || return 0
     NM_IFACE_SEEN="$iface $(printf '%s' "$addrs" | tr '\n' ' ')"
-    printf '%s\n' "$addrs" | grep -qx "$CTX_ADDR"
+    ! printf '%s\n' "$addrs" | grep -qvFx "$CTX_ADDR"
 }
 
 # The switch, in software. Down and up on the profile NetworkManager itself

@@ -113,10 +113,21 @@ exit 0
 STUB
 chmod +x "$STUBDIR/dbus-send"
 
+# The kernel's view, and the one both other stubs answer from. Two owners put
+# addresses on a data interface on this phone: oFono writes the data call's
+# address as /8 when it brings the call up, NetworkManager adds its own copy
+# as /24 when it configures the device. Healthy, the two are the same address.
+# After oFono rebuilt the call on the same interface behind NetworkManager's
+# back, they are not - and NetworkManager's old /24 is the one still there.
 cat > "$STUBDIR/ip" <<'STUB'
 #!/bin/sh
 . "$(dirname "$0")/scenario"
-[ "$HAS_ADDR" = yes ] && echo "2: ccmni0    inet 10.13.195.47/24 scope global ccmni0"
+dev=; prev=
+for a in "$@"; do [ "$prev" = dev ] && dev=$a; prev=$a; done
+[ "$HAS_ADDR" = yes ] && { [ -z "$dev" ] || [ "$dev" = ccmni0 ]; } && \
+    echo "2: ccmni0    inet 10.13.195.47/8 scope global ccmni0"
+[ -n "$NM_ADDR" ] && [ -n "$NM_IFACE" ] && { [ -z "$dev" ] || [ "$dev" = "$NM_IFACE" ]; } && \
+    echo "2: $NM_IFACE    inet ${NM_ADDR%%/*}/24 scope global noprefixroute $NM_IFACE"
 exit 0
 STUB
 chmod +x "$STUBDIR/ip"
@@ -135,12 +146,16 @@ case "$*" in
   *"GENERAL.IP-IFACE device show"*)
                        echo "GENERAL.IP-IFACE:$NM_IFACE" ;;
   *"IP4.ADDRESS device show"*)
-                       # Two entries for one address, /24 and /8, the way this
-                       # phone really reports it.
-                       [ -n "$NM_ADDR" ] && {
-                           echo "IP4.ADDRESS[1]:$NM_ADDR"
-                           echo "IP4.ADDRESS[2]:${NM_ADDR%%/*}/8"
-                       } ;;
+                       # Not NetworkManager's own configuration: nmcli lists
+                       # every address the kernel has on the interface,
+                       # oFono's /8 included. Measured on the phone - the /8
+                       # is the one oFono wrote, not a second copy of ours.
+                       # An earlier stub made the /8 out of NM_ADDR, and with
+                       # it every stale test passed against a check that the
+                       # field could never fail (15 October, twice).
+                       [ -n "$NM_ADDR" ] && [ -n "$NM_IFACE" ] && \
+                           "$(dirname "$0")/ip" -4 -o addr show dev "$NM_IFACE" scope global \
+                           | awk '{print $4}' | nl -w1 -s: | sed 's/^/IP4.ADDRESS[/; s/:/]:/' ;;
   *"GENERAL.CON-UUID device show"*)
                        echo "GENERAL.CON-UUID:fb960ee6-5f21-49ef-a766-97ddfa306b6a" ;;
   *"connection show"*) [ "$NM_PROFILE" = yes ] && echo "gsm:yes" ;;
@@ -228,8 +243,17 @@ check "context up with an address - left alone" 0 "$(acted)"
 # gone, and the interface has no address. Believing Active would mean sitting
 # out exactly the outage this exists for.
 scenario true true registered true no no
+nm_holds "" ""
 run_tool
 check "Active=true without an address is still down" 1 "$(activated)"
+
+# Not quite empty: oFono's address is gone, but NetworkManager's copy of it
+# from an earlier call is still on the interface. Any address is not the
+# question - oFono's is.
+scenario true true registered true no no
+nm_holds ccmni0 10.8.156.6/24
+run_tool
+check "only a leftover address from an earlier call is still down" 1 "$(activated)"
 
 printf '\n\033[1m== when it should act\033[0m\n'
 
